@@ -114,14 +114,14 @@ void AttackUAV::onMessage(const Message& m) {
         break;
     }
     case Message::Type::FlightPlan: {
-        m_waypoints.clear();
+        m_waypoints.clear(); setHasActiveWaypoints(true);
         for (auto v : m.payload.value("waypoints").toArray()) {
             auto o = v.toObject();
             m_waypoints.append(QVariant::fromValue(QPointF(o.value("x").toDouble(), o.value("y").toDouble())));
         }
         m_wpIdx = 0;
         if (!m_targetId.isEmpty()) {
-            m_armed = true; // 进入攻击航线即武装
+            m_armed = true;
             emit armedChanged();
             setStatus(QStringLiteral("接收航路，前往目标 %1").arg(m_targetId));
         } else {
@@ -131,7 +131,7 @@ void AttackUAV::onMessage(const Message& m) {
     }
     case Message::Type::Guidance: {
         if (m.payload.value("kind").toString() == "moveTo") {
-            m_waypoints.clear();
+            m_waypoints.clear(); setHasActiveWaypoints(true);
             m_waypoints.append(QVariant::fromValue(QPointF(m.payload.value("x").toDouble(), m.payload.value("y").toDouble())));
             m_wpIdx = 0;
             setStatus("机动到指定点");
