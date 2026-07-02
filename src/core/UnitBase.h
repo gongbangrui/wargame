@@ -114,6 +114,8 @@ public:
     void setHp(double v) { if (m_hp != v) { m_hp = v; emit hpChanged(); } }
 
     void handleMessage(const Message& m);
+    bool hasActiveWaypoints() const { return m_hasActiveWaypoints; }
+    void setHasActiveWaypoints(bool v) { m_hasActiveWaypoints = v; }
 
     bool canDetect(const GeoPos& pos) const;
     GeoPos pos() const { return m_params.pos; }
@@ -154,6 +156,7 @@ protected:
     QJsonObject m_sharedKnowledge;
     MessageBus* m_bus = nullptr;
     std::vector<SchedulePoint> m_schedule;
+    bool m_hasActiveWaypoints = false;
 };
 
 } // namespace gbr

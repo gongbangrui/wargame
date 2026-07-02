@@ -38,8 +38,8 @@ void ReconUAV::onMessage(const Message& m) {
         clearPatrol();
     } else if (m.type == Message::Type::Guidance) {
         if (m.payload.value("kind").toString() == "moveTo") {
-            m_patrol.clear();
-            m_patrol.append(QVariant::fromValue(QPointF(m.payload.value("x").toDouble(), m.payload.value("y").toDouble())));
+            m_patrol.clear(); setHasActiveWaypoints(true);
+        m_patrol.append(QVariant::fromValue(QPointF(m.payload.value("x").toDouble(), m.payload.value("y").toDouble())));
             m_patrolIdx = 0;
             setStatus("机动到指定点");
         }

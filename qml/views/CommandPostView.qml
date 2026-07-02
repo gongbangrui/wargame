@@ -54,6 +54,14 @@ Item {
         interval: 1000; running: controller.running; repeat: true
         onTriggered: { if (root.checkCommandPostAlive()) stop() }
     }
+    Timer {
+        id: rangeCheckTimer
+        interval: 500; running: controller.running; repeat: true
+        onTriggered: {
+            root.canAttack = root.hasTargetInAttackRange()
+            root.canGuide = root.hasTargetInDetectShared()
+        }
+    }
 
     function autoFitZoom() {
         var units = controller.unitOptions("", root.side)
@@ -305,7 +313,8 @@ Item {
 
                 Rectangle {
                     Layout.fillWidth: true; Layout.preferredHeight: 200
-                    color: theme.panelAlt; border.color: theme.border; radius: 6
+                    color: theme.panelAlt; border.color: root.canAttack ? theme.danger : (root.canGuide ? theme.warning : theme.border); radius: 6
+                    Behavior on border.color { ColorAnimation { duration: 200 } }
                     UnitPanel { anchors.fill: parent; anchors.margins: 12; snap: root.snap }
                 }
 

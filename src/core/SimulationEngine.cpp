@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QJsonArray>
 #include <algorithm>
+#include <QMutexLocker>
 #include <cmath>
 
 namespace gbr {
@@ -157,6 +158,7 @@ void SimulationEngine::applySchedules(double simTime) {
     for (auto& [id, u] : m_units) {
         if (!u->movable()) continue;
         if (!u->alive()) continue;
+        if (u->hasActiveWaypoints()) continue; // skip units receiving direct commands
         const auto& sched = u->schedule();
         if (sched.empty()) continue;
 

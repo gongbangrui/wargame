@@ -39,7 +39,7 @@ void GroundScout::stepMotion(double dt) {
 void GroundScout::onMessage(const Message& m) {
     if (m.type == Message::Type::Guidance) {
         if (m.payload.value("kind").toString() == "moveTo") {
-            m_route.clear();
+            m_route.clear(); setHasActiveWaypoints(true);
             m_route.append(QVariant::fromValue(QPointF(m.payload.value("x").toDouble(), m.payload.value("y").toDouble())));
             m_routeIdx = 0;
             setStatus("机动中");
