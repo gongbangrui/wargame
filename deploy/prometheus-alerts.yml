@@ -1,0 +1,31 @@
+groups:
+  - name: wargame-server
+    rules:
+      - alert: WargameHealthCheckFailed
+        expr: probe_success{job="wargame-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "兵器推演服务健康检查失败"
+      - alert: WargameCheckpointFailures
+        expr: increase(wargame_checkpoint_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "兵器推演检查点写入失败"
+      - alert: WargameTickLatencyHigh
+        expr: wargame_last_tick_duration_ms > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "兵器推演 tick 耗时超过 50ms"
+      - alert: WargameAuthFailuresSpike
+        expr: increase(wargame_auth_failures_total[5m]) > 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "兵器推演认证失败激增"

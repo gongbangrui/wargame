@@ -1,0 +1,21 @@
+{$WARGAME_PUBLIC_HOST:localhost} {
+    encode zstd gzip
+
+    handle /ws* {
+        reverse_proxy server:8080
+    }
+
+    handle /healthz {
+        reverse_proxy server:9090
+    }
+
+    handle /metrics {
+        reverse_proxy server:9090
+    }
+
+    handle /admin* {
+        reverse_proxy server:9091
+    }
+
+    respond 404
+}

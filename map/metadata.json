@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "mapId": "coastal-mountain-theater-v1",
+  "name": "海岸山地联合作战区",
+  "description": "为兵器推演 Qt 项目原创生成的虚构卫星地图",
+  "source": {
+    "type": "AI-generated original fictional raster",
+    "master": "source/mission-area.png",
+    "prompt": "prompt.txt",
+    "sha256": "7bb2968ad7a45338c16eda0b42f4354f1207da8a7c8c6aa5fcfee1d428a19a03"
+  },
+  "projection": "EPSG:3857",
+  "scheme": "xyz",
+  "tileSize": 256,
+  "format": "png",
+  "minZoom": 12,
+  "maxZoom": 12,
+  "tileRange": {
+    "xMin": 3404,
+    "xMax": 3409,
+    "yMin": 1745,
+    "yMax": 1750,
+    "count": 36
+  },
+  "tileSetSha256": "6ba117b23154ace4e94aa997c19b86e0b9156a34a8367e9d0a6641f3e9e8b881",
+  "boundsWgs84": [
+    119.1796875,
+    25.244695951306028,
+    119.70703125,
+    25.72073513441211
+  ],
+  "projectAlignment": {
+    "originLat": 25.4,
+    "originLon": 119.3,
+    "logicalWidthMeters": 20000,
+    "logicalHeightMeters": 15000,
+    "logicalXAxis": "east",
+    "logicalYAxis": "north"
+  },
+  "content": [
+    "山脉与岩壁",
+    "森林与灌木",
+    "河流与支流",
+    "水库与大坝",
+    "湿地与滩涂",
+    "沙滩与岩岸",
+    "岛礁",
+    "梯田与农田",
+    "村镇与工业区",
+    "公路、铁路、桥梁与隧道",
+    "港口、采石场与小型机场"
+  ]
+}

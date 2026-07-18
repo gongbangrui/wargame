@@ -1,0 +1,35 @@
+{
+  "listenAddress": "127.0.0.1",
+  "port": 8080,
+  "healthAddress": "127.0.0.1",
+  "healthPort": 9090,
+  "adminAddress": "127.0.0.1",
+  "adminPort": 9091,
+  "databasePath": "data/wargame.sqlite3",
+  "scenarioPath": "",
+  "roomId": "main",
+  "snapshotIntervalMs": 100,
+  "checkpointIntervalMs": 10000,
+  "maxConnections": 32,
+  "maxPacketBytes": 262144,
+  "maxSendQueueBytes": 1048576,
+  "commandRatePerSecond": 20,
+  "commandBurst": 40,
+  "allowPublicListen": false,
+  "tokens": [
+    {
+      "tokenHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "userId": "red-player",
+      "role": "red",
+      "side": "red",
+      "roomId": "main",
+      "expiresAt": "2027-12-31T23:59:59Z"
+    }
+  ],
+  "accounts": [],
+  "admin": {
+    "username": "admin",
+    "salt": "替换为 hash-password-stdin 输出的 salt",
+    "passwordHash": "替换为 hash-password-stdin 输出的 passwordHash"
+  }
+}

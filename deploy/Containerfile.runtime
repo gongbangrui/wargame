@@ -1,0 +1,7 @@
+FROM scratch
+COPY runtime-root/ /
+WORKDIR /app
+USER 10001:10001
+ENV LD_LIBRARY_PATH=/usr/lib:/lib
+ENV QT_PLUGIN_PATH=/plugins
+ENTRYPOINT ["/app/bin/wargame_server"]

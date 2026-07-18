@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.0'
+          modules: 'qtwebsockets'
+          cache: true
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+      - run: cmake --build build --target all_qmllint
+      - run: git diff --check
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.0'
+          modules: 'qtwebsockets'
+          cache: true
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: >-
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'
+          -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
+      - run: cmake --build build-asan --parallel
+      - run: ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan --output-on-failure
+
+  container:
+    runs-on: ubuntu-24.04
+    needs: [test, sanitizers]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Containerfile
+          push: false
+          tags: wargame-server:ci
+          build-args: |
+            PIP_INDEX_URL=https://pypi.org/simple
+            QT_MIRROR=https://download.qt.io/
+            QT_DOWNLOAD_TIMEOUT=300

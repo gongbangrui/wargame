@@ -1,0 +1,51 @@
+ARG QT_VERSION=6.10.0
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG QT_MIRROR=https://mirrors.aliyun.com/qt/
+ARG QT_DOWNLOAD_TIMEOUT=300
+
+FROM ubuntu:24.04 AS builder
+ARG QT_VERSION
+ARG PIP_INDEX_URL
+ARG QT_MIRROR
+ARG QT_DOWNLOAD_TIMEOUT
+ENV DEBIAN_FRONTEND=noninteractive
+RUN sed -i -e 's#http://archive.ubuntu.com/ubuntu/#http://mirrors.aliyun.com/ubuntu/#g' \
+           -e 's#http://security.ubuntu.com/ubuntu/#http://mirrors.aliyun.com/ubuntu/#g' \
+    /etc/apt/sources.list.d/ubuntu.sources && \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80wargame-network && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates cmake g++ git libgl1 libgl1-mesa-dev libglib2.0-dev libxkbcommon0 ninja-build \
+        python3 python3-pip python3-venv && \
+    python3 -m venv /opt/aqt && \
+    /opt/aqt/bin/pip install --no-cache-dir --retries 5 --timeout 60 --index-url "${PIP_INDEX_URL}" aqtinstall==3.3.0 && \
+    /opt/aqt/bin/aqt install-qt linux desktop "${QT_VERSION}" linux_gcc_64 \
+        -O /opt/Qt -b "${QT_MIRROR}" --timeout "${QT_DOWNLOAD_TIMEOUT}" -m qtwebsockets && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN cmake -S . -B build-server -G Ninja \
+        -DCMAKE_PREFIX_PATH="/opt/Qt/${QT_VERSION}/gcc_64" \
+        -DWARGAME_BUILD_CLIENT=OFF \
+        -DWARGAME_BUILD_TESTS=OFF \
+        -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build-server --target wargame_server --parallel
+
+FROM ubuntu:24.04 AS runtime
+ARG QT_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+RUN sed -i -e 's#http://archive.ubuntu.com/ubuntu/#http://mirrors.aliyun.com/ubuntu/#g' \
+           -e 's#http://security.ubuntu.com/ubuntu/#http://mirrors.aliyun.com/ubuntu/#g' \
+    /etc/apt/sources.list.d/ubuntu.sources && \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80wargame-network && \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates libgl1 libglib2.0-0 libxkbcommon0 libsqlite3-0 libgssapi-krb5-2 libbrotli1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd --system --uid 10001 --home /app --shell /usr/sbin/nologin wargame
+COPY --from=builder /opt/Qt/${QT_VERSION}/gcc_64/lib /opt/qt/lib
+COPY --from=builder /opt/Qt/${QT_VERSION}/gcc_64/plugins/sqldrivers /opt/qt/plugins/sqldrivers
+COPY --from=builder /src/build-server/wargame_server /app/bin/wargame_server
+ENV LD_LIBRARY_PATH=/opt/qt/lib
+ENV QT_PLUGIN_PATH=/opt/qt/plugins
+WORKDIR /app
+USER 10001:10001
+EXPOSE 8080 9090
+ENTRYPOINT ["/app/bin/wargame_server"]
