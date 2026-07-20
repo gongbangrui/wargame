@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>兵器推演账号中心</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main id="loginView" class="login-shell">
+    <section class="login-panel" aria-labelledby="loginTitle">
+      <div class="brand-mark">兵</div>
+      <p class="eyebrow">本地账号管理</p>
+      <h1 id="loginTitle">兵器推演账号中心</h1>
+      <p class="login-copy">管理导演席、编辑席与红蓝双方登录账号</p>
+      <form id="loginForm" class="stack">
+        <label>管理员用户名<input id="adminUsername" autocomplete="username" value="admin" required></label>
+        <label>管理员密码<input id="adminPassword" type="password" autocomplete="current-password" required></label>
+        <button class="primary" type="submit">登录管理平台</button>
+      </form>
+      <p id="loginError" class="form-error" role="alert"></p>
+      <p class="copyright">© 2026 Gbr · 兵器推演联网服务</p>
+    </section>
+  </main>
+
+  <div id="adminView" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand-row"><div class="brand-mark small">兵</div><div><strong>兵器推演</strong><span>账号控制台</span></div></div>
+      <nav>
+        <button class="nav-item active" data-page="users"><span class="nav-icon">账</span>兵棋账号</button>
+        <button class="nav-item" data-page="monitor"><span class="nav-icon">监</span>服务器监控</button>
+        <button class="nav-item" data-page="security"><span class="nav-icon">安</span>安全设置</button>
+      </nav>
+      <div class="sidebar-foot"><span id="adminIdentity">admin</span><button id="logoutButton" class="text-button">退出登录</button></div>
+    </aside>
+
+    <section class="workspace">
+      <header class="topline">
+        <div><p class="eyebrow">本地指挥服务</p><h2 id="pageTitle">兵棋账号</h2></div>
+        <div class="server-state"><span class="status-dot"></span>本地服务正常</div>
+      </header>
+
+      <section id="usersPage" class="page">
+        <div class="metric-strip">
+          <div><span>账号总数</span><strong id="totalCount">0</strong></div>
+          <div><span>已启用</span><strong id="enabledCount">0</strong></div>
+          <div><span>红方 / 蓝方</span><strong id="sideCount">0 / 0</strong></div>
+          <div><span>导演 / 编辑</span><strong id="staffCount">0 / 0</strong></div>
+        </div>
+        <div class="section-toolbar">
+          <div><h3>账号与席位</h3><p>角色决定联网客户端可见页面和服务端操作权限</p></div>
+          <button id="createButton" class="primary compact">+ 创建账号</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>账号</th><th>显示名称</th><th>席位分组</th><th>状态</th><th>更新时间</th><th class="actions">操作</th></tr></thead>
+            <tbody id="userRows"></tbody>
+          </table>
+          <div id="emptyState" class="empty hidden">暂无兵棋账号，请先创建账号。</div>
+        </div>
+      </section>
+
+      <section id="securityPage" class="page hidden">
+        <div class="security-layout">
+          <form id="passwordForm" class="settings-block">
+            <p class="eyebrow">管理员安全</p>
+            <h3>修改管理员密码</h3>
+            <p>修改后所有网页管理会话立即失效，需要使用新密码重新登录。</p>
+            <label>当前密码<input id="currentPassword" type="password" autocomplete="current-password" required></label>
+            <label>新密码<input id="newPassword" type="password" minlength="8" autocomplete="new-password" required></label>
+            <label>确认新密码<input id="confirmPassword" type="password" minlength="8" autocomplete="new-password" required></label>
+            <button class="primary" type="submit">更新管理员密码</button>
+          </form>
+          <div class="settings-block muted-block"><p class="eyebrow">本机恢复</p><h3>本机密码重置</h3><p>无法登录时，可在项目目录运行本机重置脚本。该操作只通过 Docker 容器访问本地数据卷，不开放远程重置接口。</p><code>./deploy/reset-admin.sh</code></div>
+        </div>
+      </section>
+
+      <section id="monitorPage" class="page hidden">
+        <div class="metric-strip monitor-metrics">
+          <div><span>账号服务</span><strong id="accountServiceState">--</strong></div>
+          <div><span>兵棋服务</span><strong id="gameServiceState">--</strong></div>
+          <div><span>已连接客户端</span><strong id="gameClientCount">0</strong></div>
+          <div><span>有效兵棋会话</span><strong id="playerSessionCount">0</strong></div>
+        </div>
+        <div class="section-toolbar">
+          <div><h3>服务运行态势</h3><p id="monitorUpdated">等待监控数据</p></div>
+          <div class="monitor-actions"><select id="monitorFilter"><option value="all">全部事件</option><option value="connection">连接日志</option><option value="message">消息流</option><option value="server">服务事件</option></select><button id="monitorRefresh" class="secondary compact">刷新</button></div>
+        </div>
+        <div class="monitor-layout">
+          <article class="monitor-card status-card"><p class="eyebrow">兵棋推演服务</p><h3 id="matchPhase">等待状态</h3><dl class="status-grid"><div><dt>推演时间</dt><dd id="simTime">--</dd></div><div><dt>场景版本</dt><dd id="scenarioRevision">--</dd></div><div><dt>红方就绪</dt><dd id="redReady">--</dd></div><div><dt>蓝方就绪</dt><dd id="blueReady">--</dd></div></dl></article>
+          <article class="monitor-card terminal-card"><div class="monitor-card-head"><div><p class="eyebrow">容器运维终端</p><h3>真实 Shell 会话</h3></div><div class="terminal-head-actions"><span id="terminalState" class="terminal-state">未登录</span><button id="terminalDisconnect" class="secondary compact hidden" type="button">断开</button></div></div><form id="terminalLoginForm" class="terminal-login"><input id="terminalPassword" type="password" autocomplete="current-password" placeholder="输入管理员密码后进入终端" required><button class="primary compact" type="submit">登录终端</button></form><pre id="terminalOutput" class="terminal-output" aria-live="polite">$ 等待管理员密码认证</pre><form id="terminalCommandForm" class="terminal-command locked"><span id="terminalPrompt" aria-hidden="true">$</span><input id="terminalCommand" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="完成终端认证后可输入 Shell 命令" disabled required><button id="terminalExecute" class="primary compact" type="submit" disabled>执行</button></form></article>
+        </div>
+        <article class="monitor-card event-card"><div class="monitor-card-head"><div><p class="eyebrow">实时审计</p><h3>连接日志与消息流</h3></div><span id="eventCount" class="event-count">0 条</span></div><div id="monitorEvents" class="event-list"><div class="empty">暂无服务器事件。</div></div></article>
+      </section>
+      <p class="workspace-copyright">© 2026 Gbr · 兵器推演联网服务</p>
+    </section>
+  </div>
+
+  <div id="userModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-card">
+      <div class="modal-head"><div><p class="eyebrow">账号资料</p><h3 id="modalTitle">创建账号</h3></div><button id="modalClose" class="icon-button" aria-label="关闭">x</button></div>
+      <form id="userForm" class="form-grid">
+        <input id="userId" type="hidden">
+        <label>用户名<input id="username" minlength="3" maxlength="64" pattern="[A-Za-z0-9_.-]+" autocomplete="off" required><span>仅支持字母、数字、点、横线和下划线</span></label>
+        <label>显示名称<input id="displayName" maxlength="64" required></label>
+        <label>席位分组<select id="role" required><option value="director">导演席</option><option value="editor">编辑席</option><option value="red">红方</option><option value="blue">蓝方</option></select></label>
+        <label>登录密码<input id="userPassword" type="password" minlength="8" autocomplete="new-password"><span id="passwordHint">至少 8 个字符</span></label>
+        <label class="toggle-line"><input id="enabled" type="checkbox" checked><span class="toggle-ui"></span><span>允许登录</span></label>
+        <div class="modal-actions"><button id="modalCancel" type="button" class="secondary">取消</button><button type="submit" class="primary">保存账号</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="confirmModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card confirm-card"><p class="eyebrow">操作确认</p><h3>删除兵棋账号</h3><p id="confirmText"></p><div class="modal-actions"><button id="confirmCancel" class="secondary">取消</button><button id="confirmDelete" class="danger">删除账号</button></div></div>
+  </div>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+services:
+  account-web:
+    build:
+      context: ..
+      dockerfile: deploy/account.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DATA_DIR: /data
+      SESSION_HOURS: "${SESSION_HOURS:-12}"
+      WEB_SHELL_ENABLED: "${WEB_SHELL_ENABLED:-true}"
+      WEB_SHELL_TICKET_SECONDS: "${WEB_SHELL_TICKET_SECONDS:-120}"
+      WEB_SHELL_SESSION_SECONDS: "${WEB_SHELL_SESSION_SECONDS:-900}"
+      WEB_SHELL_MAX_SESSIONS: "${WEB_SHELL_MAX_SESSIONS:-2}"
+    volumes:
+      - wargame-data:/data
+    ports:
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  game-server:
+    build:
+      context: ..
+      dockerfile: deploy/game-server.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      GAME_PORT: 8090
+      AUTH_SERVICE_URL: http://account-web:8080
+      SCENARIO_PATH: /data/scenario.json
+      CHECKPOINT_PATH: /data/room-checkpoint.json
+      COMMAND_LOG_PATH: /data/room-commands.jsonl
+      ADMIN_PASSWORD: ""
+    volumes:
+      - wargame-data:/data
+    ports:
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${WS_PORT:-8090}:8090"
+    depends_on:
+      account-web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8090"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+volumes:
+  wargame-data:
