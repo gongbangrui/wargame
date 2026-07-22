@@ -46,6 +46,10 @@ TEST(CheckpointTest, RestoresBehaviorAndAuthoritativeTime) {
     EXPECT_EQ(restoredAttacker->targetId(), QStringLiteral("blue_r1"));
     EXPECT_TRUE(restoredAttacker->armed());
     EXPECT_TRUE(restoredAttacker->hasActiveWaypoints());
+    EXPECT_EQ(restoredAttacker->ammoRemaining(), attacker->ammoRemaining());
+    EXPECT_DOUBLE_EQ(restoredAttacker->cooldownRemaining(), attacker->cooldownRemaining());
+    EXPECT_EQ(restoredAttacker->shotSequence(), attacker->shotSequence());
+    EXPECT_EQ(restored.combatSeed(), source.combatSeed());
 }
 
 TEST(CheckpointTest, RejectsCheckpointWithIncompleteUnitSet) {
@@ -56,4 +60,15 @@ TEST(CheckpointTest, RejectsCheckpointWithIncompleteUnitSet) {
     QString error;
     EXPECT_FALSE(engine.restoreCheckpointState(checkpoint, 0.0, false, 1.0, &error));
     EXPECT_TRUE(error.contains(QStringLiteral("单元集合")));
+}
+
+TEST(CheckpointTest, RejectsCheckpointWithoutEngineRandomState) {
+    SimulationEngine engine;
+    engine.loadDefaultScenario();
+    QJsonArray checkpoint = engine.collectCheckpointState();
+    checkpoint.removeFirst();
+    QString error;
+
+    EXPECT_FALSE(engine.restoreCheckpointState(checkpoint, 0.0, false, 1.0, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("引擎随机状态")));
 }

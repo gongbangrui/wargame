@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QSaveFile>
+#include <QStringList>
 
 #include <algorithm>
 #include <cmath>
@@ -66,11 +67,27 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
         != kCheckpointSchemaVersion) {
         return fail(QStringLiteral("检查点结构版本不兼容"));
     }
+    if (object.value(QStringLiteral("protocolVersion")).toInt() != Protocol::Version) {
+        return fail(QStringLiteral("检查点协议版本不兼容"));
+    }
+    if (!object.value(QStringLiteral("scenario")).isObject()
+        || !object.value(QStringLiteral("runInitialScenario")).isObject()
+        || !object.value(QStringLiteral("runtimeUnits")).isArray()
+        || !object.value(QStringLiteral("commandHistory")).isArray()
+        || !object.value(QStringLiteral("roomState")).isObject()) {
+        return fail(QStringLiteral("检查点必需字段类型无效"));
+    }
     const QJsonObject room = object.value(QStringLiteral("roomState")).toObject();
     const QString phase = room.value(QStringLiteral("phase")).toString();
     if (phase != QLatin1String("preparing") && phase != QLatin1String("running")
         && phase != QLatin1String("finished")) {
         return fail(QStringLiteral("检查点推演阶段无效"));
+    }
+    for (const QString& field : {QStringLiteral("redReady"), QStringLiteral("blueReady"),
+                                 QStringLiteral("running")}) {
+        if (!room.value(field).isBool()) {
+            return fail(QStringLiteral("检查点布尔状态无效: %1").arg(field));
+        }
     }
     const double simTime = room.value(QStringLiteral("simTime")).toDouble(-1.0);
     const double speed = room.value(QStringLiteral("speed")).toDouble(-1.0);
@@ -85,9 +102,14 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
     const Scenario scenario = ScenarioIo::fromJson(object.value(QStringLiteral("scenario")).toObject());
     if (scenario.units.empty()) return fail(QStringLiteral("检查点场景为空"));
 
-    checkpoint->scenario = scenario;
-    checkpoint->runInitialScenario = ScenarioIo::fromJson(
+    const Scenario runInitialScenario = ScenarioIo::fromJson(
         object.value(QStringLiteral("runInitialScenario")).toObject());
+    if (phase != QLatin1String("preparing") && runInitialScenario.units.empty()) {
+        return fail(QStringLiteral("检查点缺少开局场景"));
+    }
+
+    checkpoint->scenario = scenario;
+    checkpoint->runInitialScenario = runInitialScenario;
     checkpoint->runtimeUnits = object.value(QStringLiteral("runtimeUnits")).toArray();
     checkpoint->commandHistory = object.value(QStringLiteral("commandHistory")).toArray();
     checkpoint->phase = phase;
@@ -113,6 +135,10 @@ bool RoomPersistence::saveCheckpoint(const RoomCheckpoint& checkpoint, QString* 
     if (!ensureParentDirectory(m_checkpointPath, error)) return false;
     const QByteArray data = QJsonDocument(checkpointToJson(checkpoint))
                                 .toJson(QJsonDocument::Indented);
+    if (data.size() > kMaxCheckpointBytes) {
+        if (error) *error = QStringLiteral("检查点数据超过 64 MiB 限制");
+        return false;
+    }
     QSaveFile file(m_checkpointPath);
     file.setDirectWriteFallback(false);
     if (!file.open(QIODevice::WriteOnly)) {
@@ -201,35 +227,42 @@ bool RoomPersistence::appendEvent(quint64 sequence, const QString& kind,
 QJsonArray RoomPersistence::eventsAfter(quint64 sequence, QString* error) const {
     if (error) error->clear();
     QJsonArray events;
-    QFile file(m_eventLogPath);
-    if (!file.exists()) return events;
-    if (!file.open(QIODevice::ReadOnly)) {
-        if (error) *error = QStringLiteral("无法读取事件日志: %1").arg(m_eventLogPath);
-        return {};
-    }
     quint64 lastSequence = sequence;
-    qint64 lineNumber = 0;
-    while (!file.atEnd()) {
-        ++lineNumber;
-        const QByteArray line = file.readLine().trimmed();
-        if (line.isEmpty()) continue;
-        QJsonParseError parseError;
-        const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
-        const QJsonObject event = document.object();
-        const qint64 eventSequence = event.value(QStringLiteral("sequence")).toInteger();
-        if (!document.isObject() || event.value(QStringLiteral("eventSchemaVersion")).toInt() != 1
-            || eventSequence <= 0 || event.value(QStringLiteral("kind")).toString().isEmpty()
-            || !event.value(QStringLiteral("payload")).isObject()) {
-            if (error) *error = QStringLiteral("事件日志第 %1 行无效").arg(lineNumber);
+    const QStringList paths{m_eventLogPath + QStringLiteral(".1"), m_eventLogPath};
+    for (const QString& path : paths) {
+        QFile file(path);
+        if (!file.exists()) continue;
+        if (!file.open(QIODevice::ReadOnly)) {
+            if (error) *error = QStringLiteral("无法读取事件日志: %1").arg(path);
             return {};
         }
-        if (static_cast<quint64>(eventSequence) <= sequence) continue;
-        if (static_cast<quint64>(eventSequence) != lastSequence + 1) {
-            if (error) *error = QStringLiteral("事件日志序号不连续");
-            return {};
+        qint64 lineNumber = 0;
+        while (!file.atEnd()) {
+            ++lineNumber;
+            const QByteArray line = file.readLine().trimmed();
+            if (line.isEmpty()) continue;
+            QJsonParseError parseError;
+            const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
+            const QJsonObject event = document.object();
+            const qint64 eventSequence = event.value(QStringLiteral("sequence")).toInteger();
+            if (!document.isObject()
+                || event.value(QStringLiteral("eventSchemaVersion")).toInt() != 1
+                || eventSequence <= 0 || event.value(QStringLiteral("kind")).toString().isEmpty()
+                || !event.value(QStringLiteral("payload")).isObject()) {
+                if (error) {
+                    *error = QStringLiteral("事件日志 %1 第 %2 行无效")
+                                 .arg(path).arg(lineNumber);
+                }
+                return {};
+            }
+            if (static_cast<quint64>(eventSequence) <= sequence) continue;
+            if (static_cast<quint64>(eventSequence) != lastSequence + 1) {
+                if (error) *error = QStringLiteral("事件日志序号不连续");
+                return {};
+            }
+            events.append(event);
+            lastSequence = static_cast<quint64>(eventSequence);
         }
-        events.append(event);
-        lastSequence = static_cast<quint64>(eventSequence);
     }
     return events;
 }

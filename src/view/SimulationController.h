@@ -52,6 +52,8 @@ class SimulationController : public QObject {
     Q_PROPERTY(bool canEditScenario READ canEditScenario NOTIFY sessionChanged)
     Q_PROPERTY(bool canEditOwnRoster READ canEditOwnRoster NOTIFY sessionChanged)
     Q_PROPERTY(bool canDirect READ canDirect NOTIFY sessionChanged)
+    Q_PROPERTY(QVariantList timeline READ timeline NOTIFY timelineForward)
+    Q_PROPERTY(double replayDuration READ replayDuration NOTIFY timelineForward)
 public:
     explicit SimulationController(QObject* parent = nullptr);
 
@@ -97,6 +99,8 @@ public:
     bool canEditScenario() const { return !isNetworked() || m_userRole == QLatin1String("editor"); }
     bool canEditOwnRoster() const { return isNetworked() && (m_userRole == QLatin1String("red") || m_userRole == QLatin1String("blue")); }
     bool canDirect() const { return !isNetworked() || m_userRole == QLatin1String("director"); }
+    QVariantList timeline() const { return isNetworked() ? QVariantList{} : m_engine.timelineForView(); }
+    double replayDuration() const { return isNetworked() ? 0.0 : m_engine.replayDuration(); }
 
     Q_INVOKABLE void loadDefault();
     Q_INVOKABLE void saveScenario(const QString& path);
@@ -131,13 +135,28 @@ public:
     Q_INVOKABLE void disconnectFromPeer();
 
     Q_INVOKABLE QJsonObject unitsJson() const;
-    Q_INVOKABLE void upsertUnit(const QVariantMap& data);
+    /// Adds or updates a scenario unit and returns its final ID. Empty IDs are generated here
+    /// so QML can keep selection stable after a state refresh.
+    Q_INVOKABLE QString upsertUnit(const QVariantMap& data);
     /// @brief Atomically replace only the unit list, preserving map metadata.
     Q_INVOKABLE bool replaceUnits(const QVariantList& units);
     /// @brief Atomically replace a complete scenario JSON object.
     Q_INVOKABLE bool replaceScenario(const QVariantMap& scenario);
     Q_INVOKABLE void removeUnit(const QString& id);
+    Q_INVOKABLE bool removeUnits(const QStringList& ids);
+    Q_INVOKABLE bool batchUpdateUnits(const QStringList& ids, const QVariantMap& changes);
+    Q_INVOKABLE bool transformUnits(const QStringList& ids, const QString& operation,
+                                    double value = 0.0);
+    Q_INVOKABLE QVariantList copyUnits(const QStringList& ids) const;
+    Q_INVOKABLE QStringList pasteUnits(const QVariantList& copied, double offsetX,
+                                       double offsetY, const QString& sideOverride = QString());
+    Q_INVOKABLE QVariantList scenarioValidationIssues() const;
+    Q_INVOKABLE QVariantList unitTemplates() const;
     Q_INVOKABLE void setUnitSchedule(const QString& uid, const QVariantList& schedule);
+    Q_INVOKABLE bool seekReplay(double targetTime);
+    Q_INVOKABLE bool stepReplayEvent(int direction);
+    Q_INVOKABLE QJsonObject battleReport() const;
+    Q_INVOKABLE QString exportBattleReport(const QString& path, const QString& format);
 
     Q_INVOKABLE QJsonArray perceptionForSide(const QString& side) const;
     Q_INVOKABLE QJsonArray allUnits() const;
@@ -170,6 +189,7 @@ signals:
     void roomStateChanged();
     void chatMessagesChanged();
     void commandStatusChanged();
+    void timelineForward();
 
     void viewModeChanged();
     void focusedSideChanged();
@@ -198,6 +218,7 @@ private:
     void applyRoleView();
     void rememberServerAddress(const QString& server);
     QJsonObject scenarioUnitJson(const ScenarioUnit& unit) const;
+    bool applyScenarioReplacement(const Scenario& replacement);
 
     SimulationEngine m_engine;
     NetworkClient m_networkClient;

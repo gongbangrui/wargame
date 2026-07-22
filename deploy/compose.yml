@@ -3,9 +3,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/account.Dockerfile
+      args:
+        WARGAME_VERSION: "${WARGAME_VERSION:-0.1.0}"
     restart: unless-stopped
     env_file:
-      - ../.env
+      - "${WARGAME_RUNTIME_ENV_FILE:-../.env}"
     environment:
       DATA_DIR: /data
       SESSION_HOURS: "${SESSION_HOURS:-12}"
@@ -27,9 +29,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/game-server.Dockerfile
+      args:
+        WARGAME_VERSION: "${WARGAME_VERSION:-0.1.0}"
     restart: unless-stopped
     env_file:
-      - ../.env
+      - "${WARGAME_RUNTIME_ENV_FILE:-../.env}"
     environment:
       GAME_PORT: 8090
       AUTH_SERVICE_URL: http://account-web:8080
@@ -52,3 +56,4 @@ services:
 
 volumes:
   wargame-data:
+    name: "${WARGAME_DATA_VOLUME:-wargame-data}"

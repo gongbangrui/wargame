@@ -5,6 +5,7 @@
 #include "RoomPersistence.h"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -118,6 +119,10 @@ private:
     QHash<QString, QJsonObject> m_commandResults;
     QStringList m_commandResultOrder;
     QString m_recoveryError;
+    QElapsedTimer m_uptime;
+    quint64 m_totalConnections = 0;
+    quint64 m_totalDisconnects = 0;
+    quint64 m_totalResyncRequests = 0;
 };
 
 } // namespace gbr

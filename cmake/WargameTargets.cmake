@@ -6,6 +6,8 @@ function(wargame_add_domain_library target source_root)
         ${source_root}/src/core/SimulationEngine.cpp
         ${source_root}/src/core/CommandResult.h
         ${source_root}/src/core/CommandResult.cpp
+        ${source_root}/src/core/CombatResolver.h
+        ${source_root}/src/core/CombatResolver.cpp
         ${source_root}/src/core/UnitBase.h
         ${source_root}/src/core/UnitBase.cpp
         ${source_root}/src/core/MessageBus.h

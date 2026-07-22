@@ -8,6 +8,8 @@ AbstractButton {
     property string iconName: ""
     property real iconSize: 14
     focusPolicy: Qt.StrongFocus
+    scale: btn.down ? 0.97 : btn.hovered ? 1.02 : 1.0
+    Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
 
     implicitWidth: contentRow.implicitWidth + 24
     implicitHeight: Math.max(28, contentRow.implicitHeight + 12)
@@ -17,6 +19,7 @@ AbstractButton {
         border.color: btn.activeFocus ? "#4090ff" : (btn.enabled ? "#2a3a56" : "#34445a")
         border.width: 1
         radius: btn.radius
+        opacity: btn.enabled ? 1 : 0.72
         Behavior on color { ColorAnimation { duration: 150 } }
     }
 

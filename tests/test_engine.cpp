@@ -629,6 +629,35 @@ TEST_F(EngineTest, InvalidAttackPowerIsRejected) {
     EXPECT_TRUE(engine.lastError().contains("参数无效"));
 }
 
+TEST_F(EngineTest, ScenarioRejectsOutOfBoundsUnitsAndSchedulePointsAtomically) {
+    const Scenario original = engine.scenario();
+    Scenario invalid = original;
+    invalid.units.front().pos.x = invalid.map.widthMeters + 1.0;
+
+    EXPECT_FALSE(engine.setScenario(invalid));
+    EXPECT_EQ(engine.scenario().units.size(), original.units.size());
+    EXPECT_NE(engine.unit(QStringLiteral("red_cp")), nullptr);
+
+    invalid = original;
+    invalid.units.front().schedule = {
+        SchedulePoint{-1.0, invalid.units.front().pos.x, invalid.units.front().pos.y}};
+    EXPECT_FALSE(engine.setScenario(invalid));
+    EXPECT_EQ(engine.scenario().units.size(), original.units.size());
+}
+
+TEST_F(EngineTest, ScenarioRejectsExcessiveUnitCount) {
+    Scenario invalid = engine.scenario();
+    const ScenarioUnit prototype = invalid.units.front();
+    while (invalid.units.size() <= 512) {
+        ScenarioUnit unit = prototype;
+        unit.id = QStringLiteral("bulk_%1").arg(invalid.units.size());
+        invalid.units.push_back(unit);
+    }
+
+    EXPECT_FALSE(engine.setScenario(invalid));
+    EXPECT_TRUE(engine.lastError().contains(QStringLiteral("数量")));
+}
+
 TEST(MessageLogRecorderTest, EnableFailureIsReportedAndNestedPathIsCreated) {
     MessageLogRecorder recorder;
     EXPECT_FALSE(recorder.setEnabled(true, QString()));

@@ -37,7 +37,17 @@ void CommandPost::onMessage(const Message& m) {
     }
     case Message::Type::EngagementReport: {
         const QString tid = m.payload.value("targetId").toString();
-        emit notifyEvent("交战报告", QStringLiteral("攻击 %1 报告: %2").arg(m.sender, tid), "warn");
+        const QString outcome = m.payload.value("outcome").toString();
+        const QString resultLabel = outcome == QLatin1String("hit")
+            ? QStringLiteral("命中") : (outcome == QLatin1String("miss")
+                ? QStringLiteral("未命中") : QStringLiteral("未开火"));
+        emit notifyEvent(
+            "交战报告",
+            QStringLiteral("%1 对 %2 射击：%3，伤害 %4，剩余弹药 %5")
+                .arg(m.sender, tid, resultLabel)
+                .arg(m.payload.value("damage").toDouble(), 0, 'f', 1)
+                .arg(m.payload.value("ammoRemaining").toInt()),
+            outcome == QLatin1String("hit") ? "warn" : "info");
         sendAck(m);
         break;
     }
@@ -151,4 +161,3 @@ bool CommandPost::restoreBehaviorCheckpoint(const QJsonObject& state, QString*) 
 }
 
 } // namespace gbr
-

@@ -62,36 +62,50 @@ Rectangle {
             width: ListView.view.width
             implicitHeight: row.implicitHeight + 8
             color: logRow.index % 2 === 0 ? "#0e1217" : "#141a21"
-            Row {
+            Column {
                 id: row
                 anchors.fill: parent
                 anchors.leftMargin: 8; anchors.rightMargin: 8
-                spacing: 8
-                Rectangle {
-                    width: 6; height: 16; radius: 3
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: {
-                        var t = logRow.modelData.type
-                        if (t === "TargetDetect") return "#ffb24d"
-                        if (t === "SharedDetect") return "#8a93a6"
-                        if (t === "AttackOrder") return "#ff4d6d"
-                        if (t === "FlightPlan") return "#4f9dff"
-                        if (t === "Pursue") return "#ff6b4a"
-                        if (t === "EngagementReport" || t === "TargetDestroyed") return "#46d29a"
-                        if (t === "Ack") return "#8a93a6"
-                        if (t === "Withdraw") return "#ff5566"
-                        if (t === "PositionReport") return "#3a455a"
-                        return "#4a5161"
+                spacing: 2
+                Row {
+                    spacing: 8
+                    Rectangle {
+                        width: 6; height: 16; radius: 3
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: {
+                            var t = logRow.modelData.type
+                            if (t === "TargetDetect") return "#ffb24d"
+                            if (t === "SharedDetect") return "#8a93a6"
+                            if (t === "AttackOrder") return "#ff4d6d"
+                            if (t === "FlightPlan") return "#4f9dff"
+                            if (t === "Pursue") return "#ff6b4a"
+                            if (t === "EngagementReport" || t === "TargetDestroyed") return "#46d29a"
+                            if (t === "Ack") return "#8a93a6"
+                            if (t === "Withdraw") return "#ff5566"
+                            if (t === "PositionReport") return "#3a455a"
+                            return "#4a5161"
+                        }
+                    }
+                    Text {
+                        color: "#f3f6fb"; font.family: "Consolas"; font.pixelSize: 11
+                        text: {
+                            var t = logRow.modelData.time || ""
+                            var time = t.length >= 19 ? t.substr(11, 8) : t
+                            return "[" + time + "] " + logRow.modelData.sender + "\u2192" + logRow.modelData.receiver + "  " + logRow.modelData.type
+                        }
+                        anchors.verticalCenter: parent.verticalCenter
                     }
                 }
                 Text {
-                    color: "#f3f6fb"; font.family: "Consolas"; font.pixelSize: 11
+                    visible: logRow.modelData.type === "EngagementReport"
+                    color: "#aebbcf"; font.pixelSize: 10; font.family: "Consolas"
                     text: {
-                        var t = logRow.modelData.time || ""
-                        var time = t.length >= 19 ? t.substr(11, 8) : t
-                        return "[" + time + "] " + logRow.modelData.sender + "\u2192" + logRow.modelData.receiver + "  " + logRow.modelData.type
+                        var p = logRow.modelData.payload || {}
+                        var result = p.outcome === "hit" ? "\u547d\u4e2d" : (p.outcome === "miss" ? "\u672a\u547d\u4e2d" : "\u8d85\u51fa\u5c04\u7a0b")
+                        return "  " + result + "  \u76ee\u6807 " + (p.targetId || "-")
+                             + "  \u4f24\u5bb3 " + Number(p.damage || 0).toFixed(1)
+                             + "  \u5f39\u836f " + (p.ammoRemaining !== undefined ? p.ammoRemaining : "-")
                     }
-                    anchors.verticalCenter: parent.verticalCenter
                 }
             }
         }

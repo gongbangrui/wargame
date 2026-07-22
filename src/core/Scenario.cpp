@@ -7,6 +7,8 @@
 #include <QJsonArray>
 #include <QDir>
 #include <QSaveFile>
+#include <cmath>
+#include <limits>
 
 namespace gbr {
 
@@ -32,7 +34,22 @@ QJsonObject ScenarioIo::toJson(const Scenario& s) {
         o["commRange"] = u.commRange;
         o["speed"] = u.speed;
         o["maxHp"] = u.maxHp;
+        o["armor"] = u.armor;
+        o["repairRate"] = u.repairRate;
+        o["subsystemRepairRate"] = u.subsystemRepairRate;
         o["attackPower"] = u.attackPower;
+        o["ammoCapacity"] = u.ammoCapacity;
+        o["initialAmmo"] = u.initialAmmo;
+        o["hitProbability"] = u.hitProbability;
+        o["optimalRange"] = u.optimalRange;
+        o["minAttackRange"] = u.minAttackRange;
+        o["cooldownSec"] = u.cooldownSec;
+        o["damageMin"] = u.damageMin;
+        o["damageMax"] = u.damageMax;
+        o["rangeFalloff"] = u.rangeFalloff;
+        o["fuelCapacitySec"] = u.fuelCapacitySec;
+        o["initialFuelSec"] = u.initialFuelSec;
+        o["rearmDurationSec"] = u.rearmDurationSec;
         QJsonArray sched;
         for (const auto& sp : u.schedule) {
             QJsonObject p;
@@ -71,7 +88,38 @@ Scenario ScenarioIo::fromJson(const QJsonObject& o) {
         su.commRange = u.value("commRange").toDouble(20000);
         su.speed = u.value("speed").toDouble(50);
         su.maxHp = u.value("maxHp").toDouble(100);
+        su.armor = u.value("armor").toDouble(0.0);
+        su.repairRate = u.value("repairRate").toDouble(2.0);
+        su.subsystemRepairRate = u.value("subsystemRepairRate").toDouble(0.02);
         su.attackPower = u.value("attackPower").toDouble(100);
+        // v1 scenarios only carried attackPower and attackRange. Derive the
+        // new weapon profile from those values so old files remain playable.
+        auto integerField = [&u](const char* name, int fallback) {
+            const QJsonValue value = u.value(QLatin1String(name));
+            if (value.isUndefined()) return fallback;
+            const double number = value.toDouble(std::numeric_limits<double>::quiet_NaN());
+            if (!std::isfinite(number) || std::floor(number) != number
+                || number < static_cast<double>(std::numeric_limits<int>::min())
+                || number > static_cast<double>(std::numeric_limits<int>::max())) return -1;
+            return static_cast<int>(number);
+        };
+        auto numberField = [&u](const char* name, double fallback) {
+            const QJsonValue value = u.value(QLatin1String(name));
+            return value.isUndefined()
+                ? fallback : value.toDouble(std::numeric_limits<double>::quiet_NaN());
+        };
+        su.ammoCapacity = integerField("ammoCapacity", 4);
+        su.initialAmmo = integerField("initialAmmo", su.ammoCapacity);
+        su.hitProbability = numberField("hitProbability", 1.0);
+        su.optimalRange = numberField("optimalRange", su.attackRange);
+        su.minAttackRange = numberField("minAttackRange", 0.0);
+        su.cooldownSec = numberField("cooldownSec", 1.0);
+        su.damageMin = numberField("damageMin", su.attackPower);
+        su.damageMax = numberField("damageMax", su.attackPower);
+        su.rangeFalloff = numberField("rangeFalloff", 0.0);
+        su.fuelCapacitySec = numberField("fuelCapacitySec", 1800.0);
+        su.initialFuelSec = numberField("initialFuelSec", su.fuelCapacitySec);
+        su.rearmDurationSec = numberField("rearmDurationSec", 12.0);
         for (auto sv : u.value("schedule").toArray()) {
             auto sp = sv.toObject();
             SchedulePoint pt;

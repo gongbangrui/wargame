@@ -1,6 +1,7 @@
 #include "GameServer.h"
 
 #include <QCoreApplication>
+#include <QCommandLineParser>
 #include <QDebug>
 #include <QTimer>
 
@@ -17,6 +18,13 @@ void requestStop(int) {
 int main(int argc, char* argv[]) {
     QCoreApplication application(argc, argv);
     application.setApplicationName(QStringLiteral("wargame_server"));
+    application.setApplicationVersion(QStringLiteral(WARGAME_VERSION));
+    QCommandLineParser parser;
+    parser.setApplicationDescription(QStringLiteral("兵器推演权威服务器"));
+    parser.addHelpOption();
+    parser.addVersionOption();
+    parser.process(application);
+
     const quint16 port = qEnvironmentVariableIntValue("GAME_PORT") > 0
         ? static_cast<quint16>(qEnvironmentVariableIntValue("GAME_PORT"))
         : 8090;

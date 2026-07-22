@@ -9,10 +9,12 @@
 #include "MessageLogRecorder.h"
 #include "ITransport.h"
 #include "CommandResult.h"
+#include "CombatResolver.h"
 
 #include <QObject>
 #include <QTimer>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QSet>
 #include <QVariantList>
 #include <QVariantMap>
@@ -39,6 +41,7 @@ class SimulationEngine : public QObject {
     Q_PROPERTY(bool readyForSim READ readyForSim NOTIFY readyForSimChanged)
     Q_PROPERTY(QString cpIssues READ cpIssues NOTIFY readyForSimChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY errorOccurred)
+    Q_PROPERTY(QVariantList timeline READ timelineForView NOTIFY timelineChanged)
 public:
     explicit SimulationEngine(QObject* parent = nullptr);
     /// @brief 注入自定义推演域消息传输。
@@ -94,6 +97,11 @@ public:
 
     QJsonArray collectPerceptionSnapshot(const QString& forSide) const;
     QJsonArray collectAllUnitsSnapshot() const;
+    QJsonArray timelineEvents() const { return m_timeline; }
+    QVariantList timelineForView() const { return m_timeline.toVariantList(); }
+    QJsonObject battleReport() const;
+    bool seekReplay(double targetTime, QString* error = nullptr);
+    double replayDuration() const;
 
     /// 应用权威运行时状态，但不启动本地计时器。
     void applyRemoteRuntimeState(const QJsonArray& units, double simTime,
@@ -101,6 +109,8 @@ public:
     QJsonArray collectCheckpointState() const;
     bool restoreCheckpointState(const QJsonArray& units, double simTime,
                                 bool running, double speedMul, QString* error = nullptr);
+    quint64 combatSeed() const { return m_battleSeed; }
+    void restoreCombatSeed(quint64 seed) { if (seed != 0) m_battleSeed = seed; }
 
     QVariantList unitsForView() const;
     QVariantList recentMessages() const { return m_messageCache; }
@@ -126,6 +136,7 @@ signals:
     void errorOccurred(const QString& message);
     /// @brief Emitted when one side's command post is destroyed.
     void simulationEnded(const QString& winner, const QString& loser);
+    void timelineChanged();
 
 private slots:
     void onMessagePosted(const QJsonObject& msg);
@@ -144,12 +155,17 @@ private:
     void updateMessageCache(const QJsonObject& msg);
     void onTickInternal(bool manual, double manualDt);
     void tickUnits(double dt);
+    void resolveCombatRequests();
     void applyEcmJamming();
     void scanReconDetections(double dt);
     void broadcastPositionReports(bool manual);
     void refreshDetectionCache();
     void applySchedules(double simTime, double dt);
     void markUnitsDirty();
+    void appendTimeline(const QString& category, const QString& title,
+                        const QJsonObject& details = {},
+                        const QString& level = QStringLiteral("info"));
+    void captureReplayCheckpoint();
 
     std::unique_ptr<LocalTransport> m_ownedTransport;
     ITransport* m_transport = nullptr;
@@ -175,7 +191,31 @@ private:
     double m_scanAccum = 0.0;
     int m_reportCounter = 0;
     std::unordered_map<QString, QJsonArray> m_cachedDetections;
+    std::vector<CombatRequest> m_pendingCombatRequests;
+    quint64 m_battleSeed = 0x57415247414d4532ULL;
     std::unordered_map<QString, std::function<void(const QVariantMap&)>> m_dispatch;
+    struct ReplayCommand {
+        double time = 0.0;
+        qint64 sequence = 0;
+        QString action;
+        QVariantMap args;
+    };
+    struct ReplayCheckpoint {
+        double time = 0.0;
+        qsizetype commandCount = 0;
+        QJsonArray state;
+    };
+    QJsonArray m_timeline;
+    qint64 m_timelineSequence = 0;
+    qint64 m_replayCommandSequence = 0;
+    Scenario m_replayInitialScenario;
+    quint64 m_replayInitialSeed = 0;
+    std::vector<ReplayCommand> m_replayCommands;
+    std::vector<ReplayCheckpoint> m_replayCheckpoints;
+    double m_lastReplayCheckpointTime = 0.0;
+    double m_recordedDuration = 0.0;
+    QJsonArray m_recordedFinalSnapshot;
+    bool m_replaying = false;
 
     void cmdAssignTarget(const QVariantMap& args);
     void cmdSetFlightPlan(const QVariantMap& args);
@@ -187,6 +227,9 @@ private:
     void cmdGuideAttack(const QVariantMap& args);
     void cmdSetSchedule(const QVariantMap& args);
     void cmdHalt(const QVariantMap& args);
+    void cmdService(const QVariantMap& args);
+    void cmdCancelEngagement(const QVariantMap& args);
+    void cmdSetRulesOfEngagement(const QVariantMap& args);
     void checkWinLoseCondition();
     void initCommandDispatch();
     CommandResult validateCommand(const QString& action, const QVariantMap& args) const;

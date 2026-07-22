@@ -30,7 +30,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DB_PATH = DATA_DIR / "wargame.db"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SESSION_HOURS = int(os.getenv("SESSION_HOURS", "12"))
-INTERNAL_KEY = os.getenv("INTERNAL_API_KEY", "change-this-internal-key")
+INTERNAL_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 PUBLIC_WS_URL = os.getenv("PUBLIC_GAME_WS_URL", "ws://localhost:8090")
 GAME_STATUS_PATH = Path(os.getenv("GAME_STATUS_PATH", "/data/game-status.json"))
 GAME_EVENTS_PATH = Path(os.getenv("GAME_EVENTS_PATH", "/data/game-events.jsonl"))
@@ -159,9 +159,11 @@ def initialize_database() -> None:
             """
         )
         username = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
-        password = os.getenv("ADMIN_PASSWORD", "Admin123456!")
+        password = os.getenv("ADMIN_PASSWORD", "")
         existing = db.execute("SELECT id FROM admins LIMIT 1").fetchone()
         if existing is None:
+            if len(password) < 8 or password in {"Admin123456!", "change-me"}:
+                raise RuntimeError("首次启动必须通过 ADMIN_PASSWORD 设置至少 8 位的管理员密码")
             db.execute(
                 "INSERT INTO admins(username, password_hash, updated_at) VALUES(?, ?, ?)",
                 (username, password_hasher.hash(password), iso_time(utc_now())),
@@ -170,6 +172,8 @@ def initialize_database() -> None:
 
 @app.on_event("startup")
 def on_startup() -> None:
+    if len(INTERNAL_KEY) < 32 or INTERNAL_KEY == "change-this-internal-key":
+        raise RuntimeError("INTERNAL_API_KEY 必须是至少 32 位的随机密钥")
     initialize_database()
 
 

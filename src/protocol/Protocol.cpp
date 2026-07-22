@@ -209,9 +209,16 @@ ValidationResult validateClientPayload(const QString& type, const QJsonObject& p
                 || !validPoint(args.value(QStringLiteral("pos"))))) {
             return invalid(QStringLiteral("移动命令参数类型无效"));
         }
-        if ((action == QLatin1String("withdraw") || action == QLatin1String("halt"))
+        if ((action == QLatin1String("withdraw") || action == QLatin1String("halt")
+             || action == QLatin1String("service")
+             || action == QLatin1String("cancelEngagement"))
             && !validIds({QStringLiteral("unitId")})) {
             return invalid(QStringLiteral("单元 ID 无效"));
+        }
+        if (action == QLatin1String("setRoe")
+            && (!validIds({QStringLiteral("unitId")})
+                || !validString(args.value(QStringLiteral("roe")), 16))) {
+            return invalid(QStringLiteral("交战规则命令参数无效"));
         }
         if (action == QLatin1String("setSpeed")
             && (!validIds({QStringLiteral("unitId")})

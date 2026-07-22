@@ -1,7 +1,10 @@
 ﻿cmake_minimum_required(VERSION 3.16)
 
-project(index VERSION 0.1 LANGUAGES CXX)
+project(index VERSION 0.1.0 LANGUAGES CXX)
 include(GNUInstallDirs)
+
+set(WARGAME_VERSION "${PROJECT_VERSION}" CACHE STRING
+    "Version embedded in desktop and server release artifacts")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -75,6 +78,7 @@ qt_add_qml_module(appindex
         qml/components/SettingsPanel.qml
         qml/components/SessionDialog.qml
         qml/components/ChatPanel.qml
+        qml/components/BattleReportDialog.qml
 )
 
 set_target_properties(appindex PROPERTIES
@@ -167,6 +171,7 @@ add_executable(wargame_tests
     tests/test_engine.cpp
     tests/test_phase1_fixes.cpp
     tests/test_attack_power.cpp
+    tests/test_combat_resolver.cpp
     tests/test_maptiles.cpp
     tests/test_transport.cpp
     tests/test_locksync.cpp
@@ -175,6 +180,7 @@ add_executable(wargame_tests
     tests/test_protocol.cpp
     tests/test_command_result.cpp
     tests/test_checkpoint.cpp
+    tests/test_p3.cpp
     tests/test_client_state_store.cpp
 )
 target_link_libraries(wargame_tests PRIVATE

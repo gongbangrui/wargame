@@ -37,6 +37,7 @@ Dialog {
     contentItem: ScenarioEditorView { controller: root.controller; editor: root.editor;
         anchors.fill: parent
         restrictedSide: root.controller.userRole
+        forcedSide: root.controller.userRole
         rosterMode: true
     }
 }

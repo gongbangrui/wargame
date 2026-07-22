@@ -55,7 +55,7 @@ Item {
             MapCanvas { controller: root.controller; editor: root.editor;
                 id: canvas
                 anchors.fill: parent; anchors.margins: 12
-                sideFilter: "all"; focusUnitId: ""; showAllSides: true
+                sideFilter: "all"; focusUnitId: root.controller.focusedUnitId; showAllSides: true
                 simTime: root.controller.simTime
                 showRoutes: routeToggle.checked
                 showDetectRange: detectToggle.checked
@@ -64,8 +64,7 @@ Item {
                 routes: root.allRoutes()
                 onUnitClicked: function(uid, btn) {
                     root.controller.setFocusedUnitId(uid)
-                    var u = root.controller.unitAt(uid)
-                    if (u && u.position) canvas.centerOn(u.position[0], u.position[1])
+                    canvas.focusOnUnit(uid)
                 }
             }
 
@@ -140,7 +139,16 @@ Item {
             ColumnLayout {
                 anchors.fill: parent; anchors.margins: 16; spacing: 12
                 ColumnLayout { spacing: 2
-                    Text { text: "导演视角"; color: t.textStrong; font.pixelSize: 18; font.bold: true; renderType: Text.NativeRendering }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text { text: "导演视角"; color: t.textStrong; font.pixelSize: 18; font.bold: true; renderType: Text.NativeRendering }
+                        Item { Layout.fillWidth: true }
+                        GhostButton {
+                            visible: !root.controller.networked
+                            text: "回放战报"; iconName: "history"
+                            onClicked: reportDialog.open()
+                        }
+                    }
                     Text { text: "全局态势 · 路径（实线=已完成，虚线=未完成）"; color: t.muted; font.pixelSize: 11; renderType: Text.NativeRendering }
                 }
 
@@ -238,4 +246,6 @@ Item {
             }
         }
     }
+
+    BattleReportDialog { id: reportDialog; controller: root.controller }
 }

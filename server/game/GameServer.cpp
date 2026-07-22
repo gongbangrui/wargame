@@ -79,6 +79,7 @@ QString validateNetworkScenario(const Scenario& scenario) {
             return QStringLiteral("单元阵营无效: %1").arg(unit.id);
         }
         if (!std::isfinite(unit.pos.x) || !std::isfinite(unit.pos.y)
+            || !std::isfinite(unit.pos.alt)
             || unit.pos.x < 0.0 || unit.pos.y < 0.0
             || unit.pos.x > scenario.map.widthMeters || unit.pos.y > scenario.map.heightMeters) {
             return QStringLiteral("单元位置超出地图边界: %1").arg(unit.id);
@@ -88,8 +89,34 @@ QString validateNetworkScenario(const Scenario& scenario) {
             || !std::isfinite(unit.commRange) || unit.commRange < 0.0
             || !std::isfinite(unit.speed) || unit.speed < 0.0
             || !std::isfinite(unit.maxHp) || unit.maxHp <= 0.0
-            || !std::isfinite(unit.attackPower) || unit.attackPower < 0.0) {
+            || !std::isfinite(unit.attackPower) || unit.attackPower < 0.0
+            || !std::isfinite(unit.armor) || unit.armor < 0.0 || unit.armor > 0.9
+            || !std::isfinite(unit.repairRate) || unit.repairRate < 0.0
+            || !std::isfinite(unit.subsystemRepairRate)
+            || unit.subsystemRepairRate < 0.0) {
             return QStringLiteral("单元参数无效: %1").arg(unit.id);
+        }
+        if (unit.kind == QLatin1String("attackuav")) {
+            const bool validWeapon = unit.ammoCapacity >= 0 && unit.ammoCapacity <= 100000
+                && unit.initialAmmo >= 0 && unit.initialAmmo <= unit.ammoCapacity
+                && std::isfinite(unit.hitProbability) && unit.hitProbability >= 0.0
+                && unit.hitProbability <= 1.0
+                && std::isfinite(unit.minAttackRange) && unit.minAttackRange >= 0.0
+                && std::isfinite(unit.optimalRange)
+                && unit.optimalRange >= unit.minAttackRange
+                && unit.optimalRange <= unit.attackRange
+                && std::isfinite(unit.cooldownSec) && unit.cooldownSec >= 0.0
+                && std::isfinite(unit.damageMin) && unit.damageMin >= 0.0
+                && std::isfinite(unit.damageMax) && unit.damageMax >= unit.damageMin
+                && std::isfinite(unit.rangeFalloff) && unit.rangeFalloff >= 0.0
+                && unit.rangeFalloff <= 1.0
+                && std::isfinite(unit.fuelCapacitySec) && unit.fuelCapacitySec > 0.0
+                && std::isfinite(unit.initialFuelSec) && unit.initialFuelSec >= 0.0
+                && unit.initialFuelSec <= unit.fuelCapacitySec
+                && std::isfinite(unit.rearmDurationSec) && unit.rearmDurationSec >= 0.0;
+            if (!validWeapon) {
+                return QStringLiteral("攻击单元武器参数无效: %1").arg(unit.id);
+            }
         }
         if (static_cast<qsizetype>(unit.schedule.size()) > kMaxSchedulePoints) {
             return QStringLiteral("单元计划点不能超过 %1 个: %2")
@@ -113,12 +140,19 @@ GameServer::GameServer(QObject* parent)
     : QObject(parent),
       m_server(QStringLiteral("兵器推演联网服务器"), QWebSocketServer::NonSecureMode, this),
       m_authServiceUrl(env("AUTH_SERVICE_URL", QStringLiteral("http://account-web:8080"))),
-      m_internalKey(env("INTERNAL_API_KEY", QStringLiteral("change-this-internal-key"))),
+      m_internalKey(env("INTERNAL_API_KEY", {})),
       m_scenarioPath(env("SCENARIO_PATH", QStringLiteral("/data/scenario.json"))),
       m_monitorLogPath(env("MONITOR_LOG_PATH", QStringLiteral("/data/game-events.jsonl"))),
       m_monitorStatusPath(env("MONITOR_STATUS_PATH", QStringLiteral("/data/game-status.json"))),
       m_persistence(env("CHECKPOINT_PATH", QStringLiteral("/data/room-checkpoint.json")),
                     env("COMMAND_LOG_PATH", QStringLiteral("/data/room-commands.jsonl"))) {
+    m_uptime.start();
+    if (m_internalKey.size() < 32
+        || m_internalKey == QLatin1String("change-this-internal-key")) {
+        m_recoveryError = QStringLiteral("INTERNAL_API_KEY 必须是至少 32 位的随机密钥");
+        qCritical() << m_recoveryError;
+        return;
+    }
     QString restoreError;
     if (!restoreRoomState(&restoreError)) {
         if (QFileInfo::exists(m_persistence.checkpointPath())) {
@@ -234,6 +268,7 @@ void GameServer::onNewConnection() {
             continue;
         }
         m_clients.insert(socket, ClientSession{});
+        ++m_totalConnections;
         audit(QStringLiteral("connection"), QJsonObject{{QStringLiteral("event"), QStringLiteral("opened")},
                                                          {QStringLiteral("peer"), socket->peerAddress().toString()},
                                                          {QStringLiteral("port"), static_cast<int>(socket->peerPort())}});
@@ -321,7 +356,10 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
     else if (type == QLatin1String("scenarioUpsert")) handleScenarioUpsert(socket, payload);
     else if (type == QLatin1String("scenarioRemove")) handleScenarioRemove(socket, payload);
     else if (type == QLatin1String("scenarioReplace")) handleScenarioReplace(socket, payload);
-    else if (type == QLatin1String("resyncRequest")) sendFullSnapshot(socket);
+    else if (type == QLatin1String("resyncRequest")) {
+        ++m_totalResyncRequests;
+        sendFullSnapshot(socket);
+    }
     else if (type == QLatin1String("ping")) sendEnvelope(socket, QStringLiteral("pong"), QJsonObject{});
     else sendError(socket, QStringLiteral("UNKNOWN_MESSAGE"), QStringLiteral("不支持的消息类型"));
 }
@@ -429,6 +467,7 @@ void GameServer::finishAuthentication(QWebSocket* socket, const QJsonObject& ide
 void GameServer::removeClient(QWebSocket* socket) {
     if (!m_clients.contains(socket)) return;
     const ClientSession session = m_clients.take(socket);
+    ++m_totalDisconnects;
     audit(QStringLiteral("connection"), QJsonObject{{QStringLiteral("event"), QStringLiteral("closed")},
                                                      {QStringLiteral("user"), session.username},
                                                      {QStringLiteral("role"), session.role}});
@@ -462,7 +501,9 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
         QStringLiteral("engageTarget"), QStringLiteral("moveTo"),
         QStringLiteral("withdraw"), QStringLiteral("setSpeed"),
         QStringLiteral("pursue"), QStringLiteral("guideAttack"),
-        QStringLiteral("setSchedule"), QStringLiteral("halt")};
+        QStringLiteral("setSchedule"), QStringLiteral("halt"),
+        QStringLiteral("service"), QStringLiteral("cancelEngagement"),
+        QStringLiteral("setRoe")};
     if (!actions.contains(action)) {
         return reject(QStringLiteral("UNKNOWN_ACTION"), QStringLiteral("未知操作"));
     }
@@ -493,6 +534,18 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
     if (action == QLatin1String("setFlightPlan") && unit->kind() != UnitKind::AttackUAV) {
         return reject(QStringLiteral("INVALID_UNIT_KIND"),
                       QStringLiteral("航路指令仅适用于攻击无人机"));
+    }
+    if ((action == QLatin1String("cancelEngagement") || action == QLatin1String("setRoe"))
+        && unit->kind() != UnitKind::AttackUAV) {
+        return reject(QStringLiteral("INVALID_UNIT_KIND"),
+                      QStringLiteral("交战控制仅适用于攻击无人机"));
+    }
+    if (action == QLatin1String("setRoe")) {
+        const QString roe = args.value(QStringLiteral("roe")).toString();
+        if (roe != QLatin1String("hold") && roe != QLatin1String("free")) {
+            return reject(QStringLiteral("INVALID_ARGUMENT"),
+                          QStringLiteral("交战规则无效"));
+        }
     }
     if (action == QLatin1String("guideAttack")) {
         UnitBase* attacker = m_engine.unit(args.value(QStringLiteral("attackerId")).toString());
@@ -883,8 +936,8 @@ void GameServer::handleScenarioReplace(QWebSocket* socket, const QJsonObject& pa
         return;
     }
     const QJsonObject scenarioObject = payload.value(QStringLiteral("scenario")).toObject();
-    if (scenarioObject.value(QStringLiteral("schemaVersion")).toInt()
-        != ScenarioIo::SchemaVersion) {
+    const int scenarioSchema = scenarioObject.value(QStringLiteral("schemaVersion")).toInt();
+    if (scenarioSchema < 1 || scenarioSchema > ScenarioIo::SchemaVersion) {
         sendError(socket, QStringLiteral("SCHEMA_MISMATCH"),
                   QStringLiteral("场景结构版本不兼容"));
         return;
@@ -1194,6 +1247,11 @@ void GameServer::writeMonitorStatus() {
     const QJsonObject status{{QStringLiteral("status"), QStringLiteral("healthy")},
                              {QStringLiteral("updatedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
                              {QStringLiteral("connectedClients"), m_clients.size()},
+                             {QStringLiteral("metrics"), QJsonObject{
+                                 {QStringLiteral("uptimeSeconds"), m_uptime.elapsed() / 1000},
+                                 {QStringLiteral("totalConnections"), static_cast<qint64>(m_totalConnections)},
+                                 {QStringLiteral("totalDisconnects"), static_cast<qint64>(m_totalDisconnects)},
+                                 {QStringLiteral("resyncRequests"), static_cast<qint64>(m_totalResyncRequests)}}},
                              {QStringLiteral("roomState"), roomState()}};
     file.write(QJsonDocument(status).toJson(QJsonDocument::Compact));
     file.commit();

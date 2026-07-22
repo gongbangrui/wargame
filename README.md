@@ -77,6 +77,29 @@ cmake --build --preset sanitizers
 ctest --preset sanitizers
 ```
 
+## 质量门禁与恢复验证
+
+CI 对每次提交执行 Debug/ASan-UBSan 构建、测试注册一致性检查、全部单元测试、QML lint、
+源码格式检查，以及隔离 Docker 卷中的联网冒烟和恢复演练。本地可执行相同检查：
+
+```bash
+cmake --preset debug
+cmake --preset sanitizers
+cmake --build --preset debug
+cmake --build --preset sanitizers
+./tools/verify-test-baseline.sh build/debug build/sanitizers
+ctest --preset debug
+ctest --preset sanitizers
+cmake --build build/debug --target all_qmllint
+./tools/check-source-format.sh
+./tools/verify-docker-recovery.sh
+```
+
+恢复脚本会创建独立 Docker 项目、卷和临时账号，验证联网冒烟、`SIGTERM` 最终检查点、
+数据卷归档、还原卷和服务恢复；结束后自动清理测试资源。它默认使用本机 `18080/18090`
+及 `18081/18091` 端口，可通过 `RECOVERY_HTTP_PORT` 和 `RECOVERY_WS_PORT` 覆盖。
+正式发布、人工验收和回滚步骤见 [`docs/RELEASE.md`](docs/RELEASE.md)。
+
 ## 联网服务器
 
 联网模式由两个服务组成：
@@ -90,6 +113,9 @@ ctest --preset sanitizers
 sudo ./deploy/install-server.sh \
   --admin-password '设置一个强管理员密码'
 ```
+
+服务端可用 `./build/debug/server/wargame_server --version` 确认内嵌版本；Docker 镜像也使用
+`.env` 中的 `WARGAME_VERSION` 标记。
 
 需要被局域网或其他客户端访问时：
 
@@ -214,6 +240,3 @@ ADMIN_PASSWORD='管理员密码' node tools/network-smoke.mjs
 - 账号管理页面和 WebSocket 端口应只开放给必要的网络范围。
 - GitHub Personal Access Token 不应出现在截图、聊天记录、提交内容或命令历史中；如果泄露，应立即撤销并重新生成。
 
-## 许可证
-
-当前仓库未声明开源许可证。除非项目维护者另行说明，使用、复制或重新发布前请先取得作者许可。

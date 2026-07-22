@@ -22,10 +22,13 @@ WEB_SHELL_TICKET_SECONDS="120"
 WEB_SHELL_SESSION_SECONDS="900"
 WEB_SHELL_MAX_SESSIONS="2"
 STARTUP_TIMEOUT_SECONDS="90"
+WARGAME_VERSION="0.1.0"
+WARGAME_DATA_VOLUME="wargame-data"
 REUSE_PASSWORD=0
 RESET_ADMIN=1
 NO_BUILD=0
 ASSUME_YES=0
+SKIP_ENVIRONMENT_CHECK=0
 ADMIN_TOKEN=""
 BIND_ADDRESS_SET=0
 PUBLIC_HOST_SET=0
@@ -60,8 +63,8 @@ Gbr 兵器推演联网服务器安装器
   sudo ./deploy/install-server.sh [选项]
 
 选项:
-  --bind-address IP       Docker 监听地址，默认 127.0.0.1（远程访问可设 0.0.0.0）
-  --public-host HOST      客户端连接用 IP 或域名，默认自动探测本机 IPv4
+  --bind-address IP       Docker 监听 IP；可指定 VPN/FRP 所用网卡，默认自动绑定本机公网 IPv4
+  --public-host HOST      客户端连接用 IP 或域名；FRP 场景请填写 FRP 公网入口
   --http-port PORT        管理网页端口，默认 8080
   --ws-port PORT          推演 WebSocket 端口，默认 8090
   --admin-username NAME   管理员用户名，默认 admin
@@ -77,6 +80,7 @@ Gbr 兵器推演联网服务器安装器
   --reset-admin           启动后强制重置现有管理员密码（默认开启）
   --no-reset-admin        启动后保留现有管理员密码
   --no-build              不重新构建镜像，仅启动已有镜像
+  --skip-environment-check 跳过平台、依赖和端口环境检查
   --yes                   跳过确认提示
   -h, --help              显示帮助
 
@@ -84,6 +88,9 @@ Gbr 兵器推演联网服务器安装器
   sudo ./deploy/install-server.sh --admin-password '设置一个强管理员密码'
   sudo ./deploy/install-server.sh --public-host 192.168.1.20 --admin-password 'strong-pass' \
     --session-hours 24 --shell-session-seconds 1800 --shell-max-sessions 3
+  sudo ./deploy/install-server.sh --bind-address 10.8.0.2 --admin-password 'strong-pass'
+  sudo ./deploy/install-server.sh --bind-address 127.0.0.1 --public-host game.example.com \
+    --admin-password 'strong-pass'
 EOF
 }
 
@@ -119,7 +126,11 @@ read_existing_env() {
   local value load_value
   load_value() { sed -n "s/^$1=//p" "$ENV_FILE" | head -n1 || true; }
   value="$(load_value ADMIN_USERNAME)"; [[ $ADMIN_USERNAME_SET -eq 0 && -n "$value" ]] && ADMIN_USERNAME="$value"
-  value="$(load_value HOST_BIND_ADDRESS)"; [[ $BIND_ADDRESS_SET -eq 0 && -n "$value" ]] && BIND_ADDRESS="$value"
+  value="$(load_value HOST_BIND_ADDRESS)"
+  if [[ $BIND_ADDRESS_SET -eq 0 && -n "$value" ]]; then
+    BIND_ADDRESS="$value"
+    BIND_ADDRESS_SET=1
+  fi
   value="$(load_value HTTP_PORT)"; [[ $HTTP_PORT_SET -eq 0 && -n "$value" ]] && HTTP_PORT="$value"
   value="$(load_value WS_PORT)"; [[ $WS_PORT_SET -eq 0 && -n "$value" ]] && WS_PORT="$value"
   value="$(load_value SESSION_HOURS)"; [[ $SESSION_HOURS_SET -eq 0 && -n "$value" ]] && SESSION_HOURS="$value"
@@ -127,15 +138,92 @@ read_existing_env() {
   value="$(load_value WEB_SHELL_TICKET_SECONDS)"; [[ $WEB_SHELL_TICKET_SECONDS_SET -eq 0 && -n "$value" ]] && WEB_SHELL_TICKET_SECONDS="$value"
   value="$(load_value WEB_SHELL_SESSION_SECONDS)"; [[ $WEB_SHELL_SESSION_SECONDS_SET -eq 0 && -n "$value" ]] && WEB_SHELL_SESSION_SECONDS="$value"
   value="$(load_value WEB_SHELL_MAX_SESSIONS)"; [[ $WEB_SHELL_MAX_SESSIONS_SET -eq 0 && -n "$value" ]] && WEB_SHELL_MAX_SESSIONS="$value"
+  value="$(load_value WARGAME_VERSION)"; [[ -n "$value" ]] && WARGAME_VERSION="$value"
+  value="$(load_value WARGAME_DATA_VOLUME)"; [[ -n "$value" ]] && WARGAME_DATA_VOLUME="$value"
+  value="$(load_value PUBLIC_HOST)"
+  if [[ $PUBLIC_HOST_SET -eq 0 && -n "$value" ]]; then
+    PUBLIC_HOST="$value"
+    PUBLIC_HOST_SET=1
+  elif [[ $PUBLIC_HOST_SET -eq 0 && -z "$PUBLIC_HOST" ]]; then
+    value="$(load_value PUBLIC_GAME_WS_URL)"
+    if [[ "$value" == ws://* || "$value" == wss://* ]]; then
+      value="${value#*://}"
+      value="${value%%/*}"
+      PUBLIC_HOST="${value%%:*}"
+      [[ -n "$PUBLIC_HOST" ]] && PUBLIC_HOST_SET=1
+    fi
+  fi
   if [[ -z "$ADMIN_PASSWORD" && $REUSE_PASSWORD -eq 1 ]]; then
     ADMIN_PASSWORD="$(load_value ADMIN_PASSWORD)"
   fi
 }
 
+is_public_ipv4() {
+  local ip="$1" a b c d
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r a b c d <<<"$ip"
+  (( 10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255 )) || return 1
+  (( 10#$a != 0 && 10#$a != 10 && 10#$a != 127 && 10#$a < 224 )) || return 1
+  (( !(10#$a == 100 && 10#$b >= 64 && 10#$b <= 127) )) || return 1
+  (( !(10#$a == 169 && 10#$b == 254) )) || return 1
+  (( !(10#$a == 172 && 10#$b >= 16 && 10#$b <= 31) )) || return 1
+  (( !(10#$a == 192 && (10#$b == 168 || 10#$b == 0)) )) || return 1
+  (( !(10#$a == 198 && (10#$b == 18 || 10#$b == 19)) )) || return 1
+  (( !(10#$a == 198 && 10#$b == 51 && 10#$c == 100) )) || return 1
+  (( !(10#$a == 203 && 10#$b == 0 && 10#$c == 113) )) || return 1
+}
+
+local_ipv4_addresses() {
+  if command -v ip >/dev/null 2>&1; then
+    ip -4 -o addr show scope global 2>/dev/null | sed -n 's/.* inet \([0-9.]*\)\/.*/\1/p'
+  else
+    hostname -I 2>/dev/null | tr ' ' '\n'
+  fi
+}
+
+detect_local_public_ipv4() {
+  local candidate
+  while IFS= read -r candidate; do
+    if is_public_ipv4 "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done < <(local_ipv4_addresses)
+  return 1
+}
+
 detect_public_host() {
   [[ -n "$PUBLIC_HOST" ]] && return 0
-  PUBLIC_HOST="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '$0 !~ /^127\./ && $0 !~ /:/ {print; exit}' || true)"
-  if [[ -z "$PUBLIC_HOST" ]]; then PUBLIC_HOST="localhost"; fi
+  # VPN 绑定地址通常就是客户端入口；FRP 的公网入口应通过 --public-host 显式指定。
+  if [[ $BIND_ADDRESS_SET -eq 1 && "$BIND_ADDRESS" != "0.0.0.0" \
+    && "$BIND_ADDRESS" != "127.0.0.1" && "$BIND_ADDRESS" != "localhost" ]]; then
+    PUBLIC_HOST="$BIND_ADDRESS"
+    return 0
+  fi
+  PUBLIC_HOST="$(detect_local_public_ipv4 || true)"
+  if [[ -z "$PUBLIC_HOST" ]]; then
+    PUBLIC_HOST="$(local_ipv4_addresses | sed -n '/^127\./!{/^[0-9]/p;q;}' || true)"
+  fi
+  [[ -n "$PUBLIC_HOST" ]] || PUBLIC_HOST="localhost"
+}
+
+select_bind_address() {
+  local public_ip
+  public_ip="$(detect_local_public_ipv4 || true)"
+  if [[ $BIND_ADDRESS_SET -eq 0 \
+    && ( "$BIND_ADDRESS" == "127.0.0.1" || "$BIND_ADDRESS" == "localhost" ) \
+    && -n "$public_ip" ]]; then
+    BIND_ADDRESS="$public_ip"
+    # prepare_env 会再次读取旧 .env；标记为已选择以保留新的自动公网绑定。
+    BIND_ADDRESS_SET=1
+  fi
+  detect_public_host
+}
+
+local_http_base_url() {
+  local host="$BIND_ADDRESS"
+  [[ "$host" == "0.0.0.0" || "$host" == "127.0.0.1" || "$host" == "localhost" ]] && host="127.0.0.1"
+  printf 'http://%s:%s' "$host" "$HTTP_PORT"
 }
 
 validate_port() {
@@ -182,6 +270,7 @@ parse_args() {
       --reset-admin) RESET_ADMIN=1; shift ;;
       --no-reset-admin) RESET_ADMIN=0; shift ;;
       --no-build) NO_BUILD=1; shift ;;
+      --skip-environment-check) SKIP_ENVIRONMENT_CHECK=1; shift ;;
       --yes) ASSUME_YES=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "未知选项：$1（使用 --help 查看帮助）" ;;
@@ -201,6 +290,8 @@ validate_configuration() {
   [[ "$HTTP_PORT" != "$WS_PORT" ]] || die "管理网页端口和 WebSocket 端口不能相同"
   [[ "$BIND_ADDRESS" != *:* ]] || die "暂不支持带冒号的 IPv6 绑定地址，请使用 IPv4"
   [[ "$ADMIN_USERNAME" =~ ^[A-Za-z0-9_.-]{3,64}$ ]] || die "管理员用户名格式无效"
+  [[ "$WARGAME_VERSION" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || die "WARGAME_VERSION 格式无效"
+  [[ "$WARGAME_DATA_VOLUME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die "WARGAME_DATA_VOLUME 格式无效"
 }
 
 print_banner() {
@@ -311,7 +402,10 @@ prepare_env() {
 ADMIN_USERNAME=$ADMIN_USERNAME
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 INTERNAL_API_KEY=$internal_key
+WARGAME_VERSION=$WARGAME_VERSION
+WARGAME_DATA_VOLUME=$WARGAME_DATA_VOLUME
 HOST_BIND_ADDRESS=$BIND_ADDRESS
+PUBLIC_HOST=$PUBLIC_HOST
 HTTP_PORT=$HTTP_PORT
 WS_PORT=$WS_PORT
 PUBLIC_GAME_WS_URL=ws://$ws_host:$WS_PORT
@@ -334,6 +428,7 @@ confirm_install() {
 
 deploy_services() {
   step "构建并启动兵棋推演服务"
+  compose_cmd config --quiet || die "Compose 配置校验失败，请检查 .env 和端口配置"
   if (( NO_BUILD == 1 )); then
     compose_cmd up -d
   else
@@ -344,9 +439,10 @@ deploy_services() {
 
 wait_healthy() {
   step "等待服务健康检查"
-  local i status
+  local i status http_base
+  http_base="$(local_http_base_url)"
   for ((i=1; i<=STARTUP_TIMEOUT_SECONDS; i++)); do
-    if curl -fsS --max-time 2 "http://127.0.0.1:$HTTP_PORT/api/health" >/dev/null 2>&1 \
+    if curl -fsS --max-time 2 "$http_base/api/health" >/dev/null 2>&1 \
       && (compose_cmd ps --status running | grep -q 'game-server.*healthy'); then
       ok "账号网页和推演服务器已就绪（${i}s）"
       return 0
@@ -368,12 +464,13 @@ reset_admin_if_requested() {
 
 verify_admin_login() {
   step "验证管理员账号"
-  local response payload
+  local response payload http_base
+  http_base="$(local_http_base_url)"
   payload="{\"username\":\"$(json_escape "$ADMIN_USERNAME")\",\"password\":\"$(json_escape "$ADMIN_PASSWORD")\"}"
   response="$(curl -fsS --max-time 5 \
     -H 'Content-Type: application/json' \
     -d "$payload" \
-    "http://127.0.0.1:$HTTP_PORT/api/admin/login")" \
+    "$http_base/api/admin/login")" \
     || die "管理员登录验证失败，请检查账号服务日志"
   ADMIN_TOKEN="$(printf '%s' "$response" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
   [[ -n "$ADMIN_TOKEN" ]] || die "管理员登录验证未返回会话令牌"
@@ -383,10 +480,11 @@ verify_admin_login() {
 verify_monitoring() {
   step "验证服务器监控与容器终端"
   [[ -n "$ADMIN_TOKEN" ]] || die "缺少管理员验证会话"
-  local overview terminal_payload terminal_response
+  local overview terminal_payload terminal_response http_base
+  http_base="$(local_http_base_url)"
   overview="$(curl -fsS --max-time 5 \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    "http://127.0.0.1:$HTTP_PORT/api/admin/monitor/overview")" \
+    "$http_base/api/admin/monitor/overview")" \
     || die "服务器监控概览验证失败"
   printf '%s' "$overview" | grep -q '"accountStatus":"healthy"' \
     || die "账号服务监控状态异常"
@@ -398,7 +496,7 @@ verify_monitoring() {
       -H 'Content-Type: application/json' \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       -d "$terminal_payload" \
-      "http://127.0.0.1:$HTTP_PORT/api/admin/monitor/terminal/login")" \
+      "$http_base/api/admin/monitor/terminal/login")" \
       || die "容器运维终端认证验证失败"
     printf '%s' "$terminal_response" | grep -q '"authenticated":true' \
       || die "容器运维终端认证未通过"
@@ -412,9 +510,11 @@ verify_monitoring() {
 
 logout_verification_session() {
   [[ -n "$ADMIN_TOKEN" ]] || return 0
+  local http_base
+  http_base="$(local_http_base_url)"
   curl -fsS --max-time 5 -X POST \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    "http://127.0.0.1:$HTTP_PORT/api/admin/logout" >/dev/null || true
+    "$http_base/api/admin/logout" >/dev/null || true
   ADMIN_TOKEN=""
 }
 
@@ -439,10 +539,17 @@ print_result() {
 
 main() {
   print_banner
+  read_existing_env
   parse_args "$@"
-  check_platform
-  install_dependencies
-  check_ports
+  select_bind_address
+  if (( SKIP_ENVIRONMENT_CHECK == 1 )); then
+    step "跳过服务器环境、依赖和端口检查"
+    warn "请确认 Docker、Docker Compose、curl、ss、openssl 等依赖已准备就绪"
+  else
+    check_platform
+    install_dependencies
+    check_ports
+  fi
   prepare_env
   confirm_install
   deploy_services

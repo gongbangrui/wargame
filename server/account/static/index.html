@@ -37,7 +37,7 @@
     <section class="workspace">
       <header class="topline">
         <div><p class="eyebrow">本地指挥服务</p><h2 id="pageTitle">兵棋账号</h2></div>
-        <div class="server-state"><span class="status-dot"></span>本地服务正常</div>
+        <div id="serverState" class="server-state"><span class="status-dot"></span><span id="serverStateText">服务状态检测中</span></div>
       </header>
 
       <section id="usersPage" class="page">
@@ -81,6 +81,8 @@
           <div><span>兵棋服务</span><strong id="gameServiceState">--</strong></div>
           <div><span>已连接客户端</span><strong id="gameClientCount">0</strong></div>
           <div><span>有效兵棋会话</span><strong id="playerSessionCount">0</strong></div>
+          <div><span>累计重同步</span><strong id="resyncRequestCount">0</strong></div>
+          <div><span>服务运行时长</span><strong id="gameUptime">--</strong></div>
         </div>
         <div class="section-toolbar">
           <div><h3>服务运行态势</h3><p id="monitorUpdated">等待监控数据</p></div>

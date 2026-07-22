@@ -83,6 +83,11 @@ TEST(StateProjectorTest, ObservedEnemyExcludesPrivateBehaviorState) {
     EXPECT_TRUE(enemyScenario.value(QStringLiteral("schedule")).toArray().isEmpty());
     EXPECT_DOUBLE_EQ(enemyScenario.value(QStringLiteral("detectRange")).toDouble(), 0.0);
     EXPECT_DOUBLE_EQ(enemyScenario.value(QStringLiteral("attackPower")).toDouble(), 0.0);
+    EXPECT_DOUBLE_EQ(enemyScenario.value(QStringLiteral("hitProbability")).toDouble(), 0.0);
+    EXPECT_DOUBLE_EQ(enemyScenario.value(QStringLiteral("damageMax")).toDouble(), 0.0);
+    EXPECT_EQ(enemyScenario.value(QStringLiteral("ammoCapacity")).toInt(), 0);
+    EXPECT_FALSE(enemyRuntime.contains(QStringLiteral("ammoRemaining")));
+    EXPECT_FALSE(enemyRuntime.contains(QStringLiteral("cooldownRemaining")));
 }
 
 TEST(StateProjectorTest, DirectorRetainsFullRuntimeAndScenario) {

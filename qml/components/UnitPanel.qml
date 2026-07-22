@@ -1,5 +1,6 @@
 ﻿pragma ComponentBehavior: Bound
 import QtQuick
+import QtQuick.Controls.Basic
 import QtQuick.Layouts
 
 Rectangle {
@@ -9,6 +10,7 @@ Rectangle {
     color: "transparent"
 
     property var snap: ({})
+    property bool interactionEnabled: true
 
     QtObject {
         id: t
@@ -25,10 +27,18 @@ Rectangle {
         property color warning: "#ffb24d"
     }
 
-    ColumnLayout {
+    Flickable {
         anchors.fill: parent
-        spacing: 6
         clip: true
+        contentWidth: width
+        contentHeight: panelContent.implicitHeight
+        boundsBehavior: Flickable.StopAtBounds
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        ColumnLayout {
+        id: panelContent
+        width: parent.width - (parent.contentHeight > parent.height ? 8 : 0)
+        spacing: 6
 
         RowLayout {
             Layout.fillWidth: true
@@ -59,9 +69,15 @@ Rectangle {
             }
             GhostButton {
                 text: "\u64a4\u79bb"
-                visible: root.snap.alive && root.snap.movable === true
+                visible: root.interactionEnabled && root.snap.alive && root.snap.movable === true
                 implicitHeight: 24
                 onClicked: root.controller.command("withdraw", { unitId: root.snap.id })
+            }
+            GhostButton {
+                text: "补给"
+                visible: root.interactionEnabled && root.snap.alive && root.snap.movable === true
+                implicitHeight: 24
+                onClicked: root.controller.command("service", { unitId: root.snap.id })
             }
         }
 
@@ -107,8 +123,40 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
+            visible: root.snap.alive && root.snap.subsystems !== undefined
+            spacing: 8
+            Text { text: "系统"; color: t.muted; font.pixelSize: 11 }
+            Repeater {
+                model: [
+                    { label: "传感", value: root.snap.subsystems ? root.snap.subsystems.sensor : 1 },
+                    { label: "通信", value: root.snap.subsystems ? root.snap.subsystems.comms : 1 },
+                    { label: "机动", value: root.snap.subsystems ? root.snap.subsystems.mobility : 1 },
+                    { label: "武器", value: root.snap.subsystems ? root.snap.subsystems.weapon : 1 }
+                ]
+                delegate: RowLayout {
+                    id: subsystemItem
+                    required property var modelData
+                    spacing: 3
+                    Text { text: subsystemItem.modelData.label; color: t.muted; font.pixelSize: 9 }
+                    Rectangle {
+                        Layout.preferredWidth: 28; Layout.preferredHeight: 5; radius: 2
+                        color: "#252d3a"
+                        Rectangle {
+                            width: parent.width * Math.max(0, Math.min(1, subsystemItem.modelData.value))
+                            height: parent.height; radius: 2
+                            color: subsystemItem.modelData.value > 0.6 ? t.success
+                                  : subsystemItem.modelData.value > 0.25 ? t.warning : t.danger
+                        }
+                    }
+                }
+            }
+            Item { Layout.fillWidth: true }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
             spacing: 10
-            visible: root.snap.alive && root.snap.movable === true
+            visible: root.interactionEnabled && root.snap.alive && root.snap.movable === true
             Text { text: "\u901f\u5ea6"; color: t.muted; font.pixelSize: 11; renderType: Text.NativeRendering }
             Rectangle {
                 Layout.preferredWidth: 104; implicitHeight: 26; radius: 4
@@ -164,8 +212,14 @@ Rectangle {
                     if (root.snap.kind === "attackuav") {
                         rows.push({ k: "\u653b\u51fb", v: (root.snap.attackRange !== null ? Math.round(root.snap.attackRange) : 0) + " m", c: "#ff6b4a" })
                         rows.push({ k: "\u4f24\u5bb3", v: (root.snap.attackPower !== undefined && root.snap.attackPower !== null ? Math.round(root.snap.attackPower) : 0) + " HP", c: "#ff8a40" })
+                        rows.push({ k: "\u5f39\u836f", v: (root.snap.ammoRemaining !== undefined ? root.snap.ammoRemaining : 0) + " / " + (root.snap.ammoCapacity !== undefined ? root.snap.ammoCapacity : 0), c: "#f4c95d" })
+                        rows.push({ k: "燃油", v: Math.round(root.snap.fuelRemaining || 0) + " / " + Math.round(root.snap.fuelCapacity || 0) + " s", c: "#5fd1c8" })
+                        rows.push({ k: "\u51b7\u5374", v: Number(root.snap.cooldownRemaining || 0).toFixed(1) + " s", c: "#c08cff" })
+                        var shotLabels = { "hit": "\u547d\u4e2d", "miss": "\u672a\u547d\u4e2d", "out_of_range": "\u8d85\u51fa\u5c04\u7a0b" }
+                        rows.push({ k: "\u4e0a\u53d1", v: shotLabels[root.snap.lastShotOutcome] || "-", c: "#46d29a" })
                     }
                     rows.push({ k: "\u4f4d\u7f6e", v: root.snap.position ? Math.round(root.snap.position[0]) + ", " + Math.round(root.snap.position[1]) : "-", c: t.muted })
+                    rows.push({ k: "装甲", v: Math.round((root.snap.armor || 0) * 100) + "%", c: "#a9b7c9" })
                     rows.push({ k: "ID", v: root.snap.id || "-", c: t.muted })
                     return rows
                 }
@@ -181,6 +235,31 @@ Rectangle {
         }
 
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2a3142" }
+
+        RowLayout {
+            Layout.fillWidth: true
+            visible: root.interactionEnabled && root.snap.kind === "attackuav" && root.snap.alive
+            spacing: 6
+            Text { text: "交战规则"; color: t.muted; font.pixelSize: 11 }
+            TonalButton {
+                text: "自由交战"; implicitHeight: 24
+                base: root.snap.rulesOfEngagement === "free" ? t.success : "#252d3a"
+                onClicked: root.controller.command("setRoe", { unitId: root.snap.id, roe: "free" })
+            }
+            TonalButton {
+                text: "武器管制"; implicitHeight: 24
+                base: root.snap.rulesOfEngagement === "hold" ? t.warning : "#252d3a"
+                onClicked: root.controller.command("setRoe", { unitId: root.snap.id, roe: "hold" })
+            }
+            GhostButton {
+                text: "取消交战"; implicitHeight: 24
+                enabled: !!root.snap.targetId
+                onClicked: root.controller.command("cancelEngagement", { unitId: root.snap.id })
+            }
+            Item { Layout.fillWidth: true }
+        }
+
+        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2a3142"; visible: root.snap.kind === "attackuav" }
 
         ColumnLayout {
             Layout.fillWidth: true
@@ -244,6 +323,7 @@ Rectangle {
                     }
                 }
             }
+        }
         }
     }
 }

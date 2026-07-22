@@ -12,6 +12,9 @@ Item {
     property string sideFilter: "red"
     property bool   showAllSides: false
     property string focusUnitId: ""
+    property var selectedUnitIds: []
+    property bool allowRightClickActions: false
+    property bool followSuspended: false
     property bool showDetectRange: true
     property bool showAttackRange: true
     property bool showCommRange: false
@@ -45,7 +48,7 @@ Item {
 
     signal clickedMap(var logicalPos)
     signal rightClickedMap(var logicalPos)
-    signal unitClicked(string unitId, var button)
+    signal unitClicked(string unitId, var button, int modifiers)
     signal guidePointPicked(var logicalPos, string targetId)
     signal guideCancelled()
     signal doubleClickedUnit(string unitId)
@@ -145,7 +148,11 @@ Item {
     onShowRecentPathsChanged: refresh()
     onShowEnemyHpChanged: refresh()
     onRecentPathsByUnitChanged: refresh()
-    onFocusUnitIdChanged: refresh()
+    onFocusUnitIdChanged: {
+        if (root.focusUnitId) root.followSuspended = false
+        refresh()
+    }
+    onSelectedUnitIdsChanged: refresh()
     onDiscoveryUnitsChanged: refresh()
     onDetectedEnemyIdsChanged: refresh()
     onSimTimeChanged: refresh()
@@ -200,6 +207,19 @@ Item {
     function centerOn(lx, ly) {
         root.center = ({x: lx, y: ly})
         refresh()
+    }
+    // 所有视角共用此入口，确保拖拽后重新点击同一单元也能恢复居中。
+    function focusOnUnit(unitId) {
+        root.followSuspended = false
+        if (!unitId || !root.controller) return false
+        var unit = root.controller.unitAt(unitId)
+        if (!unit || !unit.position || unit.position.length < 2) return false
+        centerOn(unit.position[0], unit.position[1])
+        return true
+    }
+    function focusAt(lx, ly) {
+        root.followSuspended = false
+        centerOn(lx, ly)
     }
 
     // GIS tile map background (uses C++ MapTileRenderer)
@@ -519,7 +539,7 @@ Item {
                     }
 
                     // 选中单元的发光效果
-                    if (root.focusUnitId === u.id) {
+                    if (root.focusUnitId === u.id || root.selectedUnitIds.indexOf(u.id) >= 0) {
                         ctx.fillStyle = "rgba(255,210,63,0.3)"
                         ctx.beginPath(); ctx.arc(p.x, p.y, 22, 0, Math.PI*2); ctx.fill()
                         ctx.strokeStyle = t.focus
@@ -682,8 +702,9 @@ Item {
             cursorShape: root.guideMode ? Qt.CrossCursor : Qt.ArrowCursor
             // 拖拽平移画布。拖动期间解除单元追踪，避免追踪箭头跟随视口平移产生误导
             property bool _panning: false
-            // 实际移动像素距离。> 4 视为拖拽，< 4 视为点击
+            // 从按下点计算的实际移动距离；超过阈值后才进入平移。
             property real _totalDrag: 0
+            property bool _dragActive: false
             property point _panAnchor: Qt.point(0, 0)
             property point _centerAnchor: Qt.point(0, 0)
             // 仅在常规（非引导）模式下允许拖拽平移
@@ -698,10 +719,13 @@ Item {
                 } else if (_panning) {
                     var dx = (mouse.x - _panAnchor.x)
                     var dy = (mouse.y - _panAnchor.y)
-                    _totalDrag += Math.sqrt(dx * dx + dy * dy)
+                    _totalDrag = Math.sqrt(dx * dx + dy * dy)
+                    if (!_dragActive && _totalDrag <= 6) return
+                    _dragActive = true
+                    root.followSuspended = true
                     // 把像素位移转换为逻辑米位移，再平移 center
-                    var ldx = (mouse.x - _panAnchor.x) / root.zoom
-                    var ldy = (mouse.y - _panAnchor.y) / root.zoom
+                    var ldx = dx / root.zoom
+                    var ldy = dy / root.zoom
                     // 画布 y 轴向下，逻辑 y 轴向上；故 dy 取反
                     root.center = ({ x: _centerAnchor.x - ldx, y: _centerAnchor.y + ldy })
                     innerCanvas.requestPaint()
@@ -712,7 +736,14 @@ Item {
                     innerCanvas._guideHover = Qt.point(-1, -1)
                     innerCanvas.requestPaint()
                 }
-                if (_panning) _panning = false
+                // MouseArea 在按下后会持有鼠标抓取；即使指针移出画布，
+                // 也要等到 release/cancel 再结束，避免释放被误判为新点击。
+            }
+            onCanceled: {
+                _panning = false
+                _totalDrag = 0
+                _dragActive = false
+                _dragJustEnded = false
             }
             onPressed: function(mouse) {
                 if (!mouse.buttons || root.guideMode) return
@@ -720,6 +751,7 @@ Item {
                 if ((mouse.buttons & (Qt.LeftButton | Qt.RightButton)) === 0) return
                 _panning = true
                 _totalDrag = 0
+                _dragActive = false
                 _panAnchor = Qt.point(mouse.x, mouse.y)
                 _centerAnchor = Qt.point(root.center.x, root.center.y)
                 // 平移期间解除追踪
@@ -728,9 +760,15 @@ Item {
             onReleased: function(mouse) {
                 if (_panning) {
                     _panning = false
-                    // 拖拽结束后重新读取当前鼠标位置，区分"单纯平移"与"在单元上释放"
-                    var wasDragged = _totalDrag > 6
-                    var lp = root.logicalFromPixel(mouse.x, mouse.y)
+                    var wasDragged = _dragActive
+                    if (wasDragged) {
+                        // 拖拽释放只结束平移，不命中单元、不弹出菜单、不恢复跟随。
+                        _dragJustEnded = true
+                        _totalDrag = 0
+                        _dragActive = false
+                        Qt.callLater(function() { canvasMouse._dragJustEnded = false })
+                        return
+                    }
                     var hit = null
                     for (var i = 0; i < innerCanvas.units.length; i++) {
                         var u = innerCanvas.units[i]
@@ -739,28 +777,21 @@ Item {
                         var dx = mouse.x - p.x, dy = mouse.y - p.y
                         if (dx*dx + dy*dy < 14*14) { hit = u; break }
                     }
-                    if (hit && !wasDragged) {
-                        // 友方单元：再次点击 → 画布重新居中并选中该单元
-                        if (hit.side === root.sideFilter && hit.alive) {
-                            root.centerOn(hit.position[0], hit.position[1])
-                        }
+                    if (hit) {
                         if (mouse.button === Qt.RightButton) {
                             _dragJustEnded = true
-                            root.unitClicked(hit.id, "right")
+                            if (root.allowRightClickActions) {
+                                root.focusOnUnit(hit.id)
+                                root.unitClicked(hit.id, "right", mouse.modifiers)
+                            }
                         } else {
+                            root.focusOnUnit(hit.id)
                             _dragJustEnded = true
-                            root.unitClicked(hit.id, "left")
-                        }
-                    } else if (wasDragged) {
-                        // 已发生拖拽，不再派发 clickedMap；右键拖拽后释放可弹地图右键菜单
-                        if (mouse.button === Qt.RightButton) {
-                            _dragJustEnded = true
-                            root.rightClickedMap(lp)
-                        } else {
-                            _dragJustEnded = true
+                            root.unitClicked(hit.id, "left", mouse.modifiers)
                         }
                     }
                     _totalDrag = 0
+                    _dragActive = false
                 }
             }
             onWheel: function(wheel) {
@@ -769,7 +800,7 @@ Item {
                 innerCanvas.requestPaint()
             }
             onClicked: function(mouse) {
-                // 若拖拽后已经处理过 release（已派发 unitClicked/rightClickedMap），则忽略 onClicked
+                // release 已处理单元点击，或本次交互是拖拽，则忽略 onClicked。
                 if (_dragJustEnded) { _dragJustEnded = false; return }
                 var lp = root.logicalFromPixel(mouse.x, mouse.y)
 
@@ -830,10 +861,12 @@ Item {
                     if (cdx*cdx + cdy*cdy < 14*14) { hit = cu; break }
                 }
                 if (mouse.button === Qt.RightButton) {
-                    if (hit) root.unitClicked(hit.id, "right")
-                    else root.rightClickedMap(lp)
+                    if (root.allowRightClickActions) {
+                        if (hit) root.unitClicked(hit.id, "right", mouse.modifiers)
+                        else root.rightClickedMap(lp)
+                    }
                 } else {
-                    if (hit) root.unitClicked(hit.id, "left")
+                    if (hit) root.unitClicked(hit.id, "left", mouse.modifiers)
                     else root.clickedMap(lp)
                 }
             }

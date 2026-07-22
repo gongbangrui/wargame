@@ -46,8 +46,9 @@ function logout(callServer = true) {
 function renderUsers() {
   const body = $("userRows");
   body.replaceChildren();
-  for (const user of state.users) {
+  for (const [index, user] of state.users.entries()) {
     const tr = document.createElement("tr");
+    tr.style.setProperty("--row-index", index);
     tr.innerHTML = `
       <td class="user-cell"></td><td class="display"></td>
       <td><span class="badge role-${user.role}">${roles[user.role]}</span></td>
@@ -66,6 +67,10 @@ function renderUsers() {
   $("enabledCount").textContent = state.users.filter((u) => u.enabled).length;
   $("sideCount").textContent = `${state.users.filter((u) => u.role === "red").length} / ${state.users.filter((u) => u.role === "blue").length}`;
   $("staffCount").textContent = `${state.users.filter((u) => u.role === "director").length} / ${state.users.filter((u) => u.role === "editor").length}`;
+  document.querySelectorAll("#usersPage .metric-strip strong").forEach((node) => {
+    node.classList.remove("metric-flash");
+    requestAnimationFrame(() => node.classList.add("metric-flash"));
+  });
 }
 
 async function loadUsers() {
@@ -76,6 +81,17 @@ async function loadUsers() {
 
 function monitorStateLabel(value) {
   return value === "healthy" ? "正常" : value === "unknown" ? "未连接" : "异常";
+}
+
+function renderServiceBadge(accountState, gameState) {
+  const node = $("serverState");
+  const text = $("serverStateText");
+  if (!node || !text) return;
+  const healthy = accountState === "healthy" && gameState === "healthy";
+  const degraded = accountState === "healthy" || gameState === "healthy";
+  node.classList.toggle("degraded", !healthy && degraded);
+  node.classList.toggle("offline", !healthy && !degraded);
+  text.textContent = healthy ? "账号与推演服务正常" : degraded ? "部分服务需要检查" : "服务连接异常";
 }
 
 function renderTerminal() {
@@ -136,10 +152,15 @@ function renderMonitor() {
   const overview = state.overview || {};
   const game = overview.gameStatus || {};
   const room = game.roomState || {};
+  const metrics = game.metrics || {};
   $("accountServiceState").textContent = monitorStateLabel(overview.accountStatus);
   $("gameServiceState").textContent = monitorStateLabel(game.status);
+  renderServiceBadge(overview.accountStatus, game.status);
   $("gameClientCount").textContent = game.connectedClients ?? 0;
   $("playerSessionCount").textContent = overview.activePlayerSessions ?? 0;
+  $("resyncRequestCount").textContent = metrics.resyncRequests ?? 0;
+  const uptime = Number(metrics.uptimeSeconds || 0);
+  $("gameUptime").textContent = uptime > 0 ? `${Math.floor(uptime / 3600)}h ${Math.floor(uptime / 60) % 60}m` : "--";
   $("monitorUpdated").textContent = game.updatedAt ? `最近更新：${new Date(game.updatedAt).toLocaleString("zh-CN", { hour12: false })}` : "尚未收到兵棋服务状态，请检查服务是否已启动";
   $("matchPhase").textContent = room.phase === "preparing" ? "准备阶段" : room.phase === "running" ? "推演进行中" : room.phase === "finished" ? "推演结束" : "等待状态";
   $("simTime").textContent = `${Number(room.simTime || 0).toFixed(1)} s`;
@@ -296,6 +317,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const me = await api("/api/admin/me");
       showAdmin(me.username);
       await loadUsers();
+      renderServiceBadge("unknown", "unknown");
     } catch (_) { logout(false); }
   }
 });

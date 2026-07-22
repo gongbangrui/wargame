@@ -156,6 +156,21 @@ QJsonObject StateProjector::snapshotFor(const SimulationEngine& engine, const QS
             unit.speed = 0.0;
             unit.maxHp = runtime.value(QStringLiteral("maxHp")).toDouble(100.0);
             unit.attackPower = 0.0;
+            unit.armor = 0.0;
+            unit.repairRate = 0.0;
+            unit.subsystemRepairRate = 0.0;
+            unit.ammoCapacity = 0;
+            unit.initialAmmo = 0;
+            unit.hitProbability = 0.0;
+            unit.optimalRange = 0.0;
+            unit.minAttackRange = 0.0;
+            unit.cooldownSec = 0.0;
+            unit.damageMin = 0.0;
+            unit.damageMax = 0.0;
+            unit.rangeFalloff = 0.0;
+            unit.fuelCapacitySec = 1.0;
+            unit.initialFuelSec = 0.0;
+            unit.rearmDurationSec = 0.0;
             unit.schedule.clear();
         }
     }

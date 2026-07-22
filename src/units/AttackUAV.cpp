@@ -14,6 +14,48 @@ AttackUAV::AttackUAV(const QString& id, Side side, MessageBus* bus, QObject* par
     setupFsm();
 }
 
+void AttackUAV::setParams(const Params& p) {
+    const double previousPower = attackPower();
+    const bool followsLegacyPower = m_damageMin == previousPower && m_damageMax == previousPower;
+    UnitBase::setParams(p);
+    if (followsLegacyPower) {
+        m_damageMin = p.attackPower;
+        m_damageMax = p.attackPower;
+    }
+}
+
+void AttackUAV::setAttackPower(double value) {
+    const double previousPower = attackPower();
+    const bool followsLegacyPower = m_damageMin == previousPower && m_damageMax == previousPower;
+    UnitBase::setAttackPower(value);
+    if (followsLegacyPower && std::isfinite(value) && value >= 0.0) {
+        m_damageMin = value;
+        m_damageMax = value;
+        emit weaponStateChanged();
+    }
+}
+
+void AttackUAV::configureWeapon(const ScenarioUnit& unit) {
+    m_ammoCapacity = std::max(0, unit.ammoCapacity);
+    m_ammoRemaining = std::clamp(unit.initialAmmo, 0, m_ammoCapacity);
+    m_hitProbability = std::clamp(unit.hitProbability, 0.0, 1.0);
+    m_optimalRange = std::clamp(unit.optimalRange, unit.minAttackRange, unit.attackRange);
+    m_minAttackRange = std::max(0.0, unit.minAttackRange);
+    m_cooldownSec = std::max(0.0, unit.cooldownSec);
+    m_damageMin = std::max(0.0, unit.damageMin);
+    m_damageMax = std::max(m_damageMin, unit.damageMax);
+    m_rangeFalloff = std::max(0.0, unit.rangeFalloff);
+    m_fuelCapacity = std::max(1.0, unit.fuelCapacitySec);
+    m_fuelRemaining = std::clamp(unit.initialFuelSec, 0.0, m_fuelCapacity);
+    m_rearmDurationSec = std::max(0.0, unit.rearmDurationSec);
+    m_turnaroundElapsed = 0.0;
+    m_cooldown = 0.0;
+    m_shotSequence = 0;
+    m_lastShotOutcome.clear();
+    m_pendingShot.reset();
+    emit weaponStateChanged();
+}
+
 void AttackUAV::setupFsm() {
     m_fsm.addState("idle", [this](double) {
     }, [this]{ setHasActiveWaypoints(false); setStatus("待命"); });
@@ -51,7 +93,23 @@ void AttackUAV::setupFsm() {
     [this]{ setHasActiveWaypoints(true); setStatus("撤离至指挥所"); });
     // Transition from withdrawing → idle when arrived
     m_fsm.addTransition("withdrawing", "idle", [this]{
-        return m_waypoints.isEmpty();
+        return m_waypoints.isEmpty() && !serviceRequested();
+    });
+    m_fsm.addTransition("withdrawing", "servicing", [this]{
+        return m_waypoints.isEmpty() && serviceRequested();
+    });
+
+    m_fsm.addState("servicing", [this](double dt) {
+        serviceTick(dt);
+        setStatus(QStringLiteral("补给维修中 %1%")
+                      .arg(qRound(turnaroundProgress() * 100.0)));
+    }, [this]{
+        setHasActiveWaypoints(false);
+        m_turnaroundElapsed = 0.0;
+        setStatus("开始补给与检修");
+    });
+    m_fsm.addTransition("servicing", "idle", [this]{
+        return !serviceRequested();
     });
 
     m_fsm.setInitialState("idle");
@@ -71,6 +129,17 @@ void AttackUAV::onTick(double dt) {
             cancelWaypointMotion();
         }
     }
+    const QString stateBeforeTick = m_fsm.currentState();
+    if (stateBeforeTick != QLatin1String("idle")
+        && stateBeforeTick != QLatin1String("servicing")) {
+        m_fuelRemaining = std::max(0.0, m_fuelRemaining - dt);
+        emit weaponStateChanged();
+    }
+    if (m_fuelRemaining <= m_fuelCapacity * 0.2
+        && stateBeforeTick != QLatin1String("withdrawing")
+        && stateBeforeTick != QLatin1String("servicing")) {
+        beginReturnForService(QStringLiteral("燃油低于 20%"));
+    }
     m_fsm.tick(dt);
     stepCombat(dt);
     if (!m_targetId.isEmpty()) {
@@ -82,6 +151,7 @@ void AttackUAV::cancelWaypointMotion() {
     m_waypoints.clear();
     m_wpIdx = 0;
     setHasActiveWaypoints(false);
+    requestService(false);
     m_fsm.goTo("idle");
 }
 
@@ -103,7 +173,11 @@ void AttackUAV::stepMotion(double dt) {
     }
     if (m_waypoints.isEmpty()) return;
     if (m_wpIdx < 0 || m_wpIdx >= m_waypoints.size()) {
-        cancelWaypointMotion();
+        m_waypoints.clear();
+        m_wpIdx = 0;
+        setHasActiveWaypoints(false);
+        m_fsm.goTo(serviceRequested() ? QStringLiteral("servicing")
+                                      : QStringLiteral("idle"));
         return;
     }
     const auto target = m_waypoints[m_wpIdx].toPointF();
@@ -122,6 +196,10 @@ void AttackUAV::stepMotion(double dt) {
             m_waypoints.clear();
             m_wpIdx = 0;
             setHasActiveWaypoints(false);
+            if (m_fsm.currentState() == QLatin1String("withdrawing")) {
+                m_fsm.goTo(serviceRequested() ? QStringLiteral("servicing")
+                                              : QStringLiteral("idle"));
+            }
         }
         return;
     }
@@ -131,50 +209,178 @@ void AttackUAV::stepMotion(double dt) {
 }
 
 void AttackUAV::stepCombat(double dt) {
-    if (m_targetId.isEmpty()) return;
-    if (m_cooldown > 0.0) m_cooldown -= dt;
-    const double d = distanceToTarget();
-    if (d <= attackRange() && m_armed && m_cooldown <= 0.0) {
-        const QString engagedTargetId = m_targetId;
-        const QString cp = cpId();
-        Message r;
-        r.type = Message::Type::EngagementReport;
-        r.sender = id();
-        r.receiver = cp;
-        r.payload["targetId"] = engagedTargetId;
-        r.payload["distance"] = d;
-        r.payload["hit"] = true;
-        send(r);
-
-        bool destroyed = false;
-        auto* target = findUnit(engagedTargetId);
-        if (target && target->alive()) {
-            target->setHp(target->hp() - params().attackPower);
-            destroyed = !target->alive();
-        }
-
+    if (m_cooldown > 0.0) {
+        m_cooldown = std::max(0.0, m_cooldown - dt);
+        emit weaponStateChanged();
+    }
+    if (m_targetId.isEmpty() || m_pendingShot.has_value()) return;
+    if (m_ammoRemaining <= 0) {
         m_targetId.clear();
-        emit targetChanged();
         m_armed = false;
+        beginReturnForService(QStringLiteral("弹药耗尽"));
+        emit targetChanged();
         emit armedChanged();
-        m_cooldown = kFireCooldownSec;
+        emit weaponStateChanged();
+        return;
+    }
+    const double d = distanceToTarget();
+    if (!m_armed || m_rulesOfEngagement == QLatin1String("hold")
+        || weaponHealth() <= 0.05 || m_cooldown > 0.0 || d > attackRange()) return;
+    if (d < m_minAttackRange) {
+        setStatus(QStringLiteral("目标距离过近，无法射击 %1").arg(m_targetId));
+        return;
+    }
+
+    CombatRequest request;
+    request.attackerId = id();
+    request.targetId = m_targetId;
+    request.shotSequence = m_shotSequence++;
+    request.distance = d;
+    request.attackerEffectiveness = jamFactor() * weaponEffectiveness();
+    request.weapon = WeaponProfile{m_hitProbability, m_minAttackRange, m_optimalRange,
+                                   attackRange(), m_damageMin, m_damageMax, m_rangeFalloff};
+    m_pendingShot = request;
+    --m_ammoRemaining;
+    m_cooldown = m_cooldownSec;
+    setStatus(QStringLiteral("交战中：%1（剩余弹药 %2）").arg(m_targetId).arg(m_ammoRemaining));
+    emit weaponStateChanged();
+}
+
+std::optional<CombatRequest> AttackUAV::takePendingShot() {
+    std::optional<CombatRequest> request = std::move(m_pendingShot);
+    m_pendingShot.reset();
+    return request;
+}
+
+void AttackUAV::applyCombatOutcome(const CombatOutcome& outcome, bool killCredit) {
+    if (outcome.attackerId != id()) return;
+    m_lastShotOutcome = outcome.result;
+
+    Message report;
+    report.type = Message::Type::EngagementReport;
+    report.sender = id();
+    report.receiver = cpId();
+    report.payload["shotId"] = outcome.shotId;
+    report.payload["targetId"] = outcome.targetId;
+    report.payload["distance"] = outcome.distance;
+    report.payload["outcome"] = outcome.result;
+    report.payload["hit"] = outcome.hit();
+    report.payload["probability"] = outcome.effectiveProbability;
+    report.payload["roll"] = outcome.roll;
+    report.payload["damage"] = outcome.damage;
+    report.payload["hpBefore"] = outcome.hpBefore;
+    report.payload["hpAfter"] = outcome.hpAfter;
+    report.payload["ammoRemaining"] = m_ammoRemaining;
+    report.payload["cooldownRemaining"] = m_cooldown;
+    send(report);
+
+    UnitBase* target = findUnit(outcome.targetId);
+    const bool targetGone = !target || !target->alive();
+    const bool ammoExhausted = m_ammoRemaining <= 0;
+    if (targetGone || ammoExhausted) {
+        m_targetId.clear();
+        m_armed = false;
         m_waypoints.clear();
         m_wpIdx = 0;
         setHasActiveWaypoints(false);
-        // 保留时间表：原 CP 自动 Withdraw 行为已移除，攻击方销毁目标后应留在原位，
-        // 由指挥员决定下一步动作；不应抹掉已规划的航路时间表。
-
-        if (destroyed) {
-            Message dest;
-            dest.type = Message::Type::TargetDestroyed;
-            dest.sender = id();
-            dest.receiver = cp;
-            dest.payload["targetId"] = engagedTargetId;
-            dest.payload["attackerId"] = id();
-            send(dest);
-            emit notifyEvent("目标摧毁", QStringLiteral("%1 摧毁 %2").arg(id(), engagedTargetId), "success");
-        }
+        emit targetChanged();
+        emit armedChanged();
     }
+
+    if (killCredit) {
+        Message destroyed;
+        destroyed.type = Message::Type::TargetDestroyed;
+        destroyed.sender = id();
+        destroyed.receiver = cpId();
+        destroyed.payload["targetId"] = outcome.targetId;
+        destroyed.payload["attackerId"] = id();
+        destroyed.payload["shotId"] = outcome.shotId;
+        send(destroyed);
+        setStatus(QStringLiteral("目标 %1 已摧毁").arg(outcome.targetId));
+        emit notifyEvent("目标摧毁", QStringLiteral("%1 摧毁 %2").arg(id(), outcome.targetId), "success");
+    } else if (ammoExhausted) {
+        beginReturnForService(QStringLiteral("弹药耗尽"));
+    } else if (outcome.hit()) {
+        setStatus(QStringLiteral("命中 %1，造成 %2 伤害")
+                      .arg(outcome.targetId).arg(outcome.damage, 0, 'f', 1));
+    } else {
+        setStatus(QStringLiteral("未命中 %1，等待再攻击").arg(outcome.targetId));
+    }
+    emit weaponStateChanged();
+}
+
+bool AttackUAV::restoreRuntimeWeaponState(int ammoRemaining, double cooldown,
+                                          const QString& lastOutcome,
+                                          double fuelRemaining,
+                                          double turnaroundElapsed) {
+    if (ammoRemaining < 0 || ammoRemaining > m_ammoCapacity
+        || !std::isfinite(cooldown) || cooldown < 0.0
+        || (fuelRemaining >= 0.0 && (!std::isfinite(fuelRemaining)
+                                    || fuelRemaining > m_fuelCapacity))
+        || !std::isfinite(turnaroundElapsed) || turnaroundElapsed < 0.0) return false;
+    m_ammoRemaining = ammoRemaining;
+    m_cooldown = cooldown;
+    m_lastShotOutcome = lastOutcome;
+    if (fuelRemaining >= 0.0) m_fuelRemaining = fuelRemaining;
+    m_turnaroundElapsed = turnaroundElapsed;
+    m_pendingShot.reset();
+    emit weaponStateChanged();
+    return true;
+}
+
+double AttackUAV::turnaroundProgress() const {
+    const double resourceProgress = m_rearmDurationSec <= 0.0
+        ? 1.0 : std::clamp(m_turnaroundElapsed / m_rearmDurationSec, 0.0, 1.0);
+    return std::min(resourceProgress, UnitBase::serviceProgress());
+}
+
+bool AttackUAV::serviceTick(double dt) {
+    requestService(true);
+    const bool repaired = UnitBase::serviceTick(dt);
+    m_turnaroundElapsed = std::min(m_rearmDurationSec, m_turnaroundElapsed + dt);
+    const double fillRatio = m_rearmDurationSec <= 0.0
+        ? 1.0 : std::clamp(m_turnaroundElapsed / m_rearmDurationSec, 0.0, 1.0);
+    m_fuelRemaining = m_fuelCapacity * fillRatio;
+    m_ammoRemaining = static_cast<int>(std::floor(m_ammoCapacity * fillRatio + 1e-9));
+    const bool resourcesReady = fillRatio >= 1.0 - 1e-9;
+    requestService(!(repaired && resourcesReady));
+    emit weaponStateChanged();
+    return repaired && resourcesReady;
+}
+
+void AttackUAV::cancelEngagement() {
+    m_targetId.clear();
+    m_armed = false;
+    m_pendingShot.reset();
+    emit targetChanged();
+    emit armedChanged();
+    setStatus(QStringLiteral("已取消交战，保持当前任务"));
+}
+
+void AttackUAV::setRulesOfEngagement(const QString& value) {
+    if (value != QLatin1String("hold") && value != QLatin1String("free")) return;
+    m_rulesOfEngagement = value;
+    if (value == QLatin1String("hold")) cancelEngagement();
+    emit weaponStateChanged();
+}
+
+void AttackUAV::beginReturnForService(const QString& reason) {
+    if (m_fsm.currentState() == QLatin1String("withdrawing")
+        || m_fsm.currentState() == QLatin1String("servicing")) return;
+    UnitBase* cp = findUnit(cpId());
+    if (!cp || !cp->alive()) {
+        cancelEngagement();
+        setStatus(QStringLiteral("%1，指挥所不可用").arg(reason));
+        return;
+    }
+    cancelEngagement();
+    requestService(true);
+    clearSchedule();
+    m_waypoints.clear();
+    m_waypoints.append(QVariant::fromValue(cp->pos().toPointF()));
+    m_wpIdx = 0;
+    m_fsm.goTo("withdrawing");
+    setStatus(QStringLiteral("%1，自动返航").arg(reason));
 }
 
 double AttackUAV::distanceToTarget() const {
@@ -250,6 +456,7 @@ void AttackUAV::onMessage(const Message& m) {
         break;
     }
     case Message::Type::Withdraw: {
+        requestService(m.payload.value("service").toBool(false));
         m_targetId.clear();
         emit targetChanged();
         m_armed = false;
@@ -295,6 +502,7 @@ void AttackUAV::onMessage(const Message& m) {
         break;
     }
     case Message::Type::Halt: {
+        requestService(false);
         m_targetId.clear();
         emit targetChanged();
         m_armed = false;
@@ -305,6 +513,14 @@ void AttackUAV::onMessage(const Message& m) {
         clearSchedule();
         m_fsm.goTo("idle");
         setStatus("待命");
+        break;
+    }
+    case Message::Type::CancelEngagement: {
+        cancelEngagement();
+        break;
+    }
+    case Message::Type::SetRulesOfEngagement: {
+        setRulesOfEngagement(m.payload.value("roe").toString());
         break;
     }
     default: break;
@@ -323,14 +539,21 @@ QJsonObject AttackUAV::behaviorCheckpoint() const {
             {QStringLiteral("waypointIndex"), m_wpIdx},
             {QStringLiteral("targetId"), m_targetId},
             {QStringLiteral("armed"), m_armed},
-            {QStringLiteral("cooldown"), m_cooldown}};
+            {QStringLiteral("cooldown"), m_cooldown},
+            {QStringLiteral("ammoRemaining"), m_ammoRemaining},
+            {QStringLiteral("shotSequence"), static_cast<qint64>(m_shotSequence)},
+            {QStringLiteral("lastShotOutcome"), m_lastShotOutcome},
+            {QStringLiteral("fuelRemaining"), m_fuelRemaining},
+            {QStringLiteral("turnaroundElapsed"), m_turnaroundElapsed},
+            {QStringLiteral("rulesOfEngagement"), m_rulesOfEngagement}};
 }
 
 bool AttackUAV::restoreBehaviorCheckpoint(const QJsonObject& state, QString* error) {
     if (error) error->clear();
     const QString fsmState = state.value(QStringLiteral("fsmState")).toString(QStringLiteral("idle"));
     const QSet<QString> knownStates{QStringLiteral("idle"), QStringLiteral("moving"),
-                                    QStringLiteral("in_position"), QStringLiteral("withdrawing")};
+                                    QStringLiteral("in_position"), QStringLiteral("withdrawing"),
+                                    QStringLiteral("servicing")};
     if (!knownStates.contains(fsmState)) {
         if (error) *error = QStringLiteral("攻击无人机 FSM 状态无效: %1").arg(id());
         return false;
@@ -348,21 +571,55 @@ bool AttackUAV::restoreBehaviorCheckpoint(const QJsonObject& state, QString* err
     }
     const int waypointIndex = state.value(QStringLiteral("waypointIndex")).toInt();
     const double cooldown = state.value(QStringLiteral("cooldown")).toDouble();
+    const int ammoRemaining = state.contains(QStringLiteral("ammoRemaining"))
+        ? state.value(QStringLiteral("ammoRemaining")).toInt(-1) : m_ammoRemaining;
+    const qint64 shotSequence = state.value(QStringLiteral("shotSequence")).toInteger(0);
+    const double fuelRemaining = state.value(QStringLiteral("fuelRemaining")).toDouble(m_fuelCapacity);
+    const double turnaroundElapsed = state.value(QStringLiteral("turnaroundElapsed")).toDouble(0.0);
+    const QString roe = state.value(QStringLiteral("rulesOfEngagement")).toString(QStringLiteral("free"));
     if ((!waypoints.isEmpty() && (waypointIndex < 0 || waypointIndex >= waypoints.size()))
         || (waypoints.isEmpty() && waypointIndex != 0) || !std::isfinite(cooldown)
-        || cooldown < 0.0) {
+        || cooldown < 0.0 || ammoRemaining < 0 || ammoRemaining > m_ammoCapacity
+        || shotSequence < 0 || !std::isfinite(fuelRemaining) || fuelRemaining < 0.0
+        || fuelRemaining > m_fuelCapacity || !std::isfinite(turnaroundElapsed)
+        || turnaroundElapsed < 0.0
+        || (roe != QLatin1String("hold") && roe != QLatin1String("free"))) {
         if (error) *error = QStringLiteral("攻击无人机运行态无效: %1").arg(id());
         return false;
     }
     m_waypoints = waypoints;
     m_wpIdx = waypointIndex;
-    m_targetId = state.value(QStringLiteral("targetId")).toString();
-    m_armed = state.value(QStringLiteral("armed")).toBool();
+    const QString restoredTargetId = state.value(QStringLiteral("targetId")).toString();
+    const bool restoredArmed = state.value(QStringLiteral("armed")).toBool();
+    UnitBase* restoredTarget = restoredTargetId.isEmpty() ? nullptr : findUnit(restoredTargetId);
+    if ((!restoredTargetId.isEmpty()
+         && (!restoredTarget || restoredTarget->side() == side()))
+        || (restoredArmed && restoredTargetId.isEmpty())) {
+        if (error) *error = QStringLiteral("攻击无人机目标状态无效: %1").arg(id());
+        return false;
+    }
+    const QString restoredOutcome = state.value(QStringLiteral("lastShotOutcome")).toString();
+    const QSet<QString> knownOutcomes{QString(), QStringLiteral("hit"), QStringLiteral("miss"),
+                                      QStringLiteral("out_of_range")};
+    if (!knownOutcomes.contains(restoredOutcome)) {
+        if (error) *error = QStringLiteral("攻击无人机交战结果无效: %1").arg(id());
+        return false;
+    }
+    m_targetId = restoredTargetId;
+    m_armed = restoredArmed;
     m_cooldown = cooldown;
+    m_ammoRemaining = ammoRemaining;
+    m_shotSequence = static_cast<quint64>(shotSequence);
+    m_lastShotOutcome = restoredOutcome;
+    m_fuelRemaining = fuelRemaining;
+    m_turnaroundElapsed = turnaroundElapsed;
+    m_rulesOfEngagement = roe;
+    m_pendingShot.reset();
     m_fsm.goTo(fsmState);
     setHasActiveWaypoints(!m_waypoints.isEmpty());
     emit targetChanged();
     emit armedChanged();
+    emit weaponStateChanged();
     return true;
 }
 

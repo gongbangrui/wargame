@@ -2,6 +2,7 @@
 #include "Scenario.h"
 #include "SimulationEngine.h"
 #include "UnitBase.h"
+#include "../units/AttackUAV.h"
 
 #include <QJsonValue>
 #include <QJsonArray>
@@ -74,6 +75,19 @@ void SnapshotCodec::decodeRuntimeUnits(SimulationEngine& engine, const QJsonArra
         if (u.contains("jamFactor")) {
             unit->applyJamming(u.value("jamFactor").toDouble(1.0));
         }
+        if (u.contains(QStringLiteral("subsystems"))) {
+            unit->restoreSubsystemState(u.value(QStringLiteral("subsystems")).toObject());
+        }
+        unit->requestService(u.value(QStringLiteral("serviceRequested")).toBool(false));
+        if (auto* attacker = qobject_cast<AttackUAV*>(unit);
+            attacker && u.contains(QStringLiteral("ammoRemaining"))) {
+            attacker->restoreRuntimeWeaponState(
+                u.value(QStringLiteral("ammoRemaining")).toInt(-1),
+                u.value(QStringLiteral("cooldownRemaining")).toDouble(0.0),
+                u.value(QStringLiteral("lastShotOutcome")).toString(),
+                u.value(QStringLiteral("fuelRemaining")).toDouble(-1.0),
+                u.value(QStringLiteral("turnaroundElapsed")).toDouble(0.0));
+        }
     }
 }
 
@@ -109,6 +123,9 @@ QStringList SnapshotCodec::diffUnitIds(const QJsonArray& a, const QJsonArray& b)
 
 QJsonArray SnapshotCodec::encodeCheckpointUnits(const SimulationEngine& engine) {
     QJsonArray result;
+    result.append(QJsonObject{{QStringLiteral("checkpointType"), QStringLiteral("engine")},
+                              {QStringLiteral("combatSeed"),
+                               QString::number(engine.combatSeed(), 16)}});
     QStringList ids = engine.unitIds();
     ids.sort();
     for (const QString& id : ids) {
@@ -122,8 +139,26 @@ bool SnapshotCodec::decodeCheckpointUnits(SimulationEngine& engine,
                                           QString* error) {
     if (error) error->clear();
     QSet<QString> restoredIds;
+    bool restoredEngineState = false;
     for (const QJsonValue& value : units) {
         const QJsonObject state = value.toObject();
+        if (state.value(QStringLiteral("checkpointType")).toString()
+            == QLatin1String("engine")) {
+            if (restoredEngineState) {
+                if (error) *error = QStringLiteral("检查点包含重复引擎状态");
+                return false;
+            }
+            bool seedOk = false;
+            const quint64 seed = state.value(QStringLiteral("combatSeed")).toString()
+                                     .toULongLong(&seedOk, 16);
+            if (!seedOk || seed == 0) {
+                if (error) *error = QStringLiteral("检查点战斗随机种子无效");
+                return false;
+            }
+            engine.restoreCombatSeed(seed);
+            restoredEngineState = true;
+            continue;
+        }
         const QString id = state.value(QStringLiteral("id")).toString();
         UnitBase* unit = engine.unit(id);
         if (id.isEmpty() || !unit || restoredIds.contains(id)) {
@@ -141,6 +176,10 @@ bool SnapshotCodec::decodeCheckpointUnits(SimulationEngine& engine,
     const QSet<QString> expectedIds(expectedIdList.cbegin(), expectedIdList.cend());
     if (restoredIds != expectedIds) {
         if (error) *error = QStringLiteral("检查点单元集合与场景不一致");
+        return false;
+    }
+    if (!restoredEngineState) {
+        if (error) *error = QStringLiteral("检查点缺少引擎随机状态");
         return false;
     }
     return true;

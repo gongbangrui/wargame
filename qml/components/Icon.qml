@@ -20,7 +20,9 @@ Text {
             refresh: "↻", check: "✓", warning: "!", network: "⌁",
             server: "▣", local: "⌂", plus: "+", minus: "−",
             play: "▶", pause: "Ⅱ", stop: "■", edit: "✎",
-            delete: "⌫", save: "▣", load: "↥", send: "➤", dot: "•"
+            delete: "⌫", save: "▣", load: "↥", send: "➤", dot: "•",
+            history: "◷", download: "⇩", table: "▦", locate: "⌖",
+            "chevron-left": "‹", "chevron-right": "›"
         }
         return glyphs[root.name] || glyphs.dot
     }

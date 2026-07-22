@@ -8,6 +8,8 @@
 #include <QStandardPaths>
 #include <QJsonDocument>
 #include <QFile>
+#include <QSaveFile>
+#include <QFileInfo>
 #include <QDir>
 #include <QUrl>
 #include <algorithm>
@@ -34,7 +36,27 @@ ScenarioUnit scenarioUnitFromVariantMap(const QVariantMap& data, bool generateId
     if (data.contains(QStringLiteral("commRange"))) unit.commRange = data.value(QStringLiteral("commRange")).toDouble();
     if (data.contains(QStringLiteral("speed"))) unit.speed = data.value(QStringLiteral("speed")).toDouble();
     if (data.contains(QStringLiteral("maxHp"))) unit.maxHp = data.value(QStringLiteral("maxHp")).toDouble();
+    if (data.contains(QStringLiteral("armor"))) unit.armor = data.value(QStringLiteral("armor")).toDouble();
+    if (data.contains(QStringLiteral("repairRate"))) unit.repairRate = data.value(QStringLiteral("repairRate")).toDouble();
+    if (data.contains(QStringLiteral("subsystemRepairRate"))) unit.subsystemRepairRate = data.value(QStringLiteral("subsystemRepairRate")).toDouble();
     if (data.contains(QStringLiteral("attackPower"))) unit.attackPower = data.value(QStringLiteral("attackPower")).toDouble();
+    if (data.contains(QStringLiteral("ammoCapacity"))) unit.ammoCapacity = data.value(QStringLiteral("ammoCapacity")).toInt();
+    if (data.contains(QStringLiteral("initialAmmo"))) unit.initialAmmo = data.value(QStringLiteral("initialAmmo")).toInt();
+    if (data.contains(QStringLiteral("hitProbability"))) unit.hitProbability = data.value(QStringLiteral("hitProbability")).toDouble();
+    if (data.contains(QStringLiteral("optimalRange"))) unit.optimalRange = data.value(QStringLiteral("optimalRange")).toDouble();
+    if (data.contains(QStringLiteral("minAttackRange"))) unit.minAttackRange = data.value(QStringLiteral("minAttackRange")).toDouble();
+    if (data.contains(QStringLiteral("cooldownSec"))) unit.cooldownSec = data.value(QStringLiteral("cooldownSec")).toDouble();
+    if (data.contains(QStringLiteral("damageMin"))) unit.damageMin = data.value(QStringLiteral("damageMin")).toDouble();
+    if (data.contains(QStringLiteral("damageMax"))) unit.damageMax = data.value(QStringLiteral("damageMax")).toDouble();
+    if (data.contains(QStringLiteral("rangeFalloff"))) unit.rangeFalloff = data.value(QStringLiteral("rangeFalloff")).toDouble();
+    if (data.contains(QStringLiteral("fuelCapacitySec"))) unit.fuelCapacitySec = data.value(QStringLiteral("fuelCapacitySec")).toDouble();
+    if (data.contains(QStringLiteral("initialFuelSec"))) unit.initialFuelSec = data.value(QStringLiteral("initialFuelSec")).toDouble();
+    if (data.contains(QStringLiteral("rearmDurationSec"))) unit.rearmDurationSec = data.value(QStringLiteral("rearmDurationSec")).toDouble();
+    if (unit.kind == QLatin1String("attackuav")) {
+        if (!data.contains(QStringLiteral("optimalRange"))) unit.optimalRange = unit.attackRange;
+        if (!data.contains(QStringLiteral("damageMin"))) unit.damageMin = unit.attackPower;
+        if (!data.contains(QStringLiteral("damageMax"))) unit.damageMax = unit.attackPower;
+    }
     for (const auto& value : data.value(QStringLiteral("schedule")).toList()) {
         const auto pointMap = value.toMap();
         SchedulePoint point;
@@ -69,6 +91,7 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
         emit unitsForward();
     });
     connect(&m_engine, &SimulationEngine::messagesChanged, this, &SimulationController::messagesForward);
+    connect(&m_engine, &SimulationEngine::timelineChanged, this, &SimulationController::timelineForward);
     connect(&m_engine, &SimulationEngine::mapChanged, this, &SimulationController::mapInfoForward);
     connect(&m_engine, &SimulationEngine::readyForSimChanged, this, &SimulationController::readyForSimForward);
     connect(&m_engine, &SimulationEngine::targetDestroyedVisual, this, &SimulationController::targetDestroyedVisual);
@@ -326,14 +349,23 @@ QJsonObject SimulationController::unitsJson() const {
     return ScenarioIo::toJson(m_engine.scenario());
 }
 
-void SimulationController::upsertUnit(const QVariantMap& data) {
+QString SimulationController::upsertUnit(const QVariantMap& data) {
     ScenarioUnit u = scenarioUnitFromVariantMap(data, true);
     if (isNetworked()) {
+        if (m_matchPhase != QLatin1String("preparing")) return {};
+        const bool ownsSide = m_userRole == QLatin1String("editor")
+            || m_userRole == u.side;
+        if (!ownsSide || (u.side != QLatin1String("red") && u.side != QLatin1String("blue"))) return {};
+        if (!u.id.isEmpty()) {
+            const UnitBase* existing = m_engine.unit(u.id);
+            if (existing && existing->sideStr() != m_userRole && m_userRole != QLatin1String("editor")) return {};
+        }
         m_networkClient.sendScenarioUpsert(scenarioUnitJson(u));
-        return;
+        return u.id;
     }
     m_engine.addOrUpdateUnit(u);
     invalidateCaches();
+    return u.id;
 }
 
 bool SimulationController::replaceUnits(const QVariantList& units) {
@@ -344,6 +376,7 @@ bool SimulationController::replaceUnits(const QVariantList& units) {
         replacement.units.push_back(scenarioUnitFromVariantMap(value.toMap(), false));
     }
     if (isNetworked()) {
+        if (m_userRole != QLatin1String("editor") || m_matchPhase != QLatin1String("preparing")) return false;
         m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
         return true;
     }
@@ -356,6 +389,7 @@ bool SimulationController::replaceUnits(const QVariantList& units) {
 bool SimulationController::replaceScenario(const QVariantMap& scenario) {
     const Scenario replacement = ScenarioIo::fromJson(QJsonObject::fromVariantMap(scenario));
     if (isNetworked()) {
+        if (m_userRole != QLatin1String("editor") || m_matchPhase != QLatin1String("preparing")) return false;
         m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
         return true;
     }
@@ -367,6 +401,9 @@ bool SimulationController::replaceScenario(const QVariantMap& scenario) {
 
 void SimulationController::removeUnit(const QString& id) {
     if (isNetworked()) {
+        if (m_matchPhase != QLatin1String("preparing")) return;
+        const UnitBase* unit = m_engine.unit(id);
+        if (!unit || (m_userRole != QLatin1String("editor") && unit->sideStr() != m_userRole)) return;
         m_networkClient.sendScenarioRemove(id);
         return;
     }
@@ -376,6 +413,276 @@ void SimulationController::removeUnit(const QString& id) {
         m_focusedUnitId.clear();
         emit focusedUnitIdChanged();
     }
+}
+
+bool SimulationController::applyScenarioReplacement(const Scenario& replacement) {
+    if (isNetworked()) {
+        if (m_matchPhase != QLatin1String("preparing")) return false;
+        m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
+        return true;
+    }
+    if (!m_engine.setScenario(replacement)) return false;
+    invalidateCaches();
+    ensureFocusedConsistent();
+    return true;
+}
+
+bool SimulationController::removeUnits(const QStringList& ids) {
+    if (ids.isEmpty()) return false;
+    if (isNetworked() && m_userRole != QLatin1String("editor")) {
+        if (m_matchPhase != QLatin1String("preparing")) return false;
+        for (const QString& id : ids) {
+            const UnitBase* unit = m_engine.unit(id);
+            if (!unit || unit->sideStr() != m_userRole) return false;
+        }
+        for (const QString& id : ids) m_networkClient.sendScenarioRemove(id);
+        return true;
+    }
+    const QSet<QString> selected(ids.cbegin(), ids.cend());
+    Scenario replacement = m_engine.scenario();
+    std::erase_if(replacement.units, [&selected](const ScenarioUnit& unit) {
+        return selected.contains(unit.id);
+    });
+    return applyScenarioReplacement(replacement);
+}
+
+bool SimulationController::batchUpdateUnits(const QStringList& ids,
+                                            const QVariantMap& changes) {
+    if (ids.isEmpty() || changes.isEmpty()) return false;
+    const QSet<QString> selected(ids.cbegin(), ids.cend());
+    Scenario replacement = m_engine.scenario();
+    if (isNetworked() && m_userRole != QLatin1String("editor")) {
+        if (m_matchPhase != QLatin1String("preparing")) return false;
+        for (ScenarioUnit& unit : replacement.units) {
+            if (!selected.contains(unit.id)) continue;
+            if (unit.side != m_userRole) return false;
+            QVariantMap data = scenarioUnitJson(unit).toVariantMap();
+            data[QStringLiteral("x")] = unit.pos.x + changes.value(QStringLiteral("offsetX"), 0.0).toDouble();
+            data[QStringLiteral("y")] = unit.pos.y + changes.value(QStringLiteral("offsetY"), 0.0).toDouble();
+            for (auto it = changes.constBegin(); it != changes.constEnd(); ++it) {
+                if (it.key() != QLatin1String("offsetX") && it.key() != QLatin1String("offsetY")
+                    && it.key() != QLatin1String("side")) data[it.key()] = it.value();
+            }
+            upsertUnit(data);
+        }
+        return true;
+    }
+    const double offsetX = changes.value(QStringLiteral("offsetX"), 0.0).toDouble();
+    const double offsetY = changes.value(QStringLiteral("offsetY"), 0.0).toDouble();
+    static const QSet<QString> editableFields{
+        QStringLiteral("side"), QStringLiteral("alt"), QStringLiteral("detectRange"),
+        QStringLiteral("attackRange"), QStringLiteral("commRange"), QStringLiteral("speed"),
+        QStringLiteral("maxHp"), QStringLiteral("armor"), QStringLiteral("repairRate"),
+        QStringLiteral("subsystemRepairRate"), QStringLiteral("ammoCapacity"),
+        QStringLiteral("initialAmmo"), QStringLiteral("hitProbability"),
+        QStringLiteral("optimalRange"), QStringLiteral("minAttackRange"),
+        QStringLiteral("cooldownSec"), QStringLiteral("damageMin"),
+        QStringLiteral("damageMax"), QStringLiteral("rangeFalloff"),
+        QStringLiteral("fuelCapacitySec"), QStringLiteral("initialFuelSec"),
+        QStringLiteral("rearmDurationSec")};
+    for (ScenarioUnit& unit : replacement.units) {
+        if (!selected.contains(unit.id)) continue;
+        QVariantMap data = scenarioUnitJson(unit).toVariantMap();
+        data[QStringLiteral("x")] = unit.pos.x + offsetX;
+        data[QStringLiteral("y")] = unit.pos.y + offsetY;
+        for (auto it = changes.constBegin(); it != changes.constEnd(); ++it) {
+            if (editableFields.contains(it.key())) data[it.key()] = it.value();
+        }
+        unit = scenarioUnitFromVariantMap(data, false);
+    }
+    return applyScenarioReplacement(replacement);
+}
+
+bool SimulationController::transformUnits(const QStringList& ids,
+                                          const QString& operation,
+                                          double value) {
+    if (ids.isEmpty()) return false;
+    const QSet<QString> selected(ids.cbegin(), ids.cend());
+    Scenario replacement = m_engine.scenario();
+    if (isNetworked() && m_userRole != QLatin1String("editor")) {
+        return false;
+    }
+    std::vector<ScenarioUnit*> units;
+    for (ScenarioUnit& unit : replacement.units) {
+        if (selected.contains(unit.id)) units.push_back(&unit);
+    }
+    if (units.empty()) return false;
+
+    auto byX = [](const ScenarioUnit* a, const ScenarioUnit* b) {
+        return a->pos.x < b->pos.x || (a->pos.x == b->pos.x && a->id < b->id);
+    };
+    auto byY = [](const ScenarioUnit* a, const ScenarioUnit* b) {
+        return a->pos.y < b->pos.y || (a->pos.y == b->pos.y && a->id < b->id);
+    };
+    if (operation == QLatin1String("snap")) {
+        if (!std::isfinite(value) || value <= 0.0) return false;
+        for (ScenarioUnit* unit : units) {
+            unit->pos.x = std::round(unit->pos.x / value) * value;
+            unit->pos.y = std::round(unit->pos.y / value) * value;
+        }
+    } else if (operation.startsWith(QLatin1String("align"))) {
+        double target = 0.0;
+        if (operation == QLatin1String("alignLeft")) {
+            target = (*std::min_element(units.begin(), units.end(), byX))->pos.x;
+            for (ScenarioUnit* unit : units) unit->pos.x = target;
+        } else if (operation == QLatin1String("alignRight")) {
+            target = (*std::max_element(units.begin(), units.end(), byX))->pos.x;
+            for (ScenarioUnit* unit : units) unit->pos.x = target;
+        } else if (operation == QLatin1String("alignTop")) {
+            target = (*std::min_element(units.begin(), units.end(), byY))->pos.y;
+            for (ScenarioUnit* unit : units) unit->pos.y = target;
+        } else if (operation == QLatin1String("alignBottom")) {
+            target = (*std::max_element(units.begin(), units.end(), byY))->pos.y;
+            for (ScenarioUnit* unit : units) unit->pos.y = target;
+        } else if (operation == QLatin1String("alignCenterX")) {
+            for (const ScenarioUnit* unit : units) target += unit->pos.x;
+            target /= static_cast<double>(units.size());
+            for (ScenarioUnit* unit : units) unit->pos.x = target;
+        } else if (operation == QLatin1String("alignCenterY")) {
+            for (const ScenarioUnit* unit : units) target += unit->pos.y;
+            target /= static_cast<double>(units.size());
+            for (ScenarioUnit* unit : units) unit->pos.y = target;
+        } else return false;
+    } else if (operation == QLatin1String("distributeX")
+               || operation == QLatin1String("distributeY")) {
+        if (units.size() < 3) return false;
+        auto comparator = operation == QLatin1String("distributeX") ? byX : byY;
+        std::sort(units.begin(), units.end(), comparator);
+        const double first = operation == QLatin1String("distributeX")
+            ? units.front()->pos.x : units.front()->pos.y;
+        const double last = operation == QLatin1String("distributeX")
+            ? units.back()->pos.x : units.back()->pos.y;
+        const double spacing = (last - first) / static_cast<double>(units.size() - 1);
+        for (size_t index = 1; index + 1 < units.size(); ++index) {
+            if (operation == QLatin1String("distributeX")) units[index]->pos.x = first + spacing * index;
+            else units[index]->pos.y = first + spacing * index;
+        }
+    } else return false;
+    return applyScenarioReplacement(replacement);
+}
+
+QVariantList SimulationController::copyUnits(const QStringList& ids) const {
+    const QSet<QString> selected(ids.cbegin(), ids.cend());
+    QVariantList copied;
+    for (const ScenarioUnit& unit : m_engine.scenario().units) {
+        if (selected.contains(unit.id)) copied.append(scenarioUnitJson(unit).toVariantMap());
+    }
+    return copied;
+}
+
+QStringList SimulationController::pasteUnits(const QVariantList& copied, double offsetX,
+                                             double offsetY,
+                                             const QString& sideOverride) {
+    if (copied.isEmpty() || !std::isfinite(offsetX) || !std::isfinite(offsetY)) return {};
+    Scenario replacement = m_engine.scenario();
+    QSet<QString> existing;
+    for (const ScenarioUnit& unit : replacement.units) existing.insert(unit.id);
+    QStringList created;
+    std::vector<ScenarioUnit> newUnits;
+    const qint64 stamp = QDateTime::currentMSecsSinceEpoch();
+    int serial = 0;
+    for (const QVariant& value : copied) {
+        QVariantMap data = value.toMap();
+        QString id;
+        do {
+            id = QStringLiteral("u_%1_%2").arg(stamp).arg(++serial);
+        } while (existing.contains(id));
+        data[QStringLiteral("id")] = id;
+        data[QStringLiteral("callsign")] = data.value(QStringLiteral("callsign")).toString()
+            + QStringLiteral(" 副本");
+        data[QStringLiteral("x")] = data.value(QStringLiteral("x")).toDouble() + offsetX;
+        data[QStringLiteral("y")] = data.value(QStringLiteral("y")).toDouble() + offsetY;
+        if (sideOverride == QLatin1String("red") || sideOverride == QLatin1String("blue")) {
+            data[QStringLiteral("side")] = sideOverride;
+        }
+        ScenarioUnit unit = scenarioUnitFromVariantMap(data, false);
+        replacement.units.push_back(unit);
+        newUnits.push_back(unit);
+        existing.insert(id);
+        created.append(id);
+    }
+    if (isNetworked() && m_userRole != QLatin1String("editor")) {
+        if (m_matchPhase != QLatin1String("preparing")) return {};
+        for (const QVariant& value : copied) {
+            const QVariantMap source = value.toMap();
+            if (source.value(QStringLiteral("side")).toString() != m_userRole) return {};
+        }
+        for (const ScenarioUnit& unit : newUnits) upsertUnit(scenarioUnitJson(unit).toVariantMap());
+    } else if (!applyScenarioReplacement(replacement)) return {};
+    return created;
+}
+
+QVariantList SimulationController::scenarioValidationIssues() const {
+    QVariantList issues;
+    auto add = [&issues](const QString& severity, const QString& code,
+                         const QString& message, const QString& unitId = QString()) {
+        issues.append(QVariantMap{{QStringLiteral("severity"), severity},
+                                  {QStringLiteral("code"), code},
+                                  {QStringLiteral("message"), message},
+                                  {QStringLiteral("unitId"), unitId}});
+    };
+    QSet<QString> ids;
+    int redCp = 0;
+    int blueCp = 0;
+    const Scenario& scenario = m_engine.scenario();
+    for (const ScenarioUnit& unit : scenario.units) {
+        if (ids.contains(unit.id)) add(QStringLiteral("error"), QStringLiteral("duplicate_id"),
+                                      QStringLiteral("ID 重复"), unit.id);
+        ids.insert(unit.id);
+        if (unit.callsign.trimmed().isEmpty()) add(QStringLiteral("warning"), QStringLiteral("empty_callsign"),
+                                                   QStringLiteral("呼号为空"), unit.id);
+        if (unit.kind == QLatin1String("commandpost")) {
+            if (unit.side == QLatin1String("red")) ++redCp;
+            else if (unit.side == QLatin1String("blue")) ++blueCp;
+        }
+        if (unit.pos.x < 0.0 || unit.pos.y < 0.0
+            || unit.pos.x > scenario.map.widthMeters || unit.pos.y > scenario.map.heightMeters) {
+            add(QStringLiteral("error"), QStringLiteral("out_of_bounds"),
+                QStringLiteral("单元超出地图边界"), unit.id);
+        }
+        for (const SchedulePoint& point : unit.schedule) {
+            if (point.x < 0.0 || point.y < 0.0 || point.x > scenario.map.widthMeters
+                || point.y > scenario.map.heightMeters) {
+                add(QStringLiteral("error"), QStringLiteral("route_out_of_bounds"),
+                    QStringLiteral("路径点超出地图边界"), unit.id);
+                break;
+            }
+        }
+    }
+    if (redCp != 1) add(QStringLiteral("error"), QStringLiteral("red_cp_count"),
+                        QStringLiteral("红方必须恰好有 1 个指挥所，当前 %1 个").arg(redCp));
+    if (blueCp != 1) add(QStringLiteral("error"), QStringLiteral("blue_cp_count"),
+                         QStringLiteral("蓝方必须恰好有 1 个指挥所，当前 %1 个").arg(blueCp));
+    return issues;
+}
+
+QVariantList SimulationController::unitTemplates() const {
+    auto make = [this](const QString& name, const QString& kind, double altitude) {
+        ScenarioUnit unit;
+        unit.callsign = name;
+        unit.kind = kind;
+        unit.side = QStringLiteral("red");
+        unit.pos.alt = altitude;
+        if (kind == QLatin1String("attackuav")) {
+            unit.detectRange = 4000; unit.attackRange = 2500; unit.commRange = 15000;
+            unit.speed = 100; unit.maxHp = 120; unit.optimalRange = 1800;
+            unit.damageMin = 80; unit.damageMax = 120; unit.attackPower = 100;
+        } else if (kind == QLatin1String("reconuav")) {
+            unit.detectRange = 8000; unit.attackRange = 0; unit.speed = 80;
+        } else if (kind == QLatin1String("jammeruav")) {
+            unit.detectRange = 6000; unit.attackRange = 0; unit.speed = 60; unit.maxHp = 80;
+        } else {
+            unit.detectRange = 3000; unit.attackRange = 0; unit.commRange = 10000;
+            unit.speed = 6; unit.maxHp = 80;
+        }
+        QVariantMap result = scenarioUnitJson(unit).toVariantMap();
+        result[QStringLiteral("templateName")] = name;
+        return result;
+    };
+    return {make(QStringLiteral("侦察无人机"), QStringLiteral("reconuav"), 3000),
+            make(QStringLiteral("攻击无人机"), QStringLiteral("attackuav"), 2000),
+            make(QStringLiteral("电子干扰机"), QStringLiteral("jammeruav"), 4000),
+            make(QStringLiteral("地面侦察分队"), QStringLiteral("groundscout"), 0)};
 }
 
 Q_INVOKABLE void SimulationController::setUnitSchedule(const QString& uid, const QVariantList& schedule) {
@@ -388,6 +695,7 @@ Q_INVOKABLE void SimulationController::setUnitSchedule(const QString& uid, const
         }
         for (const auto& unit : m_engine.scenario().units) {
             if (unit.id != uid) continue;
+            if (m_userRole != QLatin1String("editor") && unit.side != m_userRole) return;
             QVariantMap data = scenarioUnitJson(unit).toVariantMap();
             data[QStringLiteral("schedule")] = schedule;
             m_networkClient.sendScenarioUpsert(QJsonObject::fromVariantMap(data));
@@ -398,6 +706,106 @@ Q_INVOKABLE void SimulationController::setUnitSchedule(const QString& uid, const
     m_engine.command(QStringLiteral("setSchedule"),
                      QVariantMap{{QStringLiteral("unitId"), uid},
                                  {QStringLiteral("schedule"), schedule}});
+}
+
+bool SimulationController::seekReplay(double targetTime) {
+    if (isNetworked()) {
+        emit errorForward(QStringLiteral("联网席位不能在本地改写权威回放状态"));
+        return false;
+    }
+    QString error;
+    if (!m_engine.seekReplay(targetTime, &error)) {
+        emit errorForward(error);
+        return false;
+    }
+    invalidateCaches();
+    return true;
+}
+
+bool SimulationController::stepReplayEvent(int direction) {
+    if (direction == 0 || isNetworked()) return false;
+    const QJsonArray events = m_engine.timelineEvents();
+    const double current = m_engine.simTime();
+    double target = direction > 0 ? m_engine.replayDuration() : 0.0;
+    bool found = false;
+    if (direction > 0) {
+        for (const QJsonValue& value : events) {
+            const double time = value.toObject().value(QStringLiteral("simTime")).toDouble();
+            if (time > current + 1e-6 && (!found || time < target)) {
+                target = time;
+                found = true;
+            }
+        }
+    } else {
+        for (const QJsonValue& value : events) {
+            const double time = value.toObject().value(QStringLiteral("simTime")).toDouble();
+            if (time < current - 1e-6 && (!found || time > target)) {
+                target = time;
+                found = true;
+            }
+        }
+    }
+    return seekReplay(target);
+}
+
+QJsonObject SimulationController::battleReport() const {
+    return isNetworked() ? QJsonObject{} : m_engine.battleReport();
+}
+
+QString SimulationController::exportBattleReport(const QString& requestedPath,
+                                                  const QString& requestedFormat) {
+    if (isNetworked()) {
+        emit errorForward(QStringLiteral("联网战报应由权威服务器导出"));
+        return {};
+    }
+    const QString format = requestedFormat.toLower() == QLatin1String("csv")
+        ? QStringLiteral("csv") : QStringLiteral("json");
+    QString path = requestedPath.trimmed();
+    if (path.isEmpty()) {
+        const QString directory = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+            + QStringLiteral("/WargameReports");
+        QDir().mkpath(directory);
+        path = directory + QStringLiteral("/battle-report-%1.%2")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")), format);
+    }
+    if (!path.endsWith(QLatin1Char('.') + format, Qt::CaseInsensitive)) {
+        path += QLatin1Char('.') + format;
+    }
+    if (!QDir().mkpath(QFileInfo(path).absolutePath())) {
+        emit errorForward(QStringLiteral("无法创建战报目录"));
+        return {};
+    }
+
+    const QJsonObject report = m_engine.battleReport();
+    QByteArray data;
+    if (format == QLatin1String("json")) {
+        data = QJsonDocument(report).toJson(QJsonDocument::Indented);
+    } else {
+        auto quote = [](QString value) {
+            value.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+            return QStringLiteral("\"") + value + QStringLiteral("\"");
+        };
+        QString csv = QStringLiteral("sequence,simTime,category,level,title,details\n");
+        for (const QJsonValue& value : report.value(QStringLiteral("events")).toArray()) {
+            const QJsonObject event = value.toObject();
+            csv += QStringLiteral("%1,%2,%3,%4,%5,%6\n")
+                .arg(event.value(QStringLiteral("sequence")).toInteger())
+                .arg(event.value(QStringLiteral("simTime")).toDouble(), 0, 'f', 3)
+                .arg(quote(event.value(QStringLiteral("category")).toString()),
+                     quote(event.value(QStringLiteral("level")).toString()),
+                     quote(event.value(QStringLiteral("title")).toString()),
+                     quote(QString::fromUtf8(QJsonDocument(
+                         event.value(QStringLiteral("details")).toObject())
+                                                .toJson(QJsonDocument::Compact))));
+        }
+        data = csv.toUtf8();
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
+        emit errorForward(QStringLiteral("战报写入失败: %1").arg(path));
+        return {};
+    }
+    return path;
 }
 
 QJsonArray SimulationController::perceptionForSide(const QString& side) const {
@@ -650,6 +1058,12 @@ void SimulationController::ensureFocusedConsistent() {
     if (m_viewMode == "commandpost-blue") m_focusedSide = "blue";
 
     if (m_viewMode == "commandpost-red" || m_viewMode == "commandpost-blue") {
+        // Remote snapshots arrive throughout a simulation. Preserve a valid
+        // user selection; the command post is only a fallback for missing,
+        // destroyed, or opposite-side focused units.
+        const UnitBase* focused = m_engine.unit(m_focusedUnitId);
+        if (focused && focused->alive() && focused->sideStr() == m_focusedSide)
+            return;
         QString id = pickDefaultUnit("commandpost", m_focusedSide);
         if (m_focusedUnitId != id) {
             m_focusedUnitId = id;

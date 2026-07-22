@@ -511,8 +511,9 @@ void NetworkClient::clearPendingCommands(const QString& status, const QString& m
 }
 
 void NetworkClient::sendControl(const QString& action, double speed) {
-    if (!m_authenticated || state() != QLatin1String("connected")) {
-        emit commandRejected(QStringLiteral("当前未连接，不能控制推演进程"));
+    if (!m_authenticated || state() != QLatin1String("connected")
+        || m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()) {
+        emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能控制推演进程"));
         return;
     }
     QJsonObject payload{{QStringLiteral("action"), action}};
@@ -521,40 +522,45 @@ void NetworkClient::sendControl(const QString& action, double speed) {
 }
 
 void NetworkClient::sendReady(bool ready) {
-    if (!m_authenticated || state() != QLatin1String("connected")) {
-        emit commandRejected(QStringLiteral("当前未连接，不能提交就绪状态"));
+    if (!m_authenticated || state() != QLatin1String("connected")
+        || m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()) {
+        emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能提交就绪状态"));
         return;
     }
     sendEnvelope(QStringLiteral("setReady"), QJsonObject{{QStringLiteral("ready"), ready}});
 }
 
 void NetworkClient::sendChat(const QString& text) {
-    if (!m_authenticated || state() != QLatin1String("connected")) {
-        emit commandRejected(QStringLiteral("当前未连接，不能发送消息"));
+    if (!m_authenticated || state() != QLatin1String("connected")
+        || m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()) {
+        emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能发送消息"));
         return;
     }
     sendEnvelope(QStringLiteral("chat"), QJsonObject{{QStringLiteral("text"), text}});
 }
 
 void NetworkClient::sendScenarioUpsert(const QJsonObject& unit) {
-    if (!m_authenticated || state() != QLatin1String("connected")) {
-        emit commandRejected(QStringLiteral("当前未连接，不能修改阵容"));
+    if (!m_authenticated || state() != QLatin1String("connected")
+        || m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()) {
+        emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能修改阵容"));
         return;
     }
     sendEnvelope(QStringLiteral("scenarioUpsert"), QJsonObject{{QStringLiteral("unit"), unit}});
 }
 
 void NetworkClient::sendScenarioRemove(const QString& unitId) {
-    if (!m_authenticated || state() != QLatin1String("connected")) {
-        emit commandRejected(QStringLiteral("当前未连接，不能修改阵容"));
+    if (!m_authenticated || state() != QLatin1String("connected")
+        || m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()) {
+        emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能修改阵容"));
         return;
     }
     sendEnvelope(QStringLiteral("scenarioRemove"), QJsonObject{{QStringLiteral("unitId"), unitId}});
 }
 
 void NetworkClient::sendScenarioReplace(const QJsonObject& scenario) {
-    if (!m_authenticated || state() != QLatin1String("connected")) {
-        emit commandRejected(QStringLiteral("当前未连接，不能替换场景"));
+    if (!m_authenticated || state() != QLatin1String("connected")
+        || m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()) {
+        emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能替换场景"));
         return;
     }
     sendEnvelope(QStringLiteral("scenarioReplace"), QJsonObject{{QStringLiteral("scenario"), scenario}});

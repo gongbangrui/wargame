@@ -86,8 +86,11 @@ class UnitBase : public QObject {
     Q_PROPERTY(double speed READ speed WRITE setSpeed NOTIFY paramsChanged)
     Q_PROPERTY(double maxHp READ maxHp WRITE setMaxHp NOTIFY paramsChanged)
     Q_PROPERTY(double attackPower READ attackPower WRITE setAttackPower NOTIFY paramsChanged)
+    Q_PROPERTY(double armor READ armor NOTIFY damageStateChanged)
     Q_PROPERTY(double hp READ hp NOTIFY hpChanged)
     Q_PROPERTY(bool alive READ alive NOTIFY hpChanged)
+    Q_PROPERTY(bool disabled READ disabled NOTIFY damageStateChanged)
+    Q_PROPERTY(QJsonObject subsystems READ subsystemStateJson NOTIFY damageStateChanged)
     Q_PROPERTY(bool movable READ movable CONSTANT)
     Q_PROPERTY(QVariantList recentPath READ recentPath NOTIFY recentPathChanged)
 public:
@@ -99,7 +102,18 @@ public:
         double speed = 50.0;
         double maxHp = 100.0;
         double attackPower = 100.0;
+        double armor = 0.0;
+        double repairRate = 2.0;
+        double subsystemRepairRate = 0.02;
         GeoPos pos;
+    };
+
+    struct DamageDelta {
+        double hullDamage = 0.0;
+        double sensorLoss = 0.0;
+        double commsLoss = 0.0;
+        double mobilityLoss = 0.0;
+        double weaponLoss = 0.0;
     };
 
     /// @brief Construct unit and subscribe to message bus.
@@ -112,7 +126,7 @@ public:
     virtual ~UnitBase();
 
     /// @brief Apply a full parameter set, clamping HP to new maxHp.
-    void setParams(const Params& p);
+    virtual void setParams(const Params& p);
     /// @brief Set position and notify bus of the change.
     void setPosition(const GeoPos& pos);
     /// @brief Per-tick simulation update, called by the engine.
@@ -141,29 +155,28 @@ public:
     double commRange() const { return m_params.commRange; }
     double baseDetectRange() const { return m_baseDetectRange; }
     double baseCommRange() const { return m_baseCommRange; }
+    double baseAttackRange() const { return m_baseAttackRange; }
+    double baseSpeed() const { return m_baseSpeed; }
     double speed() const { return m_params.speed; }
     double maxHp() const { return m_params.maxHp; }
     double attackPower() const { return m_params.attackPower; }
-    void setAttackPower(double v) {
-        if (!std::isfinite(v) || v < 0.0) return;
-        m_params.attackPower = v;
-        emit paramsChanged();
-    }
+    double armor() const { return m_armor; }
+    double sensorHealth() const { return m_sensorHealth; }
+    double commsHealth() const { return m_commsHealth; }
+    double mobilityHealth() const { return m_mobilityHealth; }
+    double weaponHealth() const { return m_weaponHealth; }
+    double weaponEffectiveness() const { return m_weaponHealth; }
+    bool disabled() const;
+    QJsonObject subsystemStateJson() const;
+    bool restoreSubsystemState(const QJsonObject& state);
+    virtual void setAttackPower(double v);
     double hp() const { return m_hp; }
     bool alive() const { return m_hp > 0.0; }
 
     void setDetectRange(double v);
-    void setAttackRange(double v) {
-        if (!std::isfinite(v) || v < 0.0) return;
-        m_params.attackRange = v;
-        emit paramsChanged();
-    }
+    void setAttackRange(double v);
     void setCommRange(double v);
-    void setSpeed(double v) {
-        if (!std::isfinite(v) || v < 0.0) return;
-        m_params.speed = v;
-        emit paramsChanged();
-    }
+    void setSpeed(double v);
     void setMaxHp(double v) {
         if (!std::isfinite(v) || v <= 0.0) return;
         m_params.maxHp = v;
@@ -195,6 +208,15 @@ public:
     /// @brief Apply ECM jamming factor (0.0 = full jamming, 1.0 = no effect).
     /// Reduces effective comm/detect ranges by the given factor.
     virtual void applyJamming(double factor);
+
+    /// Compute and apply deterministic damage in two separate phases.
+    DamageDelta assessDamage(double incomingDamage, int subsystemIndex) const;
+    void applyDamageDelta(const DamageDelta& delta);
+    /// Restore hull and subsystems while the unit is at a live command post.
+    virtual bool serviceTick(double dt);
+    void requestService(bool value) { m_serviceRequested = value; }
+    bool serviceRequested() const { return m_serviceRequested; }
+    double serviceProgress() const;
 
     void handleMessage(const Message& m);
     bool hasActiveWaypoints() const { return m_hasActiveWaypoints; }
@@ -237,6 +259,7 @@ signals:
     void statusChanged();
     void paramsChanged();
     void hpChanged();
+    void damageStateChanged();
     void recentPathChanged();
     /// @brief UI event notification (e.g. target detected, unit destroyed).
     void notifyEvent(const QString& title, const QString& body, const QString& level);
@@ -270,8 +293,21 @@ protected:
     double m_jamFactor = 1.0;
     double m_baseDetectRange = 5000.0;
     double m_baseCommRange = 20000.0;
+    double m_baseAttackRange = 1500.0;
+    double m_baseSpeed = 50.0;
+    double m_baseAttackPower = 100.0;
+    double m_armor = 0.0;
+    double m_repairRate = 2.0;
+    double m_subsystemRepairRate = 0.02;
+    double m_sensorHealth = 1.0;
+    double m_commsHealth = 1.0;
+    double m_mobilityHealth = 1.0;
+    double m_weaponHealth = 1.0;
+    bool m_serviceRequested = false;
     QString m_cpId;
     std::function<UnitBase*(const QString&)> m_lookup;
+
+    void recomputeEffectiveParameters();
 };
 
 } // namespace gbr

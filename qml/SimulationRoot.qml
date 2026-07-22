@@ -81,8 +81,8 @@ Item {
     Shortcut { sequences: root.toSeqList(root.ks_seqs["speed4"]      || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: { root.controller.setSpeed(4); speedCombo.currentIndex = 3 }}
     Shortcut { sequences: root.toSeqList(root.ks_seqs["speed8"]      || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: { root.controller.setSpeed(8); speedCombo.currentIndex = 4 }}
     Shortcut { sequences: root.toSeqList(root.ks_seqs["step"]        || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: root.controller.stepOnce() }
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speedUp"]     || ""); context: Qt.WindowShortcut; enabled: root.unitControlAllowed; onActivated: root.adjustFocusedUnitSpeed(10) }
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speedDown"]   || ""); context: Qt.WindowShortcut; enabled: root.unitControlAllowed; onActivated: root.adjustFocusedUnitSpeed(-10) }
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speedUp"]     || ""); context: Qt.WindowShortcut; enabled: root.unitControlAllowed && root.controller.viewMode !== "editor"; onActivated: root.adjustFocusedUnitSpeed(10) }
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speedDown"]   || ""); context: Qt.WindowShortcut; enabled: root.unitControlAllowed && root.controller.viewMode !== "editor"; onActivated: root.adjustFocusedUnitSpeed(-10) }
     Shortcut { sequences: root.toSeqList(root.ks_seqs["prevUnit"]    || ""); context: Qt.WindowShortcut
         onActivated: root.switchActiveUnit(-1)
         enabled: root.controller.viewMode === "commandpost-red" || root.controller.viewMode === "commandpost-blue"
@@ -175,12 +175,74 @@ Item {
         property color danger:      "#f04760"
     }
 
+    // 低对比度的态势网格为不同视图提供连续的空间层次，避免遮挡地图内容。
+    Rectangle {
+        id: shellBackground
+        anchors.fill: parent
+        z: -10
+        color: theme.bg
+        opacity: 0.96
+        Repeater {
+            model: 18
+            delegate: Rectangle {
+                required property int index
+                x: (root.width / 18) * index
+                y: 0
+                width: 1
+                height: root.height
+                color: theme.borderSoft
+                opacity: 0.22
+            }
+        }
+        Repeater {
+            model: 12
+            delegate: Rectangle {
+                required property int index
+                x: 0
+                y: (root.height / 12) * index
+                width: root.width
+                height: 1
+                color: theme.borderSoft
+                opacity: 0.18
+            }
+        }
+        Rectangle {
+            id: scanLine
+            x: 0
+            y: topBar.height
+            width: root.width
+            height: 1
+            color: theme.accent
+            opacity: 0.0
+            SequentialAnimation on opacity {
+                loops: Animation.Infinite
+                PauseAnimation { duration: 1800 }
+                NumberAnimation { to: 0.18; duration: 220 }
+                NumberAnimation { to: 0.0; duration: 900 }
+            }
+        }
+    }
+
     Rectangle {
         id: topBar
         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-        height: 46
+        height: 50
         color: "#0a0f1c"
         Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: "#1e3050" }
+        Rectangle {
+            anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+            width: 3
+            color: root.controller && root.controller.userRole === "red" ? theme.red
+                 : root.controller && root.controller.userRole === "blue" ? theme.blue : theme.accent
+            opacity: 0.9
+            Behavior on color { ColorAnimation { duration: 220 } }
+        }
+        Rectangle {
+            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+            height: 2
+            color: theme.accent
+            opacity: 0.28
+        }
 
         RowLayout {
             anchors.fill: parent
@@ -219,7 +281,10 @@ Item {
             Rectangle {
                 visible: root.controller.networked
                 Layout.preferredHeight: 26; Layout.preferredWidth: Math.min(root.compactTopBar ? 104 : 220, onlineIdentity.implicitWidth + 22)
-                radius: 4; color: root.controller.userRole === "red" ? "#3c2028" : root.controller.userRole === "blue" ? "#173248" : root.controller.userRole === "director" ? "#3b311c" : "#183632"
+                radius: 5; color: root.controller.userRole === "red" ? "#3c2028" : root.controller.userRole === "blue" ? "#173248" : root.controller.userRole === "director" ? "#3b311c" : "#183632"
+                border.color: root.controller.userRole === "red" ? theme.red : root.controller.userRole === "blue" ? theme.blue : theme.success
+                border.width: 1
+                Behavior on color { ColorAnimation { duration: 180 } }
                 Text {
                     id: onlineIdentity; anchors.centerIn: parent
                     text: root.compactTopBar
@@ -228,6 +293,17 @@ Item {
                     elide: Text.ElideRight
                     color: theme.textStrong; font.pixelSize: 11; font.bold: true
                 }
+            }
+
+            Rectangle {
+                visible: root.controller.networked && !root.compactTopBar
+                Layout.preferredHeight: 24; Layout.preferredWidth: statusText.implicitWidth + 18
+                radius: 4
+                color: root.controller.networkState === "connected" ? "#12352c"
+                     : root.controller.networkState === "reconnecting" || root.controller.networkState === "synchronizing" ? "#3a2d17" : "#3a1e28"
+                border.color: root.controller.networkState === "connected" ? theme.success
+                            : root.controller.networkState === "reconnecting" || root.controller.networkState === "synchronizing" ? theme.warning : theme.danger
+                Text { id: statusText; anchors.centerIn: parent; text: root.controller.networkState === "connected" ? (root.controller.matchPhase === "running" ? "在线 · 推演中" : "在线 · " + (root.controller.matchPhase === "preparing" ? "准备阶段" : "已结束")) : root.controller.networkStatus; color: theme.textDim; font.pixelSize: 10; elide: Text.ElideRight; maximumLineCount: 1 }
             }
 
             Rectangle { visible: !root.compactTopBar; Layout.preferredWidth: 1; Layout.preferredHeight: 24; color: theme.border; Layout.alignment: Qt.AlignVCenter }
@@ -309,6 +385,7 @@ Item {
                 text: "通信"; onClicked: chatPanel.open()
             }
             Rectangle {
+                id: networkDot
                 visible: root.controller.networked
                 Layout.preferredWidth: 9; Layout.preferredHeight: 9; radius: 5
                 color: root.controller.networkState === "connected" ? theme.success
@@ -317,6 +394,13 @@ Item {
                 HoverHandler { id: networkStatusHover }
                 ToolTip.visible: networkStatusHover.hovered
                 ToolTip.text: root.controller.networkStatus
+                SequentialAnimation on opacity {
+                    running: root.controller.networkState !== "connected"
+                    loops: Animation.Infinite
+                    NumberAnimation { to: 0.35; duration: 500 }
+                    NumberAnimation { to: 1.0; duration: 700 }
+                    onRunningChanged: if (!running) networkDot.opacity = 1.0
+                }
             }
             GhostButton {
                 text: "设置"; onClicked: settingsPanel.open()
@@ -331,6 +415,14 @@ Item {
         id: pageLoader
         anchors.left: parent.left; anchors.right: parent.right
         anchors.top: topBar.bottom; anchors.bottom: parent.bottom
+        opacity: 1.0
+        transform: Scale { id: pageScale; origin.x: pageLoader.width / 2; origin.y: pageLoader.height / 2; xScale: 1.0; yScale: 1.0 }
+        onStatusChanged: {
+            if (status === Loader.Ready) {
+                pageLoader.opacity = 0
+                pageEnter.restart()
+            }
+        }
         sourceComponent: {
             switch (root.controller.viewMode) {
             case "editor": return editorPage
@@ -339,6 +431,16 @@ Item {
             case "director": return directorPage
             }
             return commandPostPage
+        }
+    }
+
+    SequentialAnimation {
+        id: pageEnter
+        running: false
+        ParallelAnimation {
+            NumberAnimation { target: pageLoader; property: "opacity"; to: 1; duration: 260; easing.type: Easing.OutCubic }
+            NumberAnimation { target: pageScale; property: "xScale"; from: 0.985; to: 1; duration: 260; easing.type: Easing.OutCubic }
+            NumberAnimation { target: pageScale; property: "yScale"; from: 0.985; to: 1; duration: 260; easing.type: Easing.OutCubic }
         }
     }
 

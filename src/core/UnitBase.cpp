@@ -45,13 +45,19 @@ void UnitBase::setParams(const Params& p) {
     m_params = p;
     m_baseDetectRange = p.detectRange;
     m_baseCommRange = p.commRange;
+    m_baseAttackRange = p.attackRange;
+    m_baseSpeed = p.speed;
+    m_baseAttackPower = p.attackPower;
+    m_armor = std::clamp(p.armor, 0.0, 0.9);
+    m_repairRate = std::max(0.0, p.repairRate);
+    m_subsystemRepairRate = std::max(0.0, p.subsystemRepairRate);
     bool hpWasClamped = false;
     if (m_hp > m_params.maxHp) { m_hp = m_params.maxHp; hpWasClamped = true; }
     if (hpWasClamped || std::abs(m_hp - prevHp) >= 0.5) {
         m_lastNotifiedHp = m_hp;
         emit hpChanged();
     }
-    applyJamming(m_jamFactor); // emits paramsChanged
+    recomputeEffectiveParameters();
     if (posChanged) emit positionChanged();
     if (m_bus) m_bus->updateUnitPosition(m_id, m_params.pos.toPointF(), m_params.commRange, sideName(m_side));
 }
@@ -74,6 +80,24 @@ void UnitBase::setCallsign(const QString& s) {
     emit callsignChanged();
 }
 
+void UnitBase::setAttackPower(double v) {
+    if (!std::isfinite(v) || v < 0.0) return;
+    m_baseAttackPower = v;
+    recomputeEffectiveParameters();
+}
+
+void UnitBase::setAttackRange(double v) {
+    if (!std::isfinite(v) || v < 0.0) return;
+    m_baseAttackRange = v;
+    recomputeEffectiveParameters();
+}
+
+void UnitBase::setSpeed(double v) {
+    if (!std::isfinite(v) || v < 0.0) return;
+    m_baseSpeed = v;
+    recomputeEffectiveParameters();
+}
+
 void UnitBase::setStatus(const QString& s) {
     if (m_status == s) return;
     m_status = s;
@@ -83,14 +107,17 @@ void UnitBase::setStatus(const QString& s) {
 void UnitBase::applyJamming(double factor) {
     if (!std::isfinite(factor)) factor = 1.0;
     factor = std::max(0.1, std::min(1.0, factor));
-    const double detectRange = m_baseDetectRange * factor;
-    const double commRange = m_baseCommRange * factor;
-    if (factor == m_jamFactor
-        && detectRange == m_params.detectRange
-        && commRange == m_params.commRange) return;
+    if (factor == m_jamFactor) return;
     m_jamFactor = factor;
-    m_params.detectRange = detectRange;
-    m_params.commRange = commRange;
+    recomputeEffectiveParameters();
+}
+
+void UnitBase::recomputeEffectiveParameters() {
+    m_params.detectRange = m_baseDetectRange * m_jamFactor * m_sensorHealth;
+    m_params.commRange = m_baseCommRange * m_jamFactor * m_commsHealth;
+    m_params.attackRange = m_baseAttackRange * (0.5 + 0.5 * m_weaponHealth);
+    m_params.speed = m_baseSpeed * m_mobilityHealth;
+    m_params.attackPower = m_baseAttackPower * (0.35 + 0.65 * m_weaponHealth);
     if (m_bus) {
         m_bus->updateUnitPosition(m_id, m_params.pos.toPointF(), m_params.commRange,
                                   sideName(m_side));
@@ -101,13 +128,95 @@ void UnitBase::applyJamming(double factor) {
 void UnitBase::setDetectRange(double v) {
     if (!std::isfinite(v) || v < 0.0) return;
     m_baseDetectRange = v;
-    applyJamming(m_jamFactor);
+    recomputeEffectiveParameters();
 }
 
 void UnitBase::setCommRange(double v) {
     if (!std::isfinite(v) || v < 0.0) return;
     m_baseCommRange = v;
-    applyJamming(m_jamFactor);
+    recomputeEffectiveParameters();
+}
+
+bool UnitBase::disabled() const {
+    return alive() && m_sensorHealth <= 0.05 && m_commsHealth <= 0.05
+        && m_mobilityHealth <= 0.05 && m_weaponHealth <= 0.05;
+}
+
+QJsonObject UnitBase::subsystemStateJson() const {
+    return {{QStringLiteral("sensor"), m_sensorHealth},
+            {QStringLiteral("comms"), m_commsHealth},
+            {QStringLiteral("mobility"), m_mobilityHealth},
+            {QStringLiteral("weapon"), m_weaponHealth}};
+}
+
+bool UnitBase::restoreSubsystemState(const QJsonObject& state) {
+    if (state.isEmpty()) return true;
+    const double sensor = state.value(QStringLiteral("sensor")).toDouble(-1.0);
+    const double comms = state.value(QStringLiteral("comms")).toDouble(-1.0);
+    const double mobility = state.value(QStringLiteral("mobility")).toDouble(-1.0);
+    const double weapon = state.value(QStringLiteral("weapon")).toDouble(-1.0);
+    auto valid = [](double value) {
+        return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+    };
+    if (!valid(sensor) || !valid(comms) || !valid(mobility) || !valid(weapon)) return false;
+    m_sensorHealth = sensor;
+    m_commsHealth = comms;
+    m_mobilityHealth = mobility;
+    m_weaponHealth = weapon;
+    recomputeEffectiveParameters();
+    emit damageStateChanged();
+    return true;
+}
+
+UnitBase::DamageDelta UnitBase::assessDamage(double incomingDamage,
+                                             int subsystemIndex) const {
+    DamageDelta result;
+    if (!alive() || !std::isfinite(incomingDamage) || incomingDamage <= 0.0) return result;
+    result.hullDamage = incomingDamage * (1.0 - m_armor);
+    const double subsystemLoss = std::clamp(
+        result.hullDamage / std::max(1.0, maxHp()) * 0.7, 0.0, 1.0);
+    switch ((subsystemIndex % 4 + 4) % 4) {
+    case 0: result.sensorLoss = std::min(subsystemLoss, m_sensorHealth); break;
+    case 1: result.commsLoss = std::min(subsystemLoss, m_commsHealth); break;
+    case 2: result.mobilityLoss = std::min(subsystemLoss, m_mobilityHealth); break;
+    case 3: result.weaponLoss = std::min(subsystemLoss, m_weaponHealth); break;
+    }
+    return result;
+}
+
+void UnitBase::applyDamageDelta(const DamageDelta& delta) {
+    const double hullDamage = std::max(0.0, delta.hullDamage);
+    setHp(hp() - hullDamage);
+    m_sensorHealth = std::clamp(m_sensorHealth - std::max(0.0, delta.sensorLoss), 0.0, 1.0);
+    m_commsHealth = std::clamp(m_commsHealth - std::max(0.0, delta.commsLoss), 0.0, 1.0);
+    m_mobilityHealth = std::clamp(m_mobilityHealth - std::max(0.0, delta.mobilityLoss), 0.0, 1.0);
+    m_weaponHealth = std::clamp(m_weaponHealth - std::max(0.0, delta.weaponLoss), 0.0, 1.0);
+    recomputeEffectiveParameters();
+    emit damageStateChanged();
+}
+
+bool UnitBase::serviceTick(double dt) {
+    if (!std::isfinite(dt) || dt <= 0.0 || !alive()) return false;
+    const double previousHp = hp();
+    setHp(hp() + m_repairRate * dt);
+    const double restore = m_subsystemRepairRate * dt;
+    m_sensorHealth = std::min(1.0, m_sensorHealth + restore);
+    m_commsHealth = std::min(1.0, m_commsHealth + restore);
+    m_mobilityHealth = std::min(1.0, m_mobilityHealth + restore);
+    m_weaponHealth = std::min(1.0, m_weaponHealth + restore);
+    recomputeEffectiveParameters();
+    if (hp() != previousHp || restore > 0.0) emit damageStateChanged();
+    const bool complete = hp() >= maxHp() - 1e-6
+        && m_sensorHealth >= 1.0 - 1e-6 && m_commsHealth >= 1.0 - 1e-6
+        && m_mobilityHealth >= 1.0 - 1e-6 && m_weaponHealth >= 1.0 - 1e-6;
+    if (complete) m_serviceRequested = false;
+    return complete;
+}
+
+double UnitBase::serviceProgress() const {
+    const double hull = hp() / std::max(1.0, maxHp());
+    return std::clamp((hull + m_sensorHealth + m_commsHealth
+                       + m_mobilityHealth + m_weaponHealth) / 5.0, 0.0, 1.0);
 }
 
 QVariantList UnitBase::position() const {
@@ -177,6 +286,8 @@ QJsonObject UnitBase::checkpointState() const {
             {QStringLiteral("recentPath"), recentPathArray},
             {QStringLiteral("lastSampleTime"), m_lastSampleTime},
             {QStringLiteral("jamFactor"), m_jamFactor},
+            {QStringLiteral("subsystems"), subsystemStateJson()},
+            {QStringLiteral("serviceRequested"), m_serviceRequested},
             {QStringLiteral("behavior"), behaviorCheckpoint()}};
 }
 
@@ -198,19 +309,37 @@ bool UnitBase::restoreCheckpointState(const QJsonObject& state, QString* error) 
                                   positionArray.at(2).toDouble()};
     const double restoredHp = state.value(QStringLiteral("hp")).toDouble(-1.0);
     const double restoredJamFactor = state.value(QStringLiteral("jamFactor")).toDouble(1.0);
+    const QJsonObject restoredSubsystems = state.value(QStringLiteral("subsystems")).toObject();
+    const double restoredSensor = restoredSubsystems.value(QStringLiteral("sensor")).toDouble(1.0);
+    const double restoredComms = restoredSubsystems.value(QStringLiteral("comms")).toDouble(1.0);
+    const double restoredMobility = restoredSubsystems.value(QStringLiteral("mobility")).toDouble(1.0);
+    const double restoredWeapon = restoredSubsystems.value(QStringLiteral("weapon")).toDouble(1.0);
+    const double restoredLastSampleTime = state.value(QStringLiteral("lastSampleTime")).toDouble(-1.0);
     if (!std::isfinite(restoredPosition.x) || !std::isfinite(restoredPosition.y)
         || !std::isfinite(restoredPosition.alt) || !std::isfinite(restoredHp)
-        || restoredHp < 0.0 || !std::isfinite(restoredJamFactor)) {
+        || restoredHp < 0.0 || restoredHp > maxHp()
+        || !std::isfinite(restoredJamFactor) || restoredJamFactor < 0.1
+        || restoredJamFactor > 1.0 || !std::isfinite(restoredLastSampleTime)
+        || restoredLastSampleTime < -1.0
+        || !std::isfinite(restoredSensor) || restoredSensor < 0.0 || restoredSensor > 1.0
+        || !std::isfinite(restoredComms) || restoredComms < 0.0 || restoredComms > 1.0
+        || !std::isfinite(restoredMobility) || restoredMobility < 0.0 || restoredMobility > 1.0
+        || !std::isfinite(restoredWeapon) || restoredWeapon < 0.0 || restoredWeapon > 1.0) {
         return fail(QStringLiteral("检查点单元数值无效: %1").arg(m_id));
     }
 
     std::vector<SchedulePoint> restoredSchedule;
-    for (const QJsonValue& value : state.value(QStringLiteral("schedule")).toArray()) {
+    const QJsonArray schedule = state.value(QStringLiteral("schedule")).toArray();
+    if (schedule.size() > 512) {
+        return fail(QStringLiteral("检查点计划点过多: %1").arg(m_id));
+    }
+    for (const QJsonValue& value : schedule) {
         const QJsonObject object = value.toObject();
         SchedulePoint point{object.value(QStringLiteral("time")).toDouble(),
                             object.value(QStringLiteral("x")).toDouble(),
                             object.value(QStringLiteral("y")).toDouble()};
-        if (!std::isfinite(point.time) || !std::isfinite(point.x) || !std::isfinite(point.y)) {
+        if (!std::isfinite(point.time) || point.time < 0.0
+            || !std::isfinite(point.x) || !std::isfinite(point.y)) {
             return fail(QStringLiteral("检查点计划点无效: %1").arg(m_id));
         }
         restoredSchedule.push_back(point);
@@ -221,21 +350,34 @@ bool UnitBase::restoreCheckpointState(const QJsonObject& state, QString* error) 
     }
     setPosition(restoredPosition);
     setHp(restoredHp);
+    m_sensorHealth = restoredSensor;
+    m_commsHealth = restoredComms;
+    m_mobilityHealth = restoredMobility;
+    m_weaponHealth = restoredWeapon;
+    m_serviceRequested = state.value(QStringLiteral("serviceRequested")).toBool(false);
     setSchedule(restoredSchedule);
     m_sharedKnowledge = state.value(QStringLiteral("sharedKnowledge")).toObject();
     m_recentPath.clear();
-    for (const QJsonValue& value : state.value(QStringLiteral("recentPath")).toArray()) {
+    const QJsonArray recentPath = state.value(QStringLiteral("recentPath")).toArray();
+    if (recentPath.size() > 200) {
+        return fail(QStringLiteral("检查点轨迹点过多: %1").arg(m_id));
+    }
+    for (const QJsonValue& value : recentPath) {
         const QJsonObject point = value.toObject();
         const double x = point.value(QStringLiteral("x")).toDouble();
         const double y = point.value(QStringLiteral("y")).toDouble();
-        if (std::isfinite(x) && std::isfinite(y)) m_recentPath.emplace_back(x, y);
+        if (!std::isfinite(x) || !std::isfinite(y)) {
+            return fail(QStringLiteral("检查点轨迹点无效: %1").arg(m_id));
+        }
+        m_recentPath.emplace_back(x, y);
     }
-    while (m_recentPath.size() > 200) m_recentPath.pop_front();
-    m_lastSampleTime = state.value(QStringLiteral("lastSampleTime")).toDouble(-1.0);
+    m_lastSampleTime = restoredLastSampleTime;
     applyJamming(restoredJamFactor);
+    recomputeEffectiveParameters();
     setStatus(state.value(QStringLiteral("status")).toString());
     emit sharedKnowledgeChanged();
     emit recentPathChanged();
+    emit damageStateChanged();
     return true;
 }
 

@@ -39,8 +39,7 @@ Item {
         if (idx < 0) idx = 0
         idx = (idx + dir + opts.length) % opts.length
         root.controller.setFocusedUnitId(opts[idx].id)
-        var u = root.controller.unitAt(opts[idx].id)
-        if (u && u.position) canvas.centerOn(u.position[0], u.position[1])
+        canvas.focusOnUnit(opts[idx].id)
     }
 
     function refreshSnap() {
@@ -56,6 +55,7 @@ Item {
             // Force re-center on the new focus unit next tick.
             root._lastFollowPos = Qt.point(NaN, NaN)
             root.refreshSnap()
+            canvas.focusOnUnit(root.controller.focusedUnitId)
         }
         function onUnitsForward() {
             root.refreshSnap()
@@ -153,7 +153,8 @@ Item {
     property point _lastFollowPos: Qt.point(NaN, NaN)
     Timer {
         id: centerTimer
-        interval: 250; running: root.autoFollow && root.controller.running && root.controller.focusedUnitId.length > 0; repeat: true
+        interval: 250; running: root.autoFollow && !canvas.followSuspended
+                 && root.controller.running && root.controller.focusedUnitId.length > 0; repeat: true
         onTriggered: {
             if (!root.controller.running || !root.controller.focusedUnitId) return
             var u = root.controller.unitAt(root.controller.focusedUnitId)
@@ -251,16 +252,7 @@ Item {
                 discoveryUnits: root.discoverySet
 
                 onUnitClicked: function(uid, btn) {
-                    if (btn === "right") {
-                        var u = root.controller.unitAt(uid)
-                        if (u && u.side !== root.side && u.alive) {
-                            // enemy right-click → attack dialog
-                            attackDialog.openWithTarget(uid)
-                            return
-                        }
-                        actionMenu.unitId = uid; actionMenu.popup()
-                        return
-                    }
+                    if (!root.commandsEnabled) return
                     var u = root.controller.unitAt(uid)
                     if (!u || !u.alive) return
                     if (u.side !== root.side) {
@@ -271,15 +263,16 @@ Item {
                     // 指挥所不可移动：不进入引导模式
                     if (u.kind === "commandpost") {
                         root.controller.setFocusedUnitId(uid)
-                        if (u.position) canvas.centerOn(u.position[0], u.position[1])
+                        canvas.focusOnUnit(uid)
                         return
                     }
                     // 友方机动单位：直接进入路径引导模式，不弹详情面板
                     root.controller.setFocusedUnitId(uid)
-                    if (u.position) canvas.centerOn(u.position[0], u.position[1])
+                    canvas.focusOnUnit(uid)
                     canvas.startGuideMode(uid)
                 }
                 onGuidePointPicked: function(lp, tid) {
+                    if (!root.commandsEnabled) { canvas.stopGuideMode(); return }
                     var srcId = canvas.guideSourceUnitId
                     if (!srcId) { canvas.stopGuideMode(); return }
                     var srcUnit = root.controller.unitAt(srcId)
@@ -302,15 +295,14 @@ Item {
                     }
                     canvas.stopGuideMode()
                     root.controller.setFocusedUnitId(srcId)
-                    var u = root.controller.unitAt(srcId)
-                    if (u && u.position) canvas.centerOn(u.position[0], u.position[1])
+                    canvas.focusOnUnit(srcId)
                 }
                 onGuideCancelled: {
                     // 视角切换时也会触发，源单元恢复为当前选中
                     if (canvas.guideSourceUnitId) root.controller.setFocusedUnitId(canvas.guideSourceUnitId)
                 }
                 onClickedMap: function(lp) {
-                    if (canvas.guideMode) return
+                    if (!root.commandsEnabled || canvas.guideMode) return
                     if (root.controller.focusedUnitId)
                         root.controller.command("moveTo", { unitId: root.controller.focusedUnitId, pos: lp })
                 }
@@ -382,79 +374,6 @@ Item {
                         text: "自适应缩放"; base: theme.accent
                         implicitHeight: 24
                         onClicked: root.autoFitZoom()
-                    }
-                }
-            }
-
-            Menu {
-                id: actionMenu
-                property string unitId: ""
-                property var unitInfo: (root.controller.unitAt(actionMenu.unitId) || {})
-                property bool isEnemy: !!actionMenu.unitInfo.side && actionMenu.unitInfo.side !== root.side
-                property bool isMovable: !!actionMenu.unitInfo.movable
-                background: Rectangle {
-                    implicitWidth: 170
-                    color: "#1a1f2b"; border.color: theme.border; radius: 6
-                }
-                delegate: MenuItem {
-                    id: mi
-                    implicitWidth: 160; implicitHeight: 34
-                    padding: 10
-                    contentItem: Text {
-                        text: mi.text; color: mi.enabled ? theme.textDim : theme.disabled
-                        font.pixelSize: 12; horizontalAlignment: Text.AlignLeft
-                        verticalAlignment: Text.AlignVCenter; renderType: Text.NativeRendering
-                    }
-                    background: Rectangle {
-                        color: mi.highlighted ? "#2a4f86" : "transparent"
-                        radius: 3
-                        Rectangle { anchors.left: parent.left; anchors.top: parent.top
-                            anchors.bottom: parent.bottom; width: 3
-                            color: mi.highlighted ? theme.accent : "transparent"
-                            radius: 2
-                        }
-                    }
-                }
-                MenuItem {
-                    text: "路径引导"
-                    enabled: actionMenu.isMovable && !actionMenu.isEnemy
-                    onTriggered: {
-                        root.controller.setFocusedUnitId(actionMenu.unitId)
-                        var u = root.controller.unitAt(actionMenu.unitId)
-                        if (u && u.position) canvas.centerOn(u.position[0], u.position[1])
-                        canvas.startGuideMode(actionMenu.unitId)
-                    }
-                }
-                MenuItem {
-                    text: "下达攻击命令"
-                    enabled: (actionMenu.isEnemy && root.hasAnyAttackUav())
-                          || (actionMenu.unitInfo.kind === "attackuav" && actionMenu.unitInfo.alive && !actionMenu.isEnemy)
-                    onTriggered: {
-                        if (actionMenu.isEnemy) {
-                            attackDialog.openWithTarget(actionMenu.unitId)
-                        } else {
-                            attackDialog.openForAttacker(actionMenu.unitId, "")
-                        }
-                    }
-                }
-                MenuItem {
-                    text: "规划路径"
-                    enabled: {
-                        if (!actionMenu.isMovable || actionMenu.isEnemy) return false
-                        var k = actionMenu.unitInfo.kind || ""
-                        return k === "reconuav" || k === "attackuav"
-                    }
-                    onTriggered: {
-                        root.controller.setFocusedUnitId(actionMenu.unitId)
-                        var s = root.controller.unitAt(actionMenu.unitId)
-                        if (s) routeDialog.openFor(s)
-                    }
-                }
-                MenuItem {
-                    text: "撤离"
-                    enabled: actionMenu.isMovable && !actionMenu.isEnemy && (actionMenu.unitInfo.alive === true)
-                    onTriggered: {
-                        root.controller.command("withdraw", { unitId: actionMenu.unitId })
                     }
                 }
             }
@@ -534,8 +453,7 @@ Item {
                     textRole: "callsign"; valueRole: "id"
                     onActivated: function(idx) {
                         root.controller.setFocusedUnitId(model[idx].id)
-                        var u = root.controller.unitAt(model[idx].id)
-                        if (u && u.position) canvas.centerOn(u.position[0], u.position[1])
+                        canvas.focusOnUnit(model[idx].id)
                     }
                     Connections {
                         target: root.controller
@@ -576,7 +494,7 @@ Item {
                     Layout.fillWidth: true; Layout.preferredHeight: 180; Layout.maximumHeight: 220
                     color: theme.panelAlt; border.color: root.canAttack ? theme.danger : (root.canGuide ? theme.warning : theme.border); radius: 6
                     Behavior on border.color { ColorAnimation { duration: 200 } }
-                    UnitPanel { controller: root.controller; editor: root.editor; anchors.fill: parent; anchors.margins: 12; snap: root.snap }
+                    UnitPanel { controller: root.controller; editor: root.editor; anchors.fill: parent; anchors.margins: 12; snap: root.snap; interactionEnabled: root.commandsEnabled && root.snap.side === root.side }
                 }
 
                 SectionTitle { text: "事件队列" }

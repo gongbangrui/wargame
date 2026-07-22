@@ -30,6 +30,8 @@ struct Message {
         SharedDetect,          // 共享侦察信息
         Pursue,                // 追击指令
         Halt,                  // 停止指令
+        CancelEngagement,      // 取消交战，保留当前位置
+        SetRulesOfEngagement,  // 交战规则
     };
 
     static QString typeName(Type t) {
@@ -48,6 +50,8 @@ struct Message {
         case Type::SharedDetect: return QStringLiteral("SharedDetect");
         case Type::Pursue: return QStringLiteral("Pursue");
         case Type::Halt: return QStringLiteral("Halt");
+        case Type::CancelEngagement: return QStringLiteral("CancelEngagement");
+        case Type::SetRulesOfEngagement: return QStringLiteral("SetRulesOfEngagement");
         }
         return QStringLiteral("Unknown");
     }

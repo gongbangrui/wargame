@@ -9,7 +9,8 @@ WORKDIR /source
 COPY src /source/src
 COPY cmake /source/cmake
 COPY server /source/server
-RUN cmake -S /source/server -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+ARG WARGAME_VERSION=0.1.0
+RUN cmake -S /source/server -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWARGAME_VERSION=${WARGAME_VERSION} \
     && cmake --build /build --target wargame_server
 
 FROM ubuntu:24.04
@@ -23,5 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /build/wargame_server /opt/wargame/wargame_server
 USER wargame
 WORKDIR /opt/wargame
+ARG WARGAME_VERSION=0.1.0
+LABEL org.opencontainers.image.title="wargame-server" \
+      org.opencontainers.image.version="${WARGAME_VERSION}"
 EXPOSE 8090
 CMD ["/opt/wargame/wargame_server"]
