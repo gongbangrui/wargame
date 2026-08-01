@@ -1,0 +1,43 @@
+# Local secrets and generated state
+.env
+.env.*
+!.env.example
+deploy/.env
+server.dev.json
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+room-checkpoint.json
+
+# Build and tool output
+/build/
+/out/
+CMakeUserPresets.json
+.cache/
+.qtcreator/
+*.user
+
+# Python and editor output
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.idea/
+.vscode/
+*~
+*.swp
+*.swo
+
+# Build artifacts
+dist/
+node_modules/
+
+# Tool caches
+.omo/
+
+# OS files
+.DS_Store
+Thumbs.db
