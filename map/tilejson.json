@@ -2,7 +2,7 @@
   "tilejson": "3.0.0",
   "version": "1.0.0",
   "name": "海岸山地联合作战区",
-  "description": "为兵器推演 Qt 项目原创生成的虚构卫星地图",
+  "description": "为兵棋推演 Qt 项目原创生成的虚构卫星地图",
   "scheme": "xyz",
   "format": "png",
   "minzoom": 12,

@@ -3,8 +3,8 @@ import QtQuick
 Item {
     id: root
 
-    property var mapCenter: ({x: 20000, y: 15000})
-    property var mapSize: ({w: 40000, h: 30000})
+    property var mapCenter: ({x: 10000, y: 7500})
+    property var mapSize: ({w: 20000, h: 15000})
     property var viewportRect: ({x: 0, y: 0, w: 1, h: 1})
     property double mainZoom: 1.0
     property var units: []

@@ -1,0 +1,18 @@
+module gbr {
+    module protocol {
+        module dds {
+            struct WargameEnvelope {
+                unsigned long protocolVersion;
+                unsigned long schemaVersion;
+                string<64> messageType;
+                string<64> messageId;
+                unsigned long long sequenceNumber;
+                unsigned long long stateRevision;
+                unsigned long long scenarioRevision;
+                unsigned long long serverTick;
+                string<64> sentAt;
+                sequence<octet, 8388608> payload;
+            };
+        };
+    };
+};

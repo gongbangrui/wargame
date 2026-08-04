@@ -49,3 +49,14 @@ TEST_F(CommandResultTest, AcceptedCommandReturnsStructuredQmlResult) {
     EXPECT_EQ(result.value(QStringLiteral("code")).toString(), QStringLiteral("OK"));
     EXPECT_DOUBLE_EQ(engine.unit(QStringLiteral("red_a1"))->speed(), 125.0);
 }
+
+TEST_F(CommandResultTest, InvalidSpeedExplainsExclusiveLowerBound) {
+    const CommandResult result = engine.executeCommand(
+        QStringLiteral("setSpeed"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_a1")},
+                    {QStringLiteral("speed"), 0.0}});
+
+    EXPECT_FALSE(result.accepted);
+    EXPECT_EQ(result.code, QString::fromLatin1(CommandCode::InvalidArgument));
+    EXPECT_EQ(result.message, QStringLiteral("单元速度必须大于 0 且不超过 1000"));
+}

@@ -45,7 +45,7 @@ struct ScenarioUnit {
     double hitProbability = 1.0;
     double optimalRange = 1500.0;
     double minAttackRange = 0.0;
-    double cooldownSec = 1.0;
+    double cooldownSec = 4.0;
     double damageMin = 100.0;
     double damageMax = 100.0;
     /// Probability loss across the interval from optimalRange to attackRange.
@@ -77,7 +77,7 @@ public:
     static Scenario loadFromFile(const QString& path, QString* err = nullptr);
     static bool saveToFile(const Scenario& s, const QString& path, QString* err = nullptr);
     static QJsonObject toJson(const Scenario& s);
-    static Scenario fromJson(const QJsonObject& o);
+    static Scenario fromJson(const QJsonObject& o, QString* err = nullptr);
 
     static Scenario defaultScenario();
 };

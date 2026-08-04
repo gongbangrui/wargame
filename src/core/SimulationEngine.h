@@ -18,6 +18,7 @@
 #include <QSet>
 #include <QVariantList>
 #include <QVariantMap>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -55,6 +56,7 @@ public:
     /// @brief Load and apply a full scenario, rebuilding all units.
     /// @returns true when the whole scenario passed validation and was applied.
     bool setScenario(const Scenario& s);
+    bool setRemoteScenario(const Scenario& s);
     void loadDefaultScenario();
 
     void setRunning(bool r);
@@ -82,6 +84,7 @@ public:
     /// @brief Incrementally remove a unit without rebuilding all units.
     void removeUnit(const QString& id);
     QStringList unitIds() const;
+    QJsonObject unitIdentityCatalog() const { return m_unitIdentityCatalog; }
     const Scenario& scenario() const { return m_scenario; }
     /// @brief Lookup index for scenario unit by id; returns nullptr if not found.
     ScenarioUnit* findScenarioUnit(const QString& id);
@@ -143,8 +146,10 @@ private slots:
     void flushDirtyUnits();
 
 private:
+    bool applyScenario(const Scenario& s, bool allowEmpty);
     void recomputeReadyForSim();
     void rebuildScenarioIndex();
+    void rememberUnitIdentity(const ScenarioUnit& unit);
 
     /// @brief Resolve the registered CommandPost id for a unit's side (dynamic, not hardcoded).
     QString commandSenderIdFor(const class UnitBase* u) const;
@@ -172,7 +177,7 @@ private:
     std::unique_ptr<MapProvider> m_map;
     std::unique_ptr<IClock> m_clock;
     std::unique_ptr<MessageLogRecorder> m_recorder;
-    std::unordered_map<QString, std::unique_ptr<UnitBase>> m_units;
+    std::map<QString, std::unique_ptr<UnitBase>> m_units;
     Scenario m_scenario;
     /// Index into m_scenario.units by unit id — avoids O(N) std::find_if on
     /// every schedule update / lookup.
@@ -194,15 +199,22 @@ private:
     std::vector<CombatRequest> m_pendingCombatRequests;
     quint64 m_battleSeed = 0x57415247414d4532ULL;
     std::unordered_map<QString, std::function<void(const QVariantMap&)>> m_dispatch;
+    QJsonObject m_unitIdentityCatalog;
+    QStringList m_unitIdentityOrder;
     struct ReplayCommand {
         double time = 0.0;
         qint64 sequence = 0;
         QString action;
         QVariantMap args;
     };
+    struct ReplayStep {
+        double startTime = 0.0;
+        double duration = 0.0;
+    };
     struct ReplayCheckpoint {
         double time = 0.0;
         qsizetype commandCount = 0;
+        qsizetype stepCount = 0;
         QJsonArray state;
     };
     QJsonArray m_timeline;
@@ -211,6 +223,7 @@ private:
     Scenario m_replayInitialScenario;
     quint64 m_replayInitialSeed = 0;
     std::vector<ReplayCommand> m_replayCommands;
+    std::vector<ReplayStep> m_replaySteps;
     std::vector<ReplayCheckpoint> m_replayCheckpoints;
     double m_lastReplayCheckpointTime = 0.0;
     double m_recordedDuration = 0.0;
@@ -219,6 +232,8 @@ private:
 
     void cmdAssignTarget(const QVariantMap& args);
     void cmdSetFlightPlan(const QVariantMap& args);
+    void cmdUnitOrder(const QVariantMap& args);
+    void cmdAttackAt(const QVariantMap& args);
     void cmdEngageTarget(const QVariantMap& args);
     void cmdMoveTo(const QVariantMap& args);
     void cmdWithdraw(const QVariantMap& args);

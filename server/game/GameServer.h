@@ -2,15 +2,21 @@
 
 #include "core/Scenario.h"
 #include "core/SimulationEngine.h"
+#include "AuthoritativeRoom.h"
 #include "RoomPersistence.h"
+#include "FastDdsNode.h"
 
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QList>
 #include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <QObject>
+#include <QPointer>
 #include <QSet>
 #include <QStringList>
 #include <QTimer>
@@ -28,14 +34,36 @@ public:
     bool listen(quint16 port);
 
 private:
+    static constexpr int kMaxPendingConnections = 64;
+    static constexpr int kMaxConnectedClients = 64;
+    static constexpr int kMaxUnauthenticated = 32;
+    static constexpr int kMaxUnauthenticatedPerIp = 8;
+    static constexpr int kUnauthenticatedTimeoutMs = 5000;
+    static constexpr int kAuthenticationMaxAttempts = 3;
+    static constexpr int kAuthenticationDeadlineMs = 15000;
+    static constexpr int kAuthenticationAttemptTimeoutMs = 5000;
+    static constexpr int kAuthenticationBackoffBaseMs = 250;
+    static constexpr int kAuthenticationJitterMs = 100;
+
     struct ClientSession {
         bool authenticated = false;
         bool authenticationPending = false;
+        int authenticationAttempts = 0;
+        qint64 authenticationDeadlineAtMs = 0;
         qint64 userId = 0;
         QString username;
         QString displayName;
         QString role;
+        QString roomId;
+        QString seatId;
+        QString seatType;
+        QString side;
+        bool seatReady = false;
         QString token;
+        QString ddsTicket;
+        qint64 ddsTicketExpiresAtMs = 0;
+        QString connectedAt;
+        QString lastSeenAt;
         quint64 sequence = 0;
         qint64 lastChatAt = 0;
         qint64 rateWindowStartedAt = 0;
@@ -43,12 +71,64 @@ private:
         QSet<QString> recentMessageIds;
         QStringList recentMessageIdOrder;
         QJsonObject lastSnapshot;
+        QHostAddress peerAddress;
     };
 
+    struct RoomStateBackup {
+        QJsonObject authoritativeRoom;
+        Scenario scenario;
+        QJsonArray runtimeUnits;
+        double simTime = 0.0;
+        bool running = false;
+        double speed = 1.0;
+        QString phase;
+        QString roomStatus;
+        bool redReady = false;
+        bool blueReady = false;
+        QJsonArray mapMarks;
+        QHash<QString, QSet<QString>> sharedIntel;
+        QJsonArray chatHistory;
+        quint64 chatSequence = 0;
+        QHash<QString, QJsonObject> commandResults;
+        QStringList commandResultOrder;
+        quint64 scenarioRevision = 1;
+        quint64 stateRevision = 1;
+        quint64 eventSequence = 0;
+    };
+
+    struct MapMarkRateWindow {
+        qint64 startedAt = 0;
+        int count = 0;
+    };
+
+    static QHostAddress normalizedPeerAddress(const QHostAddress& address);
+    static bool incomingTextExceedsPreflight(const QString& text);
+    int authenticatedClientCount() const;
+    int unauthenticatedClientCount() const;
+    int unauthenticatedClientCount(const QHostAddress& peerAddress) const;
     void onNewConnection();
     void onTextMessage(QWebSocket* socket, const QString& text);
     void authenticate(QWebSocket* socket, const QString& token);
+    void startAuthenticationAttempt(QWebSocket* socket);
+    void handleAuthenticationReply(QWebSocket* socket, QNetworkReply* reply);
+    void scheduleAuthenticationRetry(QWebSocket* socket, const QString& classification,
+                                      int statusCode);
+    void failAuthentication(QWebSocket* socket, const QString& code,
+                            const QString& message, const QString& classification,
+                            bool credentialFailure, int statusCode);
     void validateActiveSessions();
+    void syncRoomControl(QWebSocket* requester = nullptr);
+    void refreshRoomControlForJoin(QWebSocket* socket, const QJsonObject& payload,
+                                   qint64 expectedUserId);
+    void completeJoinRoom(QWebSocket* socket, const QJsonObject& payload,
+                          qint64 expectedUserId);
+    void reconcileSeatConfiguration();
+    QJsonArray roomOccupants() const;
+    void reportRoomStatus(const QString& status, const QString& reason,
+                          const QString& winner = QString());
+    void reportRoomPresence();
+    void processKickRequests(const QJsonArray& requests);
+    void processLogoutRequests(const QJsonArray& requests, QWebSocket* joiningSocket = nullptr);
     void finishAuthentication(QWebSocket* socket, const QJsonObject& identity);
     void removeClient(QWebSocket* socket);
 
@@ -56,15 +136,34 @@ private:
     void handleControl(QWebSocket* socket, const QJsonObject& payload);
     void handleReady(QWebSocket* socket, const QJsonObject& payload);
     void handleChat(QWebSocket* socket, const QJsonObject& payload);
+    void handleRoomList(QWebSocket* socket);
+    void sendRoomDirectory(QWebSocket* socket);
+    void broadcastRoomDirectory();
+    void handleJoinRoom(QWebSocket* socket, const QJsonObject& payload);
+    void handleClaimSeat(QWebSocket* socket, const QJsonObject& payload);
+    void handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload);
+    void handleSeatReady(QWebSocket* socket, const QJsonObject& payload);
+    void handleDeployment(QWebSocket* socket, const QJsonObject& payload);
+    void handleRedeployRequest(QWebSocket* socket);
+    void handleRedeploy(QWebSocket* socket, const QJsonObject& payload);
+    void handleSetUnitName(QWebSocket* socket, const QJsonObject& payload);
+    void handleShareIntel(QWebSocket* socket, const QJsonObject& payload);
+    void handleMapMark(QWebSocket* socket, const QJsonObject& payload);
+    void sendSeatDirectory(QWebSocket* socket);
+    QString normalizedRole(const ClientSession& session) const;
+    bool hasSeatPermission(const ClientSession& session, const QString& action) const;
+    UnitBase* seatUnit(const QString& seatId) const;
     void handleScenarioUpsert(QWebSocket* socket, const QJsonObject& payload);
     void handleScenarioRemove(QWebSocket* socket, const QJsonObject& payload);
     void handleScenarioReplace(QWebSocket* socket, const QJsonObject& payload);
+    void handleFastDdsEnvelope(const QString& topic, const QJsonObject& payload);
 
     void sendEnvelope(QWebSocket* socket, const QString& type, const QJsonObject& payload);
     void sendError(QWebSocket* socket, const QString& code, const QString& message,
                    const QString& requestId = QString());
     void sendCommandResult(QWebSocket* socket, const QString& commandId,
                            const CommandResult& result);
+    void closeRoomSessions(const QString& message);
     void broadcastSnapshots(bool forceFull = false);
     void sendFullSnapshot(QWebSocket* socket);
     void broadcastEvent(const QJsonObject& event, const QString& side = QString());
@@ -73,14 +172,29 @@ private:
     QJsonObject snapshotFor(const ClientSession& session) const;
     QSet<QString> visibleUnitIds(const ClientSession& session) const;
     QJsonArray filteredMessages(const ClientSession& session) const;
-    bool canEditSide(const ClientSession& session, const QString& side) const;
+    QJsonArray filteredChatHistory(const ClientSession& session) const;
+    QJsonArray filteredMapMarks(const ClientSession& session) const;
+    void appendMapMark(const QJsonObject& mark);
+    void removeParticipantMarksForUser(qint64 userId, const QString& legacySeatId = QString());
     QString controlledUnitId(const QString& action, const QVariantMap& args) const;
     bool validateCommandOwnership(const ClientSession& session, const QString& action,
                                   const QVariantMap& args, QString* code,
                                   QString* reason) const;
-    void scenarioChanged();
     bool persistScenario(QString* error = nullptr);
     void resetReadiness();
+    void syncAuthoritativeSeats();
+    bool clearDeploymentRuntime(QString* error = nullptr);
+    bool applyDeployedScenario(QString* error = nullptr);
+    bool applyDeploymentIfPreparing(QString* error = nullptr);
+    bool applyDepartureToRuntime(const QStringList& removedUnitIds,
+                                 QString* error = nullptr);
+    RoomStateBackup captureRoomState() const;
+    bool restoreRoomStateBackup(const RoomStateBackup& backup, QString* error = nullptr);
+    bool resetAuthoritativeRuntime(const QString& operationId, QString* error = nullptr);
+    bool resetRoomIfEmpty(QString* error = nullptr);
+    void processRoomOperation(const QJsonObject& operation);
+    void acknowledgeRoomOperation(const QString& operationId, const QString& state,
+                                  quint64 revision, const QString& code = QString());
     QJsonObject roomState() const;
     void audit(const QString& category, const QJsonObject& detail = QJsonObject{});
     void writeMonitorStatus();
@@ -94,14 +208,19 @@ private:
                            QString* error = nullptr);
 
     QWebSocketServer m_server;
+    FastDdsNode m_fastDds;
     QNetworkAccessManager m_network;
     QHash<QWebSocket*, ClientSession> m_clients;
     SimulationEngine m_engine;
+    AuthoritativeRoom m_authoritativeRoom;
     Scenario m_runInitialScenario;
     QTimer m_snapshotTimer;
     QTimer m_sessionValidationTimer;
+    QTimer m_roomSyncTimer;
+    QTimer m_presenceTimer;
     QTimer m_monitorStatusTimer;
     QTimer m_checkpointTimer;
+    QString m_dataDir;
     QString m_authServiceUrl;
     QString m_internalKey;
     QString m_scenarioPath;
@@ -116,6 +235,8 @@ private:
     quint64 m_eventSequence = 0;
     quint64 m_chatSequence = 0;
     QJsonArray m_chatHistory;
+    QJsonArray m_mapMarks;
+    QHash<QString, MapMarkRateWindow> m_mapMarkRateWindows;
     QHash<QString, QJsonObject> m_commandResults;
     QStringList m_commandResultOrder;
     QString m_recoveryError;
@@ -123,6 +244,33 @@ private:
     quint64 m_totalConnections = 0;
     quint64 m_totalDisconnects = 0;
     quint64 m_totalResyncRequests = 0;
+    QString m_authenticationHealth = QStringLiteral("healthy");
+    QString m_lastAuthenticationFailureClass;
+    quint64 m_totalAuthenticationAttempts = 0;
+    quint64 m_totalAuthenticationRetries = 0;
+    quint64 m_totalAuthenticationTransientFailures = 0;
+    quint64 m_totalAuthenticationCredentialFailures = 0;
+    quint64 m_totalAuthenticationFinalFailures = 0;
+    struct SeatOccupant {
+        QString seatId;
+        QString seatType;
+        QString side;
+        qint64 userId = 0;
+        QString username;
+        bool ready = false;
+    };
+    QHash<QString, SeatOccupant> m_seats;
+    QHash<QString, QSet<QString>> m_sharedIntel;
+    QHash<QString, int> m_seatLimits;
+    QHash<QString, QJsonObject> m_seatParameters;
+    QJsonArray m_roomDirectory;
+    bool m_roomDirectoryLoaded = false;
+    bool m_roomSyncInFlight = false;
+    QList<QPointer<QWebSocket>> m_roomListWaiters;
+    QString m_roomId = QStringLiteral("main");
+    QString m_roomName = QStringLiteral("主推演室");
+    QString m_roomStatus = QStringLiteral("stopped");
+    QString m_lastRoomUpdate;
 };
 
 } // namespace gbr

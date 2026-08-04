@@ -72,3 +72,35 @@ TEST(CheckpointTest, RejectsCheckpointWithoutEngineRandomState) {
     EXPECT_FALSE(engine.restoreCheckpointState(checkpoint, 0.0, false, 1.0, &error));
     EXPECT_TRUE(error.contains(QStringLiteral("引擎随机状态")));
 }
+
+TEST(CheckpointTest, RestoresServicingTurnaroundProgressAfterFsmEntry) {
+    SimulationEngine source;
+    source.loadDefaultScenario();
+    QJsonArray checkpoint = source.collectCheckpointState();
+    for (qsizetype index = 0; index < checkpoint.size(); ++index) {
+        QJsonObject unit = checkpoint.at(index).toObject();
+        if (unit.value(QStringLiteral("id")).toString() != QLatin1String("red_a1")) continue;
+        unit[QStringLiteral("serviceRequested")] = true;
+        QJsonObject behavior = unit.value(QStringLiteral("behavior")).toObject();
+        behavior[QStringLiteral("fsmState")] = QStringLiteral("servicing");
+        behavior[QStringLiteral("turnaroundElapsed")] = 1.25;
+        behavior[QStringLiteral("armed")] = false;
+        behavior[QStringLiteral("targetId")] = QString();
+        unit[QStringLiteral("behavior")] = behavior;
+        checkpoint.replace(index, unit);
+        break;
+    }
+
+    SimulationEngine restored;
+    ASSERT_TRUE(restored.setScenario(source.scenario()));
+    QString error;
+    ASSERT_TRUE(restored.restoreCheckpointState(checkpoint, 4.0, false, 1.0, &error))
+        << error.toStdString();
+    auto* attacker = dynamic_cast<AttackUAV*>(restored.unit(QStringLiteral("red_a1")));
+    ASSERT_NE(attacker, nullptr);
+    EXPECT_TRUE(attacker->serviceRequested());
+    EXPECT_DOUBLE_EQ(attacker->turnaroundElapsed(), 1.25);
+    EXPECT_EQ(attacker->checkpointState().value(QStringLiteral("behavior")).toObject()
+                  .value(QStringLiteral("fsmState")).toString(),
+              QStringLiteral("servicing"));
+}

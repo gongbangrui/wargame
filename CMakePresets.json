@@ -2,7 +2,7 @@
   "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 22,
+    "minor": 25,
     "patch": 0
   },
   "configurePresets": [
@@ -36,7 +36,7 @@
     {
       "name": "sanitizers",
       "configurePreset": "sanitizers",
-      "targets": ["wargame_tests", "wargame_server"],
+      "targets": ["wargame_tests", "authoritative_room_tests", "fastdds_integration_tests", "wargame_server"],
       "jobs": 2
     }
   ],

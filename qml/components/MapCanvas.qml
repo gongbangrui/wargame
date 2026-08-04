@@ -11,8 +11,12 @@ Item {
     property var editor: null
     property string sideFilter: "red"
     property bool   showAllSides: false
+    property var visibleUnitIds: null
     property string focusUnitId: ""
+    property string actionTargetId: ""
     property var selectedUnitIds: []
+    // null keeps the legacy all-friendly behavior; an array limits ranges to those units.
+    property var rangeUnitIds: null
     property bool allowRightClickActions: false
     property bool followSuspended: false
     property bool showDetectRange: true
@@ -22,6 +26,7 @@ Item {
     property bool showRecentPaths: true
     property bool showEnemyHp: true
     property bool showCoordinateGrid: false   // controlled by settings
+    property bool showCoordinateReadout: false
     property double simTime: 0.0
     property var discoveryUnits: ([])
     property var recentPathsByUnit: ({})
@@ -50,7 +55,9 @@ Item {
     signal rightClickedMap(var logicalPos)
     signal unitClicked(string unitId, var button, int modifiers)
     signal guidePointPicked(var logicalPos, string targetId)
+    signal guideSourceChanged(string unitId)
     signal guideCancelled()
+    signal mapMarkerClicked(var marker)
     signal doubleClickedUnit(string unitId)
     signal doubleClickedMap(var logicalPos)
 
@@ -85,32 +92,63 @@ Item {
     onGuideModeChanged: innerCanvas.requestPaint()
 
     property double zoom: 1.0
-    property var center: ({x: 20000, y: 15000})
-    property var mapSize: ({w: 40000, h: 30000})
+    property var center: ({x: 10000, y: 7500})
+    property var mapSize: ({w: 20000, h: 15000})
     property double mapOriginLon: 119.30
     property double mapOriginLat: 25.40
     property int mapTileZoom: 12
+    property int mapRevision: 0
     property var routes: []
+    property var mapMarkers: []
+    property string selectedMapMarkerId: ""
+    property bool pointerInside: false
+    property var pointerLogicalPos: ({x: 0, y: 0})
+    property bool actionPulseActive: false
+    property double actionPulseX: -1
+    property double actionPulseY: -1
+    property color actionPulseColor: "#3bd6bd"
 
     // 公共刷新方法
     function refresh() { innerCanvas.requestPaint() }
+    function pulseActionAt(logicalPos, color) {
+        if (!logicalPos) return
+        root.actionPulseX = Number(logicalPos.x)
+        root.actionPulseY = Number(logicalPos.y)
+        root.actionPulseColor = color || t.actionPulse
+        root.actionPulseActive = true
+        actionPulseAnimation.restart()
+    }
 
     function applyMapInfo(recenter) {
         var info = root.controller.mapInfo
         if (!info) return
+        var revision = Number(info.mapRevision)
         var w = Number(info.widthMeters)
         var h = Number(info.heightMeters)
-        if (isFinite(w) && w > 0 && isFinite(h) && h > 0) {
-            var mapSizeChanged = root.mapSize.w !== w || root.mapSize.h !== h
-            root.mapSize = ({w: w, h: h})
-            if (recenter || mapSizeChanged) root.center = ({x: w / 2, y: h / 2})
-        }
         var lon = Number(info.originLon)
         var lat = Number(info.originLat)
         var z = Number(info.tileZoom)
-        if (isFinite(lon)) root.mapOriginLon = lon
-        if (isFinite(lat)) root.mapOriginLat = lat
-        if (isFinite(z)) root.mapTileZoom = Math.round(z)
+
+        if (!Number.isInteger(revision) || revision < 0
+                || !isFinite(w) || w <= 0 || !isFinite(h) || h <= 0
+                || !isFinite(lon) || lon < -180 || lon > 180
+                || !isFinite(lat) || lat < -85.05112878 || lat > 85.05112878
+                || !Number.isInteger(z) || z < 0 || z > 22) return
+        var sameMetadata = revision === root.mapRevision
+                && root.mapSize.w === w && root.mapSize.h === h
+                && root.mapOriginLon === lon && root.mapOriginLat === lat
+                && root.mapTileZoom === z
+        if ((revision === 0 && root.mapRevision > 0)
+                || (revision > 0 && revision < root.mapRevision)
+                || sameMetadata) return
+
+        var mapSizeChanged = root.mapSize.w !== w || root.mapSize.h !== h
+        root.mapSize = ({w: w, h: h})
+        if (recenter || mapSizeChanged) root.center = ({x: w / 2, y: h / 2})
+        root.mapOriginLon = lon
+        root.mapOriginLat = lat
+        root.mapTileZoom = z
+        if (revision > 0) root.mapRevision = revision
         refresh()
     }
 
@@ -153,12 +191,15 @@ Item {
         refresh()
     }
     onSelectedUnitIdsChanged: refresh()
+    onActionTargetIdChanged: refresh()
     onDiscoveryUnitsChanged: refresh()
     onDetectedEnemyIdsChanged: refresh()
     onSimTimeChanged: refresh()
     onZoomChanged: refresh()
     onCenterChanged: refresh()
     onMapSizeChanged: refresh()
+    onMapMarkersChanged: refresh()
+    onSelectedMapMarkerIdChanged: refresh()
 
     Connections {
         target: root.controller
@@ -168,32 +209,68 @@ Item {
 
     QtObject {
         id: t
-        property color bg: "#080b14"
-        property color grid: "#15223a"
+        property color bg: AppContext.page
+        property color grid: AppContext.softLine
         property color land: "#0a0f1e"
-        property color label: "#ffffff"
+        property color label: AppContext.textStrong
         property color labelShadow: "#000000"
-        property color red: "#f04760"
-        property color blue: "#4090ff"
+        property color red: AppContext.red
+        property color blue: AppContext.blue
         property color dead: "#4a5268"
         property color focus: "#ffd240"
-        property color detect: "#4090ff"
+        property color detect: AppContext.info
         property color comm: "#5a6a88"
         property color attack: "#f06050"
-        property color route: "#36c98a"
+        property color route: AppContext.success
         property color routePending: "#5a6a88"
         property color enemy: "#f06050"
-        property color alertBg: "#f0a040"
+        property color alertBg: AppContext.warning
+        property color coordinateBg: "#081219cc"
+        property color coordinateBorder: "#2c4651"
+        property color coordinateText: "#c3d2d8"
+        property color markerRed: AppContext.red
+        property color markerBlue: AppContext.blue
+        property color markerStroke: "#081219"
+        property color markerText: AppContext.text
+        property color rangeCommunication: AppContext.rangeCommunication
+        property color rangeDetection: AppContext.rangeDetection
+        property color rangeAttack: AppContext.rangeAttack
+        property color markerSelf: AppContext.markSelf
+        property color markerCommander: AppContext.markCommander
+        property color markerManeuver: AppContext.signal
+        property color markerAttack: AppContext.warning
+        property color markerWithdrawal: AppContext.danger
+        property color markerOrder: AppContext.info
+        property color actionPulse: AppContext.signal
     }
 
     function logicalFromPixel(px, py) {
-        return { x: center.x + (px - width/2) / zoom, y: center.y - (py - height/2) / zoom }
+        var point = tileMap.screenToSim(px, py)
+        return { x: Number(point.x), y: Number(point.y) }
     }
     function toPixel(lx, ly) {
-        return Qt.point(width/2 + (lx - center.x) * zoom, height/2 - (ly - center.y) * zoom)
+        return tileMap.simToScreen(lx, ly)
+    }
+    function commandMarkerAtPixel(px, py) {
+        var markers = root.mapMarkers || []
+        for (var i = markers.length - 1; i >= 0; i--) {
+            var marker = markers[i]
+            if (!marker || marker.category !== "command" || !marker.position) continue
+            var markerX = marker.position.x !== undefined
+                ? Number(marker.position.x) : Number(marker.position[0])
+            var markerY = marker.position.y !== undefined
+                ? Number(marker.position.y) : Number(marker.position[1])
+            if (!isFinite(markerX) || !isFinite(markerY)) continue
+            var point = root.toPixel(markerX, markerY)
+            var dx = px - point.x
+            var dy = py - point.y
+            if (dx * dx + dy * dy <= 24 * 24) return marker
+        }
+        return null
     }
     function isVisible(u) {
         if (!u) return false
+        if (root.visibleUnitIds !== null && root.visibleUnitIds.indexOf(u.id) < 0) return false
         if (showAllSides) return true
         if (u.side === sideFilter) return true
         if (root.detectedEnemyIds && root.detectedEnemyIds.length > 0) {
@@ -235,6 +312,8 @@ Item {
         zoom: Math.max(0.05, root.zoom)
         originLon: root.mapOriginLon
         originLat: root.mapOriginLat
+        logicalWidthMeters: root.mapSize.w
+        logicalHeightMeters: root.mapSize.h
         tileZoom: root.mapTileZoom
     }
     // qmllint enable unqualified
@@ -319,10 +398,12 @@ Item {
                     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke()
                 }
             }
+            ctx.fillStyle = "rgba(5, 12, 20, 0.74)"
+            ctx.fillRect(6, 4, 148, 40)
             ctx.font = "bold 12px sans-serif"
-            ctx.fillStyle = "rgba(255,255,255,0.7)"
+            ctx.fillStyle = "rgba(255,255,255,0.92)"
             ctx.fillText("画布 " + Math.round(root.mapSize.w/1000) + " km × " + Math.round(root.mapSize.h/1000) + " km", 12, 18)
-            ctx.fillStyle = "rgba(255,255,255,0.4)"
+            ctx.fillStyle = "rgba(220,232,242,0.88)"
             ctx.font = "11px sans-serif"
             ctx.fillText("缩放 " + root.zoom.toFixed(2) + "x", 12, 36)
 
@@ -364,6 +445,161 @@ Item {
                         ctx.fillText("t=" + (pt.time).toFixed(0), pp.x + 6, pp.y - 4)
                     }
                 }
+            }
+
+            // 手动情报标记：只由服务器投影到当前阵营/战位，绝不自动传播。
+            var markers = root.mapMarkers || []
+            for (var mi = 0; mi < markers.length; mi++) {
+                var marker = markers[mi]
+                var position = marker && marker.position
+                if (!position) continue
+                var markerX = position.x !== undefined ? Number(position.x) : Number(position[0])
+                var markerY = position.y !== undefined ? Number(position.y) : Number(position[1])
+                if (!isFinite(markerX) || !isFinite(markerY)) continue
+                var mp = root.toPixel(markerX, markerY)
+                var commandMarker = marker.category === "command"
+                var commandKind = marker.commandKind || ""
+                var projectedMarkType = marker.markType || ""
+                var currentSeatId = root.controller ? root.controller.currentSeatId : ""
+                var participantMarker = projectedMarkType === "self"
+                    || (!projectedMarkType && currentSeatId && marker.seatId === currentSeatId)
+                var ownMarker = participantMarker && currentSeatId && marker.seatId === currentSeatId
+                var commanderMarker = projectedMarkType === "commander"
+                    || (!projectedMarkType && marker.seatId
+                        && String(marker.seatId).indexOf("_commander") > 0)
+                ctx.save()
+                var commandColor = commandKind === "attack" ? t.markerAttack
+                    : commandKind === "withdrawal" ? t.markerWithdrawal
+                    : commandKind === "text" ? t.markerOrder : t.markerManeuver
+                ctx.fillStyle = commandMarker ? commandColor
+                    : commanderMarker ? t.markerCommander
+                    : participantMarker ? t.markerSelf
+                    : (marker.side === "red" ? t.markerRed : t.markerBlue)
+                ctx.strokeStyle = t.markerStroke
+                ctx.lineWidth = commanderMarker ? 3 : 2
+                ctx.beginPath()
+                if (commandMarker && commandKind === "attack") {
+                    ctx.arc(mp.x, mp.y, 9, 0, Math.PI * 2)
+                } else if (commandMarker && commandKind === "withdrawal") {
+                    ctx.moveTo(mp.x, mp.y + 10)
+                    ctx.lineTo(mp.x - 9, mp.y - 7)
+                    ctx.lineTo(mp.x + 9, mp.y - 7)
+                    ctx.closePath()
+                } else if (commandMarker && commandKind === "text") {
+                    ctx.rect(mp.x - 8, mp.y - 8, 16, 16)
+                } else if (commandMarker) {
+                    ctx.arc(mp.x, mp.y, 8, 0, Math.PI * 2)
+                } else if (commanderMarker) {
+                    var markerRadius = 17
+                    for (var oi = 0; oi < 8; oi++) {
+                        var oa = -Math.PI / 8 + oi * Math.PI / 4
+                        var ox = mp.x + Math.cos(oa) * markerRadius
+                        var oy = mp.y + Math.sin(oa) * markerRadius
+                        if (oi === 0) ctx.moveTo(ox, oy); else ctx.lineTo(ox, oy)
+                    }
+                    ctx.closePath()
+                } else if (participantMarker) {
+                    var ts = 8
+                    ctx.moveTo(mp.x, mp.y + ts)
+                    ctx.lineTo(mp.x - ts, mp.y - ts * 0.7)
+                    ctx.lineTo(mp.x + ts, mp.y - ts * 0.7)
+                    ctx.closePath()
+                } else {
+                    ctx.arc(mp.x, mp.y, 6, 0, Math.PI * 2)
+                }
+                ctx.fill(); ctx.stroke()
+                if (commandMarker && commandKind === "maneuver") {
+                    ctx.strokeStyle = "#ffffff"
+                    ctx.lineWidth = 2
+                    ctx.beginPath()
+                    ctx.moveTo(mp.x - 4, mp.y + 3)
+                    ctx.lineTo(mp.x + 4, mp.y - 4)
+                    ctx.moveTo(mp.x, mp.y - 4)
+                    ctx.lineTo(mp.x + 4, mp.y - 4)
+                    ctx.lineTo(mp.x + 4, mp.y)
+                    ctx.stroke()
+                } else if (commandMarker && commandKind === "attack") {
+                    ctx.strokeStyle = "#ffffff"
+                    ctx.lineWidth = 1.5
+                    ctx.beginPath()
+                    ctx.moveTo(mp.x - 13, mp.y); ctx.lineTo(mp.x + 13, mp.y)
+                    ctx.moveTo(mp.x, mp.y - 13); ctx.lineTo(mp.x, mp.y + 13)
+                    ctx.stroke()
+                } else if (commandMarker && commandKind === "text") {
+                    ctx.strokeStyle = "#ffffff"
+                    ctx.lineWidth = 1.5
+                    ctx.beginPath()
+                    ctx.moveTo(mp.x - 4, mp.y - 3); ctx.lineTo(mp.x + 4, mp.y - 3)
+                    ctx.moveTo(mp.x - 4, mp.y + 1); ctx.lineTo(mp.x + 4, mp.y + 1)
+                    ctx.moveTo(mp.x - 4, mp.y + 5); ctx.lineTo(mp.x + 2, mp.y + 5)
+                    ctx.stroke()
+                }
+                if (commanderMarker) {
+                    ctx.strokeStyle = t.markerCommander
+                    ctx.lineWidth = 3
+                    var frameRadius = commandMarker ? 20 : 23
+                    ctx.beginPath()
+                    ctx.rect(mp.x - frameRadius, mp.y - frameRadius,
+                             frameRadius * 2, frameRadius * 2)
+                    ctx.stroke()
+                    if (commandMarker) {
+                        ctx.fillStyle = t.markerCommander
+                        ctx.beginPath()
+                        ctx.arc(mp.x + frameRadius - 2, mp.y - frameRadius + 2,
+                                8, 0, Math.PI * 2)
+                        ctx.fill()
+                        ctx.strokeStyle = t.markerStroke
+                        ctx.lineWidth = 2
+                        ctx.stroke()
+                        ctx.fillStyle = "#081219"
+                        ctx.font = "bold 10px sans-serif"
+                        ctx.textAlign = "center"
+                        ctx.textBaseline = "middle"
+                        ctx.fillText("令", mp.x + frameRadius - 2,
+                                     mp.y - frameRadius + 3)
+                    } else {
+                        ctx.fillStyle = "#081219"
+                        ctx.font = "bold 13px sans-serif"
+                        ctx.textAlign = "center"
+                        ctx.textBaseline = "middle"
+                        ctx.fillText("令", mp.x, mp.y + 1)
+                    }
+                    ctx.textAlign = "start"
+                    ctx.textBaseline = "alphabetic"
+                } else if (participantMarker && !commandMarker) {
+                    ctx.strokeStyle = t.markerSelf
+                    ctx.lineWidth = 1
+                    ctx.beginPath(); ctx.arc(mp.x, mp.y, 11, 0, Math.PI * 2); ctx.stroke()
+                    ctx.fillStyle = "#ffffff"
+                    ctx.globalAlpha = 0.7
+                    ctx.beginPath(); ctx.arc(mp.x, mp.y - 1, 2.5, 0, Math.PI * 2); ctx.fill()
+                    ctx.globalAlpha = 1.0
+                }
+                if (commandMarker && marker.id && marker.id === root.selectedMapMarkerId) {
+                    ctx.strokeStyle = t.focus
+                    ctx.lineWidth = 2
+                    ctx.beginPath(); ctx.arc(mp.x, mp.y, 25, 0, Math.PI * 2); ctx.stroke()
+                }
+                ctx.fillStyle = t.markerText
+                ctx.font = "10px sans-serif"
+                var markerLabel = marker.label || "标记"
+                if (commandMarker) {
+                    var commandLabel = commandKind === "attack" ? "攻击"
+                        : commandKind === "withdrawal" ? "撤离"
+                        : commandKind === "text" ? "命令" : "机动"
+                    markerLabel = "[指挥·" + commandLabel + "]"
+                }
+                else if (commanderMarker) markerLabel = "[指挥令] " + markerLabel
+                else if (ownMarker) {
+                    if (marker.category !== "selfMove")
+                        markerLabel = "[我的点] " + markerLabel
+                }
+                else if (participantMarker) markerLabel = "[下属报告] " + markerLabel
+                if (marker.status) markerLabel += " · " + marker.status
+                var labelOffsetX = commanderMarker ? 28 : participantMarker ? 14 : 9
+                var labelOffsetY = commanderMarker ? -12 : -7
+                ctx.fillText(markerLabel, mp.x + labelOffsetX, mp.y + labelOffsetY)
+                ctx.restore()
             }
 
             // 路径引导模式：从源单元到鼠标位置的预览连线
@@ -458,10 +694,12 @@ Item {
                 var dead = !u.alive
                 var isEnemy = root.showAllSides ? false : (u.side !== root.sideFilter)
                 var p = root.toPixel(u.position[0], u.position[1])
+                var showsRanges = root.rangeUnitIds === null
+                    || root.rangeUnitIds.indexOf(u.id) >= 0
 
-                if (!dead && !isEnemy && root.showDetectRange && u.detectRange > 0) {
+                if (showsRanges && !dead && !isEnemy && root.showDetectRange && u.detectRange > 0) {
                     ctx.save()
-                    ctx.strokeStyle = "#4d9bff"
+                    ctx.strokeStyle = t.rangeDetection
                     ctx.lineWidth = 1.5
                     ctx.setLineDash([8, 6])
                     ctx.beginPath()
@@ -473,10 +711,11 @@ Item {
                     ctx.fill()
                     ctx.restore()
                 }
-                if (!dead && !isEnemy && root.showCommRange && u.commRange > 0) {
+                if (showsRanges && !dead && !isEnemy && root.showCommRange && u.commRange > 0) {
                     ctx.save()
-                    ctx.strokeStyle = "rgba(160,175,200,0.35)"
-                    ctx.lineWidth = 1
+                    ctx.strokeStyle = t.rangeCommunication
+                    ctx.globalAlpha = 0.72
+                    ctx.lineWidth = 1.5
                     ctx.setLineDash([4, 8])
                     ctx.beginPath()
                     ctx.arc(p.x, p.y, Math.max(2, u.commRange * root.zoom), 0, Math.PI*2)
@@ -484,9 +723,9 @@ Item {
                     ctx.setLineDash([])
                     ctx.restore()
                 }
-                if (!dead && !isEnemy && root.showAttackRange && u.attackRange > 0) {
+                if (showsRanges && !dead && !isEnemy && root.showAttackRange && u.attackRange > 0) {
                     ctx.save()
-                    ctx.strokeStyle = "#ff6b4a"
+                    ctx.strokeStyle = t.rangeAttack
                     ctx.lineWidth = 2
                     ctx.setLineDash([6, 4])
                     ctx.beginPath()
@@ -509,6 +748,21 @@ Item {
                         ctx.strokeStyle = "rgba(255,110,70,0.35)"
                         ctx.lineWidth = 2
                         ctx.beginPath(); ctx.arc(p.x, p.y, 14, 0, Math.PI*2); ctx.stroke()
+                    }
+
+                    if (!dead && root.actionTargetId === u.id) {
+                        ctx.save()
+                        ctx.fillStyle = "rgba(255,113,128,0.16)"
+                        ctx.beginPath(); ctx.arc(p.x, p.y, 24, 0, Math.PI*2); ctx.fill()
+                        ctx.strokeStyle = t.markerRed
+                        ctx.lineWidth = 3
+                        ctx.setLineDash([7, 4])
+                        ctx.beginPath(); ctx.arc(p.x, p.y, 19, 0, Math.PI*2); ctx.stroke()
+                        ctx.setLineDash([])
+                        ctx.fillStyle = t.markerRed
+                        ctx.font = "bold 10px sans-serif"
+                        ctx.fillText("攻击目标", p.x + 16, p.y - 17)
+                        ctx.restore()
                     }
 
                     // 摧毁视觉：红色X + 碎光 + 旋转碎片
@@ -713,6 +967,8 @@ Item {
             property bool _dragJustEnded: false
 
             onPositionChanged: function(mouse) {
+                root.pointerLogicalPos = root.logicalFromPixel(mouse.x, mouse.y)
+                root.pointerInside = true
                 if (root.guideMode) {
                     innerCanvas._guideHover = Qt.point(mouse.x, mouse.y)
                     innerCanvas.requestPaint()
@@ -732,6 +988,7 @@ Item {
                 }
             }
             onExited: {
+                root.pointerInside = false
                 if (root.guideMode) {
                     innerCanvas._guideHover = Qt.point(-1, -1)
                     innerCanvas.requestPaint()
@@ -746,9 +1003,8 @@ Item {
                 _dragJustEnded = false
             }
             onPressed: function(mouse) {
-                if (!mouse.buttons || root.guideMode) return
-                // 仅在按住的是鼠标主键（左/右）时启动平移
-                if ((mouse.buttons & (Qt.LeftButton | Qt.RightButton)) === 0) return
+                if (root.guideMode) return
+                // acceptedButtons already limits this area to primary/secondary clicks.
                 _panning = true
                 _totalDrag = 0
                 _dragActive = false
@@ -768,6 +1024,16 @@ Item {
                         _dragActive = false
                         Qt.callLater(function() { canvasMouse._dragJustEnded = false })
                         return
+                    }
+                    if (mouse.button === Qt.LeftButton) {
+                        var markerHit = root.commandMarkerAtPixel(mouse.x, mouse.y)
+                        if (markerHit) {
+                            _dragJustEnded = true
+                            _totalDrag = 0
+                            _dragActive = false
+                            root.mapMarkerClicked(markerHit)
+                            return
+                        }
                     }
                     var hit = null
                     for (var i = 0; i < innerCanvas.units.length; i++) {
@@ -825,6 +1091,7 @@ Item {
                         if (gfdx*gfdx + gfdy*gfdy < 14*14) {
                             root.guideSourceUnitId = gfu.id
                             root.controller.setFocusedUnitId(gfu.id)
+                            root.guideSourceChanged(gfu.id)
                             if (gfu.position) root.centerOn(gfu.position[0], gfu.position[1])
                             innerCanvas.requestPaint()
                             return
@@ -883,6 +1150,51 @@ Item {
                 else root.doubleClickedMap(root.logicalFromPixel(mouse.x, mouse.y))
             }
         }
+    }
+
+    Rectangle {
+        visible: root.showCoordinateReadout && root.pointerInside
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: 10
+        z: 60
+        implicitWidth: coordinateText.implicitWidth + 16
+        implicitHeight: coordinateText.implicitHeight + 10
+        radius: 4
+        color: t.coordinateBg
+        border.color: t.coordinateBorder
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 120 } }
+        Text {
+            id: coordinateText
+            anchors.centerIn: parent
+            text: "X " + Math.round(root.pointerLogicalPos.x) + "  Y " + Math.round(root.pointerLogicalPos.y) + " m"
+            color: t.coordinateText
+            font.pixelSize: 10
+        }
+    }
+
+    Rectangle {
+        id: actionPulse
+        visible: root.actionPulseActive
+        x: root.toPixel(root.actionPulseX, root.actionPulseY).x - width / 2
+        y: root.toPixel(root.actionPulseX, root.actionPulseY).y - height / 2
+        width: 30
+        height: 30
+        radius: width / 2
+        color: "transparent"
+        border.color: root.actionPulseColor
+        border.width: 2
+        z: 55
+        scale: 0.35
+        opacity: 1
+    }
+    ParallelAnimation {
+        id: actionPulseAnimation
+        running: false
+        NumberAnimation { target: actionPulse; property: "scale"; from: 0.35; to: 1.8; duration: 360 }
+        NumberAnimation { target: actionPulse; property: "opacity"; from: 1; to: 0; duration: 360 }
+        onStopped: root.actionPulseActive = false
     }
 
     Component.onCompleted: {

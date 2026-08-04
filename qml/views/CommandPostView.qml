@@ -14,8 +14,7 @@ Item {
     property var snap: ({})
     property bool autoFollow: true   // controlled by settings
     property var ownUnitOptions: ([])
-    property bool ownReady: root.side === "red" ? root.controller.redReady : root.controller.blueReady
-    property bool commandsEnabled: !root.controller.networked || root.controller.matchPhase === "running"
+    property bool commandsEnabled: true
 
     function refreshOwnUnitOptions() {
         var next = root.controller.unitOptions("", root.side)
@@ -67,21 +66,21 @@ Item {
 
     QtObject {
         id: theme
-        property color panel: "#0e1322"
-        property color panelAlt: "#131a2c"
-        property color border: "#1e2d4a"
-        property color text: "#e8edf5"
-        property color textStrong: "#ffffff"
-        property color textDim: "#bcc8de"
-        property color muted: "#8896b8"
+        property color panel: AppContext.panel
+        property color panelAlt: AppContext.raised
+        property color border: AppContext.line
+        property color text: AppContext.text
+        property color textStrong: AppContext.textStrong
+        property color textDim: AppContext.textDim
+        property color muted: AppContext.muted
         property color dimmer: "#5a6a88"
-        property color red: "#f04760"
-        property color blue: "#4090ff"
-        property color accent: "#4090ff"
-        property color accentSoft: "#1e4080"
-        property color success: "#36c98a"
-        property color warning: "#f0a040"
-        property color danger: "#f04760"
+        property color red: AppContext.red
+        property color blue: AppContext.blue
+        property color accent: AppContext.signal
+        property color accentSoft: "#1d675e"
+        property color success: AppContext.success
+        property color warning: AppContext.warning
+        property color danger: AppContext.danger
         property color disabled: "#3b4458"
         property color switchOn: "#36c98a"
     }
@@ -286,12 +285,15 @@ Item {
                                 canvas.refreshTrackingPos()
                             } else {
                                 root.controller.command("moveTo", { unitId: srcId, pos: lp })
+                                canvas.setTrackingTarget("", "")
                             }
                         } else {
                             root.controller.command("moveTo", { unitId: srcId, pos: lp })
+                            canvas.setTrackingTarget("", "")
                         }
                     } else {
                         root.controller.command("moveTo", { unitId: srcId, pos: lp })
+                        canvas.setTrackingTarget("", "")
                     }
                     canvas.stopGuideMode()
                     root.controller.setFocusedUnitId(srcId)
@@ -303,8 +305,10 @@ Item {
                 }
                 onClickedMap: function(lp) {
                     if (!root.commandsEnabled || canvas.guideMode) return
-                    if (root.controller.focusedUnitId)
+                    if (root.controller.focusedUnitId) {
                         root.controller.command("moveTo", { unitId: root.controller.focusedUnitId, pos: lp })
+                        canvas.setTrackingTarget("", "")
+                    }
                 }
                 onDoubleClickedUnit: function(uid) {
                     if (!canvas.guideMode) return
@@ -378,20 +382,6 @@ Item {
                 }
             }
 
-            Rectangle {
-                anchors.fill: parent; z: 50
-                visible: root.controller.networked && root.controller.matchPhase !== "running"
-                color: "#090e16b8"
-                Rectangle {
-                    anchors.centerIn: parent; width: Math.min(430, parent.width - 40); height: 86
-                    color: "#121b26"; border.color: "#314155"; radius: 6
-                    Column {
-                        anchors.centerIn: parent; spacing: 6
-                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.controller.matchPhase === "preparing" ? "推演尚未开始" : "本轮推演已结束"; color: theme.textStrong; font.pixelSize: 17; font.bold: true }
-                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.controller.matchPhase === "preparing" ? "请在右侧确认阵容并提交就绪" : "等待导演结束并重置推演"; color: theme.muted; font.pixelSize: 12 }
-                    }
-                }
-            }
         }
 
         Rectangle {
@@ -423,27 +413,6 @@ Item {
                 }
 
                 Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: theme.border; Layout.topMargin: 4; Layout.bottomMargin: 2 }
-
-                Rectangle {
-                    visible: root.controller.networked
-                    Layout.fillWidth: true; Layout.preferredHeight: 68
-                    color: "#111b25"; border.color: root.ownReady ? theme.success : theme.border; radius: 6
-                    RowLayout {
-                        anchors.fill: parent; anchors.margins: 10; spacing: 8
-                        ColumnLayout {
-                            spacing: 2; Layout.fillWidth: true
-                            Text { text: root.controller.matchPhase === "preparing" ? (root.ownReady ? "己方已就绪" : "准备初始阵容") : root.controller.matchPhase === "running" ? "推演进行中" : "等待导演结束推演"; color: root.ownReady ? theme.success : theme.textStrong; font.pixelSize: 13; font.bold: true }
-                            Text { text: "红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + " · 蓝方 " + (root.controller.blueReady ? "已就绪" : "未就绪"); color: theme.muted; font.pixelSize: 10 }
-                        }
-                        GhostButton { visible: root.controller.matchPhase === "preparing"; text: "阵容"; onClicked: rosterDialog.open() }
-                        TonalButton {
-                            visible: root.controller.matchPhase === "preparing"
-                            text: root.ownReady ? "取消就绪" : "准备完毕"
-                            base: root.ownReady ? theme.warning : theme.success
-                            onClicked: root.controller.setReady(!root.ownReady)
-                        }
-                    }
-                }
 
                 SectionTitle { text: "选择己方单元" }
                 ComboBox {

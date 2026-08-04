@@ -1,9 +1,10 @@
 ﻿#include <QGuiApplication>
 #include <QQmlApplicationEngine>
-#include <QQmlContext>
 #include <QFont>
 #include <QFontDatabase>
 #include <QDebug>
+#include <QCommandLineParser>
+#include <QVariantMap>
 #include "src/view/SimulationController.h"
 #include "src/view/ScenarioEditor.h"
 #include "src/view/MapTileRenderer.h"
@@ -36,18 +37,27 @@ int main(int argc, char *argv[])
     qputenv("QT_LOGGING_RULES", "qt.text.codecs.warning=false");
 
     QGuiApplication app(argc, argv);
+    app.setApplicationName(QStringLiteral("wargame-client"));
+    app.setApplicationVersion(QStringLiteral("%1+%2")
+                                  .arg(QStringLiteral(WARGAME_VERSION),
+                                       QStringLiteral(WARGAME_SOURCE_DIGEST)));
+    app.setProperty("sourceDigest", QStringLiteral(WARGAME_SOURCE_DIGEST));
+    QCommandLineParser parser;
+    parser.addHelpOption();
+    parser.addVersionOption();
+    parser.process(app);
     app.setFont(pickChineseFont());
 
     gbr::SimulationController controller;
     gbr::ScenarioEditor editor;
 
     qmlRegisterType<gbr::MapTileRenderer>("Wargame", 1, 0, "MapTileRenderer");
-    qmlRegisterSingletonInstance<gbr::SimulationController>("Wargame", 1, 0, "SimulationController", &controller);
-    qmlRegisterSingletonInstance<gbr::ScenarioEditor>("Wargame", 1, 0, "ScenarioEditor", &editor);
     QQmlApplicationEngine engine;
     engine.addImageProvider(QStringLiteral("tiles"), new gbr::TileImageProvider());
-    engine.rootContext()->setContextProperty("appController", &controller);
-    engine.rootContext()->setContextProperty("scenarioEditor", &editor);
+    engine.setInitialProperties({
+        {QStringLiteral("simulationController"), QVariant::fromValue(&controller)},
+        {QStringLiteral("scenarioEditor"), QVariant::fromValue(&editor)},
+    });
 
     QObject::connect(
         &engine,
@@ -62,7 +72,7 @@ int main(int argc, char *argv[])
                      &app, [](const QList<QQmlError>& warnings) {
                          for (const QQmlError& warning : warnings) qWarning() << warning;
                      });
-    qInfo() << "开始加载 QML";
+    qInfo() << "开始加载 QML" << WARGAME_VERSION << WARGAME_SOURCE_DIGEST;
     engine.load(QUrl(QStringLiteral("qrc:/qt/qml/index/Main.qml")));
     qInfo() << "QML 加载完成，根对象数量:" << engine.rootObjects().size();
     if (engine.rootObjects().isEmpty()) {

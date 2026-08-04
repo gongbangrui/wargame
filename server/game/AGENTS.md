@@ -12,7 +12,7 @@
 | Seat, deployment, readiness and lifecycle invariants | `AuthoritativeRoom` |
 | Role/side/communication visibility filtering | `StateProjector` |
 | Checkpoint/event log and recovery | `RoomPersistence` |
-| Optional participant lifecycle | `FastDdsNode` |
+| Optional participant and compatibility transport | `FastDdsNode` |
 | Process entry and `GAME_PORT` | `main.cpp` |
 
 ## CONVENTIONS
@@ -24,7 +24,7 @@
 - Checkpoints use the existing atomic/size-limited persistence path. Restore must validate the checkpoint, reconstruct room/engine/idempotency state, replay later events and write a fresh checkpoint.
 - Connection tokens, WebSocket sessions and online client collections are transient; do not serialize them into room state.
 - Current persistence defaults are under `/data`: room checkpoint, command/event logs and status files. Respect rotation, fsync and incompatible-file archiving behavior.
-- `FastDdsNode` currently creates capability metadata only. WebSocket remains the business data plane unless DDS ownership and consistency are explicitly designed.
+- `FastDdsNode` creates the optional room-partitioned compatibility transport and capability metadata. WebSocket remains the business data plane for authoritative snapshots, deltas and commands.
 
 ## ANTI-PATTERNS
 

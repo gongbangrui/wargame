@@ -4,7 +4,9 @@
 #include "LocalTransport.h"
 #include "../units/AttackUAV.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDebug>
 #include <QJsonArray>
 #include <QFileInfo>
 #include <QDir>
@@ -108,6 +110,15 @@ SimulationEngine::SimulationEngine(ITransport* transport, QObject* parent)
       m_map(std::make_unique<MapProvider>()),
       m_clock(std::make_unique<RealTimeClock>()),
       m_recorder(std::make_unique<MessageLogRecorder>()) {
+    const QString mapRoot = qEnvironmentVariableIsSet("WARGAME_MAP_DIR")
+        ? qEnvironmentVariable("WARGAME_MAP_DIR")
+        : QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("map"));
+    QString metadataError;
+    if (!m_map->loadMetadataFile(QDir(mapRoot).filePath(QStringLiteral("metadata.json")),
+                                 &metadataError)) {
+        qWarning() << "SimulationEngine: using built-in map fallback:" << metadataError;
+    }
+
     m_timer.setInterval(50);
     connect(&m_timer, &QTimer::timeout, this, [this](){ onTickInternal(false, 0.0); });
     // Forward bus emissions through the transport sink so the engine's
@@ -134,9 +145,15 @@ void SimulationEngine::loadDefaultScenario() {
 }
 
 bool SimulationEngine::setScenario(const Scenario& s) {
-    if (s.units.empty()) {
-        // Refuse to wipe a populated world with an empty scenario; emit a clear error
-        // and let the caller (controller) decide what to do.
+    return applyScenario(s, false);
+}
+
+bool SimulationEngine::setRemoteScenario(const Scenario& s) {
+    return applyScenario(s, true);
+}
+
+bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
+    if (s.units.empty() && !allowEmpty) {
         m_lastError = QStringLiteral("场景单元为空，未应用");
         emit errorOccurred(m_lastError);
         return false;
@@ -192,6 +209,8 @@ bool SimulationEngine::setScenario(const Scenario& s) {
     m_destroyedReported.clear();
     m_cachedDetections.clear();
     m_pendingCombatRequests.clear();
+    m_unitIdentityCatalog = {};
+    m_unitIdentityOrder.clear();
     do {
         m_battleSeed = QRandomGenerator::system()->generate64();
     } while (m_battleSeed == 0);
@@ -201,6 +220,7 @@ bool SimulationEngine::setScenario(const Scenario& s) {
         m_timelineSequence = 0;
         m_replayCommandSequence = 0;
         m_replayCommands.clear();
+        m_replaySteps.clear();
         m_replayCheckpoints.clear();
         m_replayInitialScenario = m_scenario;
         m_replayInitialSeed = m_battleSeed;
@@ -253,6 +273,17 @@ void SimulationEngine::connectUnitSignals(UnitBase* unit, const QString& id) {
     });
 }
 
+void SimulationEngine::rememberUnitIdentity(const ScenarioUnit& unit) {
+    if (!m_unitIdentityCatalog.contains(unit.id)) m_unitIdentityOrder.append(unit.id);
+    m_unitIdentityCatalog[unit.id] = QJsonObject{
+        {QStringLiteral("side"), unit.side},
+        {QStringLiteral("callsign"), unit.callsign}};
+    constexpr qsizetype kMaxRememberedUnitIdentities = 2048;
+    while (m_unitIdentityOrder.size() > kMaxRememberedUnitIdentities) {
+        m_unitIdentityCatalog.remove(m_unitIdentityOrder.takeFirst());
+    }
+}
+
 void SimulationEngine::createSingleUnit(const ScenarioUnit& u) {
     if (u.id.isEmpty()) {
         m_lastError = QStringLiteral("单元ID不能为空");
@@ -283,6 +314,7 @@ void SimulationEngine::createSingleUnit(const ScenarioUnit& u) {
         emit errorOccurred(m_lastError);
         return;
     }
+    rememberUnitIdentity(u);
     const bool isCp = (unit->kind() == UnitKind::CommandPost);
     unit->setCallsign(u.callsign);
     unit->setParams(p);
@@ -330,7 +362,7 @@ void SimulationEngine::setRunning(bool r) {
 
 void SimulationEngine::setSpeedMul(double m) {
     if (!std::isfinite(m)) return;
-    m = std::max(0.0, m);
+    m = std::clamp(m, 0.0, 8.0);
     if (m_clock->speedMul() == m) return;
     m_clock->setSpeedMul(m);
     emit speedMulChanged();
@@ -376,6 +408,7 @@ void SimulationEngine::onTickInternal(bool manual, double manualDt) {
     checkWinLoseCondition();
 
     if (!m_replaying) {
+        m_replaySteps.push_back(ReplayStep{simTime() - dt, dt});
         m_recordedDuration = std::max(m_recordedDuration, simTime());
         m_recordedFinalSnapshot = collectAllUnitsSnapshot();
         if (simTime() - m_lastReplayCheckpointTime >= 10.0) captureReplayCheckpoint();
@@ -427,7 +460,7 @@ void SimulationEngine::resolveCombatRequests() {
         auto* attacker = qobject_cast<AttackUAV*>(unit(request.attackerId));
         UnitBase* target = unit(request.targetId);
         if (!attacker || !attacker->alive() || !isHostileTarget(attacker, target)) continue;
-        request.attackerEffectiveness = attacker->jamFactor();
+        request.attackerEffectiveness = attacker->jamFactor() * attacker->weaponEffectiveness();
         if (!initialHp.contains(request.targetId)) initialHp.insert(request.targetId, target->hp());
 
         CombatOutcome outcome = CombatResolver::resolve(request, m_battleSeed);
@@ -438,8 +471,31 @@ void SimulationEngine::resolveCombatRequests() {
         for (const char ch : request.attackerId.toUtf8()) subsystemIndex += static_cast<unsigned char>(ch);
         UnitBase::DamageDelta delta = outcome.hit()
             ? target->assessDamage(outcome.damage, subsystemIndex) : UnitBase::DamageDelta{};
-        const double appliedDamage = std::min(delta.hullDamage, outcome.hpBefore);
+        const double assessedHullDamage = delta.hullDamage;
+        const double appliedDamage = std::min(assessedHullDamage, outcome.hpBefore);
+        const double appliedFraction = assessedHullDamage > 0.0
+            ? appliedDamage / assessedHullDamage : 0.0;
         delta.hullDamage = appliedDamage;
+        delta.sensorLoss *= appliedFraction;
+        delta.commsLoss *= appliedFraction;
+        delta.mobilityLoss *= appliedFraction;
+        delta.weaponLoss *= appliedFraction;
+        const QJsonObject subsystemState = target->subsystemStateJson();
+        const auto capLoss = [](double loss, double health, double accumulated) {
+            return std::min(loss, std::max(0.0, health - accumulated));
+        };
+        delta.sensorLoss = capLoss(delta.sensorLoss,
+                                   subsystemState.value(QStringLiteral("sensor")).toDouble(),
+                                   total.sensorLoss);
+        delta.commsLoss = capLoss(delta.commsLoss,
+                                  subsystemState.value(QStringLiteral("comms")).toDouble(),
+                                  total.commsLoss);
+        delta.mobilityLoss = capLoss(delta.mobilityLoss,
+                                     subsystemState.value(QStringLiteral("mobility")).toDouble(),
+                                     total.mobilityLoss);
+        delta.weaponLoss = capLoss(delta.weaponLoss,
+                                   subsystemState.value(QStringLiteral("weapon")).toDouble(),
+                                   total.weaponLoss);
         outcome.damage = appliedDamage;
         outcome.hpAfter = std::max(0.0, outcome.hpBefore - appliedDamage);
         const bool killCredit = outcome.hpBefore > 0.0 && outcome.hpAfter <= 0.0 && outcome.hit();
@@ -543,18 +599,20 @@ void SimulationEngine::scanReconDetections(double dt) {
             if (!target->alive()) continue;
             const double d = center.distanceTo2D(target->pos());
             if (d > dr) continue;
-            Message dm;
-            dm.type = Message::Type::TargetDetect;
-            dm.sender = reconId;
-            dm.receiver = myCpId;
-            dm.requiresAck = true;
-            dm.payload["targetId"] = tid;
-            dm.payload["callsign"] = target->callsign();
-            dm.payload["x"] = target->pos().x;
-            dm.payload["y"] = target->pos().y;
-            dm.payload["alt"] = target->pos().alt;
-            dm.payload["distance"] = d;
-            m_transport->send(dm);
+            if (!myCpId.isEmpty()) {
+                Message dm;
+                dm.type = Message::Type::TargetDetect;
+                dm.sender = reconId;
+                dm.receiver = myCpId;
+                dm.requiresAck = true;
+                dm.payload["targetId"] = tid;
+                dm.payload["callsign"] = target->callsign();
+                dm.payload["x"] = target->pos().x;
+                dm.payload["y"] = target->pos().y;
+                dm.payload["alt"] = target->pos().alt;
+                dm.payload["distance"] = d;
+                m_transport->send(dm);
+            }
             // Communication range, not sensor range, determines which allies
             // receive the shared track. One broadcast also avoids one logged
             // message per ally.
@@ -761,6 +819,7 @@ QJsonObject SimulationEngine::unitSnapshot(const QString& id) const {
     o["attackRange"] = u->attackRange();
     o["commRange"] = u->commRange();
     o["speed"] = u->speed();
+    o["baseSpeed"] = u->baseSpeed();
     o["maxHp"] = u->maxHp();
     o["attackPower"] = u->attackPower();
     o["armor"] = u->armor();
@@ -846,6 +905,8 @@ QString SimulationEngine::commandSenderIdFor(const UnitBase* u) const {
 void SimulationEngine::initCommandDispatch() {
     m_dispatch["assignTarget"]  = [this](auto& a){ cmdAssignTarget(a); };
     m_dispatch["setFlightPlan"] = [this](auto& a){ cmdSetFlightPlan(a); };
+    m_dispatch["unitOrder"]     = [this](auto& a){ cmdUnitOrder(a); };
+    m_dispatch["attackAt"]      = [this](auto& a){ cmdAttackAt(a); };
     m_dispatch["engageTarget"]  = [this](auto& a){ cmdEngageTarget(a); };
     m_dispatch["moveTo"]        = [this](auto& a){ cmdMoveTo(a); };
     m_dispatch["withdraw"]      = [this](auto& a){ cmdWithdraw(a); };
@@ -912,7 +973,7 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
         return CommandResult::reject(QString::fromLatin1(CommandCode::UnitDestroyed),
                                      QStringLiteral("单元已摧毁: %1").arg(unitId));
     }
-    if (!controlled->movable()) {
+    if (action != QLatin1String("unitOrder") && !controlled->movable()) {
         return CommandResult::reject(QString::fromLatin1(CommandCode::UnitNotMovable),
                                      QStringLiteral("该操作仅适用于可移动单元: %1").arg(unitId));
     }
@@ -933,7 +994,8 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
     const bool attackAction = action == QLatin1String("assignTarget")
         || action == QLatin1String("engageTarget")
         || action == QLatin1String("pursue");
-    if ((attackAction || action == QLatin1String("setFlightPlan"))
+    if ((attackAction || action == QLatin1String("attackAt")
+         || action == QLatin1String("setFlightPlan"))
         && controlled->kind() != UnitKind::AttackUAV) {
         return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidUnitKind),
                                      QStringLiteral("该操作仅适用于攻击无人机"));
@@ -941,7 +1003,24 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
     if ((action == QLatin1String("cancelEngagement") || action == QLatin1String("setRoe"))
         && controlled->kind() != UnitKind::AttackUAV) {
         return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidUnitKind),
-                                     QStringLiteral("该操作仅适用于攻击无人机"));
+                                         QStringLiteral("该操作仅适用于攻击无人机"));
+    }
+
+    AttackUAV* reloadingAttacker = nullptr;
+    if (attackAction || action == QLatin1String("attackAt")) {
+        reloadingAttacker = dynamic_cast<AttackUAV*>(controlled);
+    } else if (action == QLatin1String("guideAttack")) {
+        reloadingAttacker = dynamic_cast<AttackUAV*>(
+            unit(args.value(QStringLiteral("attackerId")).toString()));
+    }
+    if (reloadingAttacker && reloadingAttacker->cooldownRemaining() > 0.0) {
+        return CommandResult::reject(QString::fromLatin1(CommandCode::WeaponReloading),
+                                     QStringLiteral("攻击机正在换弹，请等待换弹完成后重新攻击"));
+    }
+    if (reloadingAttacker
+        && (reloadingAttacker->ammoRemaining() <= 0 || reloadingAttacker->serviceRequested())) {
+        return CommandResult::reject(QString::fromLatin1(CommandCode::WeaponUnavailable),
+                                     QStringLiteral("攻击机没有可用弹药或正在补给"));
     }
     if (action == QLatin1String("setRoe")) {
         const QString roe = args.value(QStringLiteral("roe")).toString();
@@ -974,12 +1053,25 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
             return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
                                          QStringLiteral("引导目标位置无效或超出地图边界"));
         }
+        if (!m_transport->canCommunicate(controlled->id(), attacker->id())) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::CommunicationLost),
+                                         QStringLiteral("引导单元与攻击机之间没有可用通信链路"));
+        }
     }
 
-    if (action == QLatin1String("moveTo")
+    if ((action == QLatin1String("attackAt") || action == QLatin1String("moveTo")
+         || (action == QLatin1String("withdraw")
+             && args.contains(QStringLiteral("pos"))))
         && !validPoint(args.value(QStringLiteral("pos")).toMap())) {
         return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
-                                     QStringLiteral("移动目标无效或超出地图边界"));
+                                     QStringLiteral("命令目标无效或超出地图边界"));
+    }
+    if (action == QLatin1String("unitOrder")) {
+        const QString text = args.value(QStringLiteral("text")).toString().trimmed();
+        if (text.isEmpty() || text.size() > 420) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
+                                         QStringLiteral("文本命令不能为空且不能超过 420 字"));
+        }
     }
     if (action == QLatin1String("setFlightPlan")) {
         const QVariantList waypoints = args.value(QStringLiteral("waypoints")).toList();
@@ -999,7 +1091,7 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
         const double speed = args.value(QStringLiteral("speed")).toDouble(&ok);
         if (!ok || !std::isfinite(speed) || speed <= 0.0 || speed > 1000.0) {
             return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
-                                         QStringLiteral("单元速度必须在 0 到 1000 之间"));
+                                         QStringLiteral("单元速度必须大于 0 且不超过 1000"));
         }
     }
     if (action == QLatin1String("setSchedule")) {
@@ -1045,8 +1137,11 @@ void SimulationEngine::cmdAssignTarget(const QVariantMap& args) {
     m.type = Message::Type::AttackOrder;
     m.sender = cpId;
     m.receiver = attackerId;
-    m.requiresAck = true;
+    m.requiresAck = !args.value(QStringLiteral("notificationOnly")).toBool();
     m.payload["targetId"] = targetId;
+    if (args.value(QStringLiteral("notificationOnly")).toBool()) {
+        m.payload[QStringLiteral("notificationOnly")] = true;
+    }
     m_transport->send(m);
 }
 
@@ -1099,6 +1194,40 @@ void SimulationEngine::cmdEngageTarget(const QVariantMap& args) {
     m_transport->send(m);
 }
 
+void SimulationEngine::cmdUnitOrder(const QVariantMap& args) {
+    const QString unitId = args.value(QStringLiteral("unitId")).toString();
+    UnitBase* unit = this->unit(unitId);
+    if (!unit || !unit->alive()) return;
+    const QString commandPostId = commandSenderIdFor(unit);
+    if (commandPostId.isEmpty()) return;
+    Message message;
+    message.type = Message::Type::UnitOrder;
+    message.sender = commandPostId;
+    message.receiver = unitId;
+    message.payload[QStringLiteral("text")] = args.value(QStringLiteral("text")).toString().trimmed();
+    if (args.value(QStringLiteral("notificationOnly")).toBool()) {
+        message.payload[QStringLiteral("notificationOnly")] = true;
+    }
+    m_transport->send(message);
+}
+
+void SimulationEngine::cmdAttackAt(const QVariantMap& args) {
+    const QString unitId = args.value(QStringLiteral("unitId")).toString();
+    const QVariantMap position = args.value(QStringLiteral("pos")).toMap();
+    UnitBase* unit = this->unit(unitId);
+    if (!unit || !unit->alive() || unit->kind() != UnitKind::AttackUAV) return;
+    const QString commandPostId = commandSenderIdFor(unit);
+    if (commandPostId.isEmpty()) return;
+    Message message;
+    message.type = Message::Type::AttackOrder;
+    message.sender = commandPostId;
+    message.receiver = unitId;
+    message.requiresAck = true;
+    message.payload[QStringLiteral("x")] = position.value(QStringLiteral("x")).toDouble();
+    message.payload[QStringLiteral("y")] = position.value(QStringLiteral("y")).toDouble();
+    m_transport->send(message);
+}
+
 void SimulationEngine::cmdMoveTo(const QVariantMap& args) {
     const auto uid = args.value("unitId").toString();
     const auto posMap = args.value("pos").toMap();
@@ -1120,11 +1249,15 @@ void SimulationEngine::cmdMoveTo(const QVariantMap& args) {
     m.payload["x"] = posMap.value("x").toDouble();
     m.payload["y"] = posMap.value("y").toDouble();
     m.payload["kind"] = QString("moveTo");
+    if (args.value(QStringLiteral("notificationOnly")).toBool()) {
+        m.payload[QStringLiteral("notificationOnly")] = true;
+    }
     m_transport->send(m);
 }
 
 void SimulationEngine::cmdWithdraw(const QVariantMap& args) {
     const auto uid = args.value("unitId").toString();
+    const QVariantMap position = args.value(QStringLiteral("pos")).toMap();
     auto* u = unit(uid);
     if (!u || !u->alive() || !u->movable()) return;
     const QString cpId = commandSenderIdFor(u);
@@ -1137,13 +1270,24 @@ void SimulationEngine::cmdWithdraw(const QVariantMap& args) {
     m.type = Message::Type::Withdraw;
     m.sender = cpId;
     m.receiver = uid;
-    m.requiresAck = true;
-    if (auto* cp = unit(cpId)) {
-        m.payload["homeX"] = cp->pos().x;
-        m.payload["homeY"] = cp->pos().y;
-    } else {
-        m.payload["homeX"] = u->pos().x;
-        m.payload["homeY"] = u->pos().y;
+    const bool notificationOnly = args.value(QStringLiteral("notificationOnly")).toBool();
+    m.requiresAck = !notificationOnly;
+    if (notificationOnly) {
+        m.payload[QStringLiteral("notificationOnly")] = true;
+    }
+    if (position.contains(QStringLiteral("x")) && position.contains(QStringLiteral("y"))) {
+        m.payload["homeX"] = position.value(QStringLiteral("x")).toDouble();
+        m.payload["homeY"] = position.value(QStringLiteral("y")).toDouble();
+        m.payload["x"] = position.value(QStringLiteral("x")).toDouble();
+        m.payload["y"] = position.value(QStringLiteral("y")).toDouble();
+    } else if (!notificationOnly) {
+        if (auto* cp = unit(cpId)) {
+            m.payload["homeX"] = cp->pos().x;
+            m.payload["homeY"] = cp->pos().y;
+        } else {
+            m.payload["homeX"] = u->pos().x;
+            m.payload["homeY"] = u->pos().y;
+        }
     }
     m_transport->send(m);
 }
@@ -1343,6 +1487,7 @@ void SimulationEngine::addOrUpdateUnit(const ScenarioUnit& su) {
         m_scenarioIndex[su.id] = m_scenario.units.size();
         m_scenario.units.push_back(su);
     }
+    rememberUnitIdentity(su);
 
     // Incrementally update runtime units
     auto it = m_units.find(su.id);
@@ -1456,7 +1601,7 @@ void SimulationEngine::applyRemoteRuntimeState(const QJsonArray& units, double s
     const bool speedChangedValue = m_clock->speedMul() != speedMul;
     m_running = running;
     m_clock->setSimTime(std::max(0.0, simTime));
-    m_clock->setSpeedMul(std::max(0.0, speedMul));
+    m_clock->setSpeedMul(std::clamp(speedMul, 0.0, 8.0));
     SnapshotCodec::decodeRuntimeUnits(*this, units);
     if (runningChangedValue) emit runningChanged();
     if (speedChangedValue) emit speedMulChanged();
@@ -1548,7 +1693,8 @@ void SimulationEngine::appendTimeline(const QString& category, const QString& ti
 void SimulationEngine::captureReplayCheckpoint() {
     if (m_replaying) return;
     m_replayCheckpoints.push_back(ReplayCheckpoint{
-        simTime(), static_cast<qsizetype>(m_replayCommands.size()), collectCheckpointState()});
+        simTime(), static_cast<qsizetype>(m_replayCommands.size()),
+        static_cast<qsizetype>(m_replaySteps.size()), collectCheckpointState()});
     m_lastReplayCheckpointTime = simTime();
     constexpr size_t kMaxReplayCheckpoints = 720;
     if (m_replayCheckpoints.size() > kMaxReplayCheckpoints) {
@@ -1574,6 +1720,7 @@ bool SimulationEngine::seekReplay(double targetTime, QString* error) {
     }
 
     const auto commands = m_replayCommands;
+    const auto steps = m_replaySteps;
     const auto checkpoints = m_replayCheckpoints;
     const QJsonArray timeline = m_timeline;
     const qint64 timelineSequence = m_timelineSequence;
@@ -1600,6 +1747,7 @@ bool SimulationEngine::seekReplay(double targetTime, QString* error) {
     }
     restoreCombatSeed(initialSeed);
     qsizetype commandIndex = 0;
+    qsizetype stepIndex = 0;
     if (selected && selected->time > 0.0) {
         QString restoreError;
         if (!restoreCheckpointState(selected->state, selected->time, false,
@@ -1609,20 +1757,26 @@ bool SimulationEngine::seekReplay(double targetTime, QString* error) {
             return false;
         }
         commandIndex = selected->commandCount;
+        stepIndex = selected->stepCount;
     }
 
-    constexpr double kReplayStep = 0.05;
     while (simTime() < targetTime - 1e-9) {
         while (commandIndex < static_cast<qsizetype>(commands.size())
                && commands[commandIndex].time <= simTime() + 1e-9) {
             executeCommand(commands[commandIndex].action, commands[commandIndex].args);
             ++commandIndex;
         }
-        double nextTime = targetTime;
-        if (commandIndex < static_cast<qsizetype>(commands.size())) {
-            nextTime = std::min(nextTime, commands[commandIndex].time);
+        while (stepIndex < static_cast<qsizetype>(steps.size())
+               && steps[stepIndex].startTime < simTime() - 1e-9) {
+            ++stepIndex;
         }
-        const double step = std::min(kReplayStep, nextTime - simTime());
+        double recordedStep = 0.05;
+        if (stepIndex < static_cast<qsizetype>(steps.size())
+            && std::abs(steps[stepIndex].startTime - simTime()) <= 1e-6) {
+            recordedStep = steps[stepIndex].duration;
+            ++stepIndex;
+        }
+        const double step = std::min(recordedStep, targetTime - simTime());
         if (step <= 1e-9) continue;
         onTickInternal(true, step);
     }
@@ -1634,6 +1788,7 @@ bool SimulationEngine::seekReplay(double targetTime, QString* error) {
 
     m_replaying = false;
     m_replayCommands = commands;
+    m_replaySteps = steps;
     m_replayCheckpoints = checkpoints;
     m_replayInitialScenario = initialScenario;
     m_replayInitialSeed = initialSeed;

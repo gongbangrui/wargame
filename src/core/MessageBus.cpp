@@ -10,6 +10,9 @@ MessageBus::MessageBus(QObject* parent) : QObject(parent) {}
 
 void MessageBus::subscribe(const QString& unitId, Handler h) {
     m_handlers[unitId].push_back(std::move(h));
+    // Subscription establishes the unit's communication identity. Position
+    // updates from an arbitrary id must not silently create registrations.
+    m_units.try_emplace(unitId);
 }
 
 void MessageBus::unsubscribe(const QString& unitId) {
@@ -22,7 +25,12 @@ void MessageBus::unregisterUnit(const QString& unitId) {
 }
 
 void MessageBus::updateUnitPosition(const QString& unitId, const QPointF& pos, double commRange, const QString& side) {
-    auto& r = m_units[unitId];
+    auto it = m_units.find(unitId);
+    if (it == m_units.end()) {
+        qDebug() << "[bus] ignoring position update for unknown unit" << unitId;
+        return;
+    }
+    auto& r = it->second;
     r.pos = pos;
     r.commRange = std::max(0.0, commRange);
     if (!side.isEmpty()) r.side = side;
@@ -73,7 +81,7 @@ void MessageBus::send(const Message& msg) {
     posted["receiverSide"] = unitSide(m.receiver);
     emit messagePosted(posted);
 
-    if (m.receiver == "*" || m.receiver.isEmpty()) {
+    if (m.receiver == "*") {
         // Handlers may synchronously unregister units. Snapshot ids so those
         // callbacks cannot invalidate the map iteration.
         std::vector<QString> recipients;
@@ -84,6 +92,8 @@ void MessageBus::send(const Message& msg) {
             if (canCommunicate(m.sender, uid))
                 deliver(m, uid);
         }
+    } else if (m.receiver.isEmpty()) {
+        qDebug() << "[bus] dropping message with empty receiver" << m.sender;
     } else {
         if (canCommunicate(m.sender, m.receiver)) {
             deliver(m, m.receiver);

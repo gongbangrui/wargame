@@ -163,7 +163,9 @@ done
 HTTP_PORT="$(value_from_env HTTP_PORT 8080)"
 HOST_BIND_ADDRESS="$(value_from_env HOST_BIND_ADDRESS 127.0.0.1)"
 [[ "$HOST_BIND_ADDRESS" == "0.0.0.0" ]] && HOST_BIND_ADDRESS="127.0.0.1"
-ROOMS_JSON="$(curl -fsS --max-time 5 "http://${HOST_BIND_ADDRESS}:${HTTP_PORT}/api/rooms")"
+INTERNAL_API_KEY="$(value_from_env INTERNAL_API_KEY '')"
+[[ -n "$INTERNAL_API_KEY" ]] || die "内部 API 密钥未配置"
+ROOMS_JSON="$(curl -fsS --max-time 5 -H "X-Internal-Key: $INTERNAL_API_KEY" "http://${HOST_BIND_ADDRESS}:${HTTP_PORT}/api/rooms")"
 printf '%s' "$ROOMS_JSON" | compose_cmd exec -T -e "RESET_ROOM_ID=$ROOM_ID" account-web python -c '
 import json
 import os

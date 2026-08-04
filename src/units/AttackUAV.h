@@ -52,6 +52,8 @@ public:
                                    const QString& lastOutcome,
                                    double fuelRemaining = -1.0,
                                    double turnaroundElapsed = 0.0);
+    bool restoreRemoteAttackState(const QString& targetId, bool armed,
+                                  const QString& rulesOfEngagement);
     bool serviceTick(double dt) override;
     void cancelEngagement();
     void setRulesOfEngagement(const QString& value);
@@ -72,6 +74,7 @@ private:
     void setupFsm();
     void stepMotion(double dt);
     void stepCombat(double dt);
+    void holdMinimumRange();
     void beginReturnForService(const QString& reason);
 
     QString m_targetId;
@@ -84,7 +87,7 @@ private:
     double m_hitProbability = 1.0;
     double m_optimalRange = 1500.0;
     double m_minAttackRange = 0.0;
-    double m_cooldownSec = 1.0;
+    double m_cooldownSec = 4.0;
     double m_damageMin = 100.0;
     double m_damageMax = 100.0;
     double m_rangeFalloff = 0.0;

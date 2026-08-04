@@ -3,6 +3,7 @@
 #include "protocol/Protocol.h"
 
 #include <QJsonDocument>
+#include <QEventLoop>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRandomGenerator>
@@ -138,28 +139,49 @@ void NetworkClient::login(const QString& accountServer, const QString& username,
                            {QStringLiteral("password"), password}};
     setState(QStringLiteral("loggingIn"), QStringLiteral("正在验证账号"));
     QNetworkReply* reply = m_network.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    m_loginReply = reply;
+    const QString loginAccountServer = m_accountServer;
     QTimer::singleShot(10000, reply, [reply]() {
         if (reply->isRunning()) {
             reply->setProperty("loginTimedOut", true);
             reply->abort();
         }
     });
-    connect(reply, &QNetworkReply::finished, this, [this, reply, generation]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, generation, loginAccountServer]() {
         const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QJsonDocument document = QJsonDocument::fromJson(reply->readAll());
         const QString networkError = reply->errorString();
+        if (m_loginReply == reply) m_loginReply = nullptr;
         reply->deleteLater();
-        if (m_manualClose || generation != m_loginGeneration) return;
         if (statusCode != 200 || !document.isObject()) {
+            if (generation != m_loginGeneration) return;
             QString message = document.object().value(QStringLiteral("detail")).toString();
             if (reply->property("loginTimedOut").toBool()) message = QStringLiteral("连接账号服务器超时");
+            if (message == QLatin1String("USER_ALREADY_ONLINE")) {
+                message = QStringLiteral("该账号已在另一客户端登录，请先退出原客户端后再试");
+            }
             if (message.isEmpty()) message = networkError;
             setState(QStringLiteral("error"), message);
             emit fatalError(message);
             return;
         }
         const QJsonObject response = document.object();
-        m_token = response.value(QStringLiteral("token")).toString();
+        const QString responseToken = response.value(QStringLiteral("token")).toString();
+        if (generation != m_loginGeneration) {
+            if (statusCode == 200 && !responseToken.isEmpty() && !loginAccountServer.isEmpty()) {
+                QNetworkRequest request{QUrl(loginAccountServer + QStringLiteral("/api/client/logout"))};
+                request.setRawHeader("Authorization", QByteArrayLiteral("Bearer ") + responseToken.toUtf8());
+                request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+                QNetworkReply* cleanupReply = m_network.post(request, QByteArrayLiteral("{}"));
+                QTimer::singleShot(5000, cleanupReply, [cleanupReply]() {
+                    if (cleanupReply->isRunning()) cleanupReply->abort();
+                });
+                connect(cleanupReply, &QNetworkReply::finished, cleanupReply, &QObject::deleteLater);
+            }
+            return;
+        }
+        m_loginTokenCandidate = responseToken;
+        m_token = m_loginTokenCandidate;
         m_webSocketUrl = QUrl(response.value(QStringLiteral("gameWebSocketUrl")).toString());
         const QString webSocketScheme = m_webSocketUrl.scheme().toLower();
         if (m_token.isEmpty() || !m_webSocketUrl.isValid() || m_webSocketUrl.host().isEmpty()
@@ -169,34 +191,69 @@ void NetworkClient::login(const QString& accountServer, const QString& username,
             emit fatalError(message);
             return;
         }
+        if (m_manualClose) return;
         m_reconnectAttempt = 0;
         openWebSocket();
     });
 }
 
-void NetworkClient::close() {
-    ++m_loginGeneration;
+void NetworkClient::close(bool waitForLogout) {
     m_manualClose = true;
+    if (waitForLogout && m_loginReply && m_loginReply->isRunning()) {
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        connect(m_loginReply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(1500);
+        loop.exec();
+        if (m_loginReply && m_loginReply->isRunning()) m_loginReply->abort();
+    }
+    ++m_loginGeneration;
     m_reconnectTimer.stop();
     m_latencyTimer.stop();
     m_connectTimer.stop();
     m_authTimer.stop();
     m_pingPending = false;
     m_gameLatencyMs = -1;
-    if (!m_token.isEmpty() && !m_accountServer.isEmpty()) {
+    QString logoutToken = m_token.isEmpty() ? m_loginTokenCandidate : m_token;
+    if (waitForLogout && logoutToken.isEmpty() && m_loginReply && !m_loginReply->isRunning()) {
+        const QJsonDocument document = QJsonDocument::fromJson(m_loginReply->readAll());
+        logoutToken = document.object().value(QStringLiteral("token")).toString();
+    }
+    if (!logoutToken.isEmpty() && !m_accountServer.isEmpty() && !m_logoutReply) {
         QNetworkRequest request{QUrl(m_accountServer + QStringLiteral("/api/client/logout"))};
-        request.setRawHeader("Authorization", QByteArrayLiteral("Bearer ") + m_token.toUtf8());
+        request.setRawHeader("Authorization", QByteArrayLiteral("Bearer ") + logoutToken.toUtf8());
         request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
         QNetworkReply* reply = m_network.post(request, QByteArrayLiteral("{}"));
+        m_logoutReply = reply;
         QTimer::singleShot(5000, reply, [reply]() {
             if (reply->isRunning()) reply->abort();
         });
-        connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            if (m_logoutReply == reply) m_logoutReply = nullptr;
+            reply->deleteLater();
+        });
+    }
+    if (waitForLogout && m_logoutReply && m_logoutReply->isRunning()) {
+        const QPointer<QNetworkReply> pendingLogout = m_logoutReply;
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        connect(pendingLogout, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(3000);
+        loop.exec();
+        if (pendingLogout && pendingLogout->isRunning()) pendingLogout->abort();
     }
     m_token.clear();
+    m_loginTokenCandidate.clear();
+    m_ddsTicket.clear();
+    m_dataPlane.stop();
     m_stateStore.reset();
     m_authenticated = false;
     m_identityPublished = false;
+    m_currentSeatId.clear();
     m_welcomePayload = {};
     clearPendingCommands(QStringLiteral("canceled"), QStringLiteral("联网会话已关闭"));
     if (m_socket.state() != QAbstractSocket::UnconnectedState) m_socket.abort();
@@ -271,7 +328,17 @@ void NetworkClient::scheduleReconnect() {
 }
 
 void NetworkClient::onTextMessage(const QString& text) {
-    if (text.toUtf8().size() > Protocol::MaxServerMessageBytes) {
+    if (text.size() > Protocol::MaxServerMessageBytes / 3) {
+        const QString message = QStringLiteral("推演服务器返回的消息超过允许大小");
+        m_manualClose = true;
+        m_token.clear();
+        m_socket.close();
+        setState(QStringLiteral("error"), message);
+        emit fatalError(message);
+        return;
+    }
+    const QByteArray utf8 = text.toUtf8();
+    if (utf8.size() > Protocol::MaxServerMessageBytes) {
         const QString message = QStringLiteral("推演服务器返回的消息超过允许大小");
         m_manualClose = true;
         m_token.clear();
@@ -281,7 +348,7 @@ void NetworkClient::onTextMessage(const QString& text) {
         return;
     }
     QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(text.toUtf8(), &parseError);
+    const QJsonDocument document = QJsonDocument::fromJson(utf8, &parseError);
     if (!document.isObject()) {
         const QString message = QStringLiteral("推演服务器返回了无效协议消息");
         m_manualClose = true;
@@ -321,6 +388,7 @@ void NetworkClient::onTextMessage(const QString& text) {
         m_reconnectAttempt = 0;
         m_authenticated = true;
         m_welcomePayload = payload;
+        m_ddsTicket = payload.value(QStringLiteral("ddsTicket")).toString();
         setState(QStringLiteral("synchronizing"), QStringLiteral("身份已确认，正在同步推演状态"));
         emit chatHistoryReceived(payload.value(QStringLiteral("chatHistory")).toArray());
     } else if (type == QLatin1String("snapshot")) {
@@ -336,7 +404,7 @@ void NetworkClient::onTextMessage(const QString& text) {
         if (!m_identityPublished) {
             emit authenticated(m_welcomePayload.value(QStringLiteral("username")).toString(),
                                m_welcomePayload.value(QStringLiteral("displayName")).toString(),
-                               m_welcomePayload.value(QStringLiteral("role")).toString(),
+                               m_welcomePayload.value(QStringLiteral("seatId")).toString(),
                                m_accountServer);
             m_identityPublished = true;
         }
@@ -352,7 +420,21 @@ void NetworkClient::onTextMessage(const QString& text) {
         emit snapshotReceived(m_stateStore.snapshot());
     } else if (type == QLatin1String("chat")) {
         emit chatReceived(payload);
+    } else if (type == QLatin1String("roomDirectory")) {
+        emit roomDirectoryReceived(payload.value(QStringLiteral("rooms")).toArray());
+    } else if (type == QLatin1String("seatState")) {
+        emit seatStateReceived(payload);
+        m_currentSeatId = payload.value(QStringLiteral("yourSeatId")).toString();
+        m_dataPlane.stop();
+    } else if (type == QLatin1String("deploymentPrompt")) {
+        emit deploymentPromptReceived(payload);
+    } else if (type == QLatin1String("intelShare")) {
+        emit intelShareReceived(payload);
     } else if (type == QLatin1String("event")) {
+        Protocol::TransferEventProjection transfer;
+        if (Protocol::projectTransferEvent(payload, &transfer).valid) {
+            emit transferEventReceived(payload);
+        }
         emit eventReceived(payload);
     } else if (type == QLatin1String("pong")) {
         if (m_pingPending) {
@@ -365,7 +447,26 @@ void NetworkClient::onTextMessage(const QString& text) {
     } else if (type == QLatin1String("error")) {
         const QString message = payload.value(QStringLiteral("message")).toString(QStringLiteral("服务器拒绝了请求"));
         const QString code = payload.value(QStringLiteral("code")).toString();
-        if (code == QLatin1String("SESSION_REVOKED") || code == QLatin1String("INVALID_TOKEN")) {
+        if (code == QLatin1String("KICKED_BY_ADMIN")
+            || code == QLatin1String("USER_KICKED_OFFLINE")) {
+            const QString token = m_token;
+            const bool hadSession = m_authenticated;
+            m_manualClose = true;
+            if (!token.isEmpty() && !m_accountServer.isEmpty()) {
+                QNetworkRequest request{QUrl(m_accountServer + QStringLiteral("/api/client/logout"))};
+                request.setRawHeader("Authorization", QByteArrayLiteral("Bearer ") + token.toUtf8());
+                request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+                QNetworkReply* reply = m_network.post(request, QByteArrayLiteral("{}"));
+                QTimer::singleShot(5000, reply, [reply]() { if (reply->isRunning()) reply->abort(); });
+                connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
+            }
+            m_token.clear();
+            m_dataPlane.stop();
+            m_socket.close(QWebSocketProtocol::CloseCodePolicyViolated, QStringLiteral("已被管理员移出房间"));
+            setState(QStringLiteral("error"), message);
+            if (hadSession) emit authenticationLost(message);
+            else emit fatalError(message);
+        } else if (code == QLatin1String("SESSION_REVOKED") || code == QLatin1String("INVALID_TOKEN")) {
             const bool hadSession = m_authenticated;
             m_manualClose = true;
             m_token.clear();
@@ -377,16 +478,16 @@ void NetworkClient::onTextMessage(const QString& text) {
             emit commandRejected(message);
         }
     } else if (type == QLatin1String("commandResult")) {
-        const QString commandId = payload.value(QStringLiteral("commandId")).toString();
-        if (!m_pendingCommands.contains(commandId)) return;
-        const PendingCommand pending = m_pendingCommands.take(commandId);
-        const bool accepted = payload.value(QStringLiteral("accepted")).toBool();
-        const QString message = payload.value(QStringLiteral("message")).toString();
-        emit commandStatusChanged(commandId, pending.action,
-                                  accepted ? QStringLiteral("accepted")
-                                           : QStringLiteral("rejected"),
-                                  payload.value(QStringLiteral("code")).toString(), message);
-        if (!accepted) emit commandRejected(message);
+        Protocol::CommandResultProjection commandResult;
+        const Protocol::ValidationResult validation =
+            Protocol::projectCommandResult(payload, &commandResult);
+        if (!validation.valid || !m_pendingCommands.contains(commandResult.commandId)) return;
+        const PendingCommand pending = m_pendingCommands.take(commandResult.commandId);
+        emit commandStatusChanged(commandResult.commandId, pending.action,
+                                  commandResult.accepted ? QStringLiteral("accepted")
+                                                         : QStringLiteral("rejected"),
+                                  commandResult.code, commandResult.message);
+        if (!commandResult.accepted) emit commandRejected(commandResult.message);
     }
 }
 
@@ -434,6 +535,7 @@ void NetworkClient::sendCommand(const QString& action, const QVariantMap& args) 
     const QJsonObject jsonArgs = QJsonObject::fromVariantMap(args);
     const QJsonObject payload{{QStringLiteral("commandId"), commandId},
                               {QStringLiteral("action"), action},
+                              {QStringLiteral("stateRevision"), m_stateStore.stateRevision()},
                               {QStringLiteral("args"), jsonArgs}};
     const Protocol::ValidationResult validation =
         Protocol::validateClientPayload(QStringLiteral("command"), payload);
@@ -449,6 +551,12 @@ void NetworkClient::sendCommand(const QString& action, const QVariantMap& args) 
     sendPendingCommand(commandId, false);
 }
 
+void NetworkClient::sendUnitOrder(const QString& unitId, const QString& text) {
+    sendCommand(QStringLiteral("unitOrder"),
+                QVariantMap{{QStringLiteral("unitId"), unitId},
+                            {QStringLiteral("text"), text.trimmed()}});
+}
+
 void NetworkClient::sendPendingCommand(const QString& commandId, bool retry) {
     if (!m_pendingCommands.contains(commandId) || !m_authenticated
         || state() != QLatin1String("connected") || m_stateStore.waitingForSnapshot()
@@ -458,6 +566,7 @@ void NetworkClient::sendPendingCommand(const QString& commandId, bool retry) {
     PendingCommand& pending = m_pendingCommands[commandId];
     const QJsonObject payload{{QStringLiteral("commandId"), commandId},
                               {QStringLiteral("action"), pending.action},
+                              {QStringLiteral("stateRevision"), m_stateStore.stateRevision()},
                               {QStringLiteral("args"), pending.args}};
     if (!sendEnvelope(QStringLiteral("command"), payload)) return;
     pending.lastSentAtMs = m_monotonic.elapsed();
@@ -527,16 +636,95 @@ void NetworkClient::sendReady(bool ready) {
         emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能提交就绪状态"));
         return;
     }
-    sendEnvelope(QStringLiteral("setReady"), QJsonObject{{QStringLiteral("ready"), ready}});
+    sendEnvelope(QStringLiteral("seatReady"), QJsonObject{{QStringLiteral("ready"), ready}});
 }
 
-void NetworkClient::sendChat(const QString& text) {
+void NetworkClient::sendSimple(const QString& type, const QJsonObject& payload) {
+    if (!m_authenticated || m_socket.state() != QAbstractSocket::ConnectedState) {
+        emit commandRejected(QStringLiteral("联网会话尚未建立"));
+        return;
+    }
+    sendEnvelope(type, payload);
+}
+
+void NetworkClient::requestRooms() { sendSimple(QStringLiteral("roomList"), QJsonObject{}); }
+
+void NetworkClient::joinRoom(const QString& roomId) {
+    sendSimple(QStringLiteral("joinRoom"), QJsonObject{{QStringLiteral("roomId"), roomId}});
+}
+
+void NetworkClient::claimSeat(const QString& seatId) {
+    sendSimple(QStringLiteral("claimSeat"), QJsonObject{{QStringLiteral("seatId"), seatId}});
+}
+
+void NetworkClient::approveSeatTransfer(const QString& seatId, qint64 userId,
+                                        qint64 requestedRevision) {
+    sendSimple(QStringLiteral("claimSeat"),
+               QJsonObject{{QStringLiteral("seatId"), seatId},
+                           {QStringLiteral("approveUserId"), userId},
+                           {QStringLiteral("requestedRevision"), requestedRevision}});
+}
+
+void NetworkClient::rejectSeatTransfer(const QString& seatId, qint64 userId,
+                                       qint64 requestedRevision) {
+    sendSimple(QStringLiteral("claimSeat"),
+               QJsonObject{{QStringLiteral("seatId"), seatId},
+                           {QStringLiteral("rejectUserId"), userId},
+                           {QStringLiteral("requestedRevision"), requestedRevision}});
+}
+
+void NetworkClient::leaveRoom() { sendSimple(QStringLiteral("leaveRoom"), QJsonObject{}); }
+
+void NetworkClient::sendSeatReady(bool ready) {
+    sendSimple(QStringLiteral("seatReady"), QJsonObject{{QStringLiteral("ready"), ready}});
+}
+
+void NetworkClient::sendDeployment(const QString& unitId, const QVariantMap& position) {
+    sendSimple(QStringLiteral("deployment"), QJsonObject{{QStringLiteral("unitId"), unitId},
+                                                          {QStringLiteral("position"), QJsonObject::fromVariantMap(position)}});
+}
+
+void NetworkClient::requestRedeploy() { sendSimple(QStringLiteral("requestRedeploy"), QJsonObject{}); }
+
+void NetworkClient::redeploy(const QString& seatId) {
+    sendSimple(QStringLiteral("redeploy"),
+               QJsonObject{{QStringLiteral("seatId"), seatId}});
+}
+
+void NetworkClient::sendUnitName(const QString& unitName) {
+    sendSimple(QStringLiteral("setUnitName"), QJsonObject{{QStringLiteral("unitName"), unitName}});
+}
+
+void NetworkClient::shareIntel(const QString& targetId, const QStringList& recipientSeatIds,
+                               const QString& note) {
+    QJsonArray recipients;
+    for (const QString& seatId : recipientSeatIds) recipients.append(seatId);
+    sendSimple(QStringLiteral("shareIntel"), QJsonObject{{QStringLiteral("targetId"), targetId},
+                                                          {QStringLiteral("recipientSeatIds"), recipients},
+                                                          {QStringLiteral("note"), note}});
+}
+
+void NetworkClient::sendMapMark(const QVariantMap& position, const QString& label,
+                                const QStringList& recipientSeatIds) {
+    QJsonArray recipients;
+    for (const QString& seatId : recipientSeatIds) recipients.append(seatId);
+    sendSimple(QStringLiteral("mapMark"),
+               QJsonObject{{QStringLiteral("position"), QJsonObject::fromVariantMap(position)},
+                           {QStringLiteral("label"), label},
+                           {QStringLiteral("recipientSeatIds"), recipients}});
+}
+
+void NetworkClient::sendChat(const QString& text, const QStringList& recipientSeatIds) {
     if (!m_authenticated || state() != QLatin1String("connected")
         || m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()) {
         emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能发送消息"));
         return;
     }
-    sendEnvelope(QStringLiteral("chat"), QJsonObject{{QStringLiteral("text"), text}});
+    QJsonArray recipients;
+    for (const QString& seatId : recipientSeatIds) recipients.append(seatId);
+    sendEnvelope(QStringLiteral("chat"),
+                 QJsonObject{{QStringLiteral("text"), text},
+                             {QStringLiteral("recipientSeatIds"), recipients}});
 }
 
 void NetworkClient::sendScenarioUpsert(const QJsonObject& unit) {

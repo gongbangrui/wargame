@@ -70,6 +70,9 @@ QJsonObject create(const QJsonObject& base, const QJsonObject& current) {
     if (base.value(QStringLiteral("messages")) != current.value(QStringLiteral("messages"))) {
         delta[QStringLiteral("messages")] = current.value(QStringLiteral("messages"));
     }
+    if (base.value(QStringLiteral("mapMarks")) != current.value(QStringLiteral("mapMarks"))) {
+        delta[QStringLiteral("mapMarks")] = current.value(QStringLiteral("mapMarks"));
+    }
     return delta;
 }
 
@@ -113,6 +116,9 @@ bool apply(QJsonObject& state, const QJsonObject& delta, QString* error) {
     state[QStringLiteral("roomState")] = delta.value(QStringLiteral("roomState"));
     if (delta.contains(QStringLiteral("messages"))) {
         state[QStringLiteral("messages")] = delta.value(QStringLiteral("messages"));
+    }
+    if (delta.contains(QStringLiteral("mapMarks"))) {
+        state[QStringLiteral("mapMarks")] = delta.value(QStringLiteral("mapMarks"));
     }
     state[QStringLiteral("stateRevision")] = next;
     return true;

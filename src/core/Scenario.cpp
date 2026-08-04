@@ -7,10 +7,70 @@
 #include <QJsonArray>
 #include <QDir>
 #include <QSaveFile>
+#include <QSet>
 #include <cmath>
 #include <limits>
 
 namespace gbr {
+
+namespace {
+
+bool readOptionalFiniteDouble(const QJsonObject& object, const char* name, double fallback,
+                              double* output, QString* error, const QString& context) {
+    const QJsonValue value = object.value(QLatin1String(name));
+    if (value.isUndefined()) {
+        *output = fallback;
+        return true;
+    }
+    if (!value.isDouble() || !std::isfinite(value.toDouble())) {
+        *error = QStringLiteral("%1.%2必须为有限数字").arg(context, QLatin1String(name));
+        return false;
+    }
+    *output = value.toDouble();
+    return true;
+}
+
+bool readOptionalInteger(const QJsonObject& object, const char* name, int fallback,
+                         int* output, QString* error, const QString& context) {
+    const QJsonValue value = object.value(QLatin1String(name));
+    if (value.isUndefined()) {
+        *output = fallback;
+        return true;
+    }
+    const double number = value.toDouble(std::numeric_limits<double>::quiet_NaN());
+    if (!value.isDouble() || !std::isfinite(number) || std::floor(number) != number
+        || number < static_cast<double>(std::numeric_limits<int>::min())
+        || number > static_cast<double>(std::numeric_limits<int>::max())) {
+        *error = QStringLiteral("%1.%2必须为有限整数").arg(context, QLatin1String(name));
+        return false;
+    }
+    *output = static_cast<int>(number);
+    return true;
+}
+
+bool readRequiredFiniteDouble(const QJsonObject& object, const char* name, double* output,
+                              QString* error, const QString& context) {
+    const QJsonValue value = object.value(QLatin1String(name));
+    if (!value.isDouble() || !std::isfinite(value.toDouble())) {
+        *error = QStringLiteral("%1.%2必须为有限数字").arg(context, QLatin1String(name));
+        return false;
+    }
+    *output = value.toDouble();
+    return true;
+}
+
+bool readRequiredString(const QJsonObject& object, const char* name, QString* output,
+                        QString* error, const QString& context) {
+    const QJsonValue value = object.value(QLatin1String(name));
+    if (!value.isString() || value.toString().isEmpty()) {
+        *error = QStringLiteral("%1.%2不能为空").arg(context, QLatin1String(name));
+        return false;
+    }
+    *output = value.toString();
+    return true;
+}
+
+}
 
 QJsonObject ScenarioIo::toJson(const Scenario& s) {
     QJsonObject root;
@@ -66,66 +126,117 @@ QJsonObject ScenarioIo::toJson(const Scenario& s) {
     return root;
 }
 
-Scenario ScenarioIo::fromJson(const QJsonObject& o) {
+Scenario ScenarioIo::fromJson(const QJsonObject& o, QString* err) {
+    if (err) err->clear();
+    auto reject = [err](const QString& message) {
+        if (err) *err = message;
+        return Scenario{};
+    };
+
     Scenario s;
-    auto m = o.value("map").toObject();
+    const QJsonValue mapValue = o.value(QStringLiteral("map"));
+    if (!mapValue.isUndefined() && !mapValue.isObject()) {
+        return reject(QStringLiteral("map必须是对象"));
+    }
+    const QJsonObject m = mapValue.toObject();
     s.map.name = m.value("name").toString("default");
-    s.map.widthMeters = m.value("widthMeters").toDouble(40000);
-    s.map.heightMeters = m.value("heightMeters").toDouble(30000);
+    QString parseError;
+    if (!readOptionalFiniteDouble(m, "widthMeters", 40000.0, &s.map.widthMeters,
+                                  &parseError, QStringLiteral("map"))
+        || !readOptionalFiniteDouble(m, "heightMeters", 30000.0, &s.map.heightMeters,
+                                     &parseError, QStringLiteral("map"))) {
+        return reject(parseError);
+    }
     s.map.backgroundResource = m.value("backgroundResource").toString();
-    for (auto v : o.value("units").toArray()) {
-        auto u = v.toObject();
+
+    const QJsonValue unitsValue = o.value(QStringLiteral("units"));
+    if (!unitsValue.isUndefined() && !unitsValue.isArray()) {
+        return reject(QStringLiteral("units必须是数组"));
+    }
+    QSet<QString> unitIds;
+    const QJsonArray units = unitsValue.toArray();
+    for (qsizetype unitIndex = 0; unitIndex < units.size(); ++unitIndex) {
+        const QJsonValue value = units.at(unitIndex);
+        const QString context = QStringLiteral("units[%1]").arg(unitIndex);
+        if (!value.isObject()) return reject(context + QStringLiteral("必须是对象"));
+
+        const QJsonObject u = value.toObject();
         ScenarioUnit su;
-        su.id = u.value("id").toString();
+        if (!readRequiredString(u, "id", &su.id, &parseError, context)
+            || !readRequiredString(u, "kind", &su.kind, &parseError, context)
+            || !readRequiredString(u, "side", &su.side, &parseError, context)) {
+            return reject(parseError);
+        }
+        if (unitIds.contains(su.id)) {
+            return reject(QStringLiteral("%1.id重复: %2").arg(context, su.id));
+        }
+        unitIds.insert(su.id);
+
         su.callsign = u.value("callsign").toString();
-        su.kind = u.value("kind").toString();
-        su.side = u.value("side").toString();
-        su.pos.x = u.value("x").toDouble();
-        su.pos.y = u.value("y").toDouble();
-        su.pos.alt = u.value("alt").toDouble();
-        su.detectRange = u.value("detectRange").toDouble(5000);
-        su.attackRange = u.value("attackRange").toDouble(1500);
-        su.commRange = u.value("commRange").toDouble(20000);
-        su.speed = u.value("speed").toDouble(50);
-        su.maxHp = u.value("maxHp").toDouble(100);
-        su.armor = u.value("armor").toDouble(0.0);
-        su.repairRate = u.value("repairRate").toDouble(2.0);
-        su.subsystemRepairRate = u.value("subsystemRepairRate").toDouble(0.02);
-        su.attackPower = u.value("attackPower").toDouble(100);
+        if (!readOptionalFiniteDouble(u, "x", 0.0, &su.pos.x, &parseError, context)
+            || !readOptionalFiniteDouble(u, "y", 0.0, &su.pos.y, &parseError, context)
+            || !readOptionalFiniteDouble(u, "alt", 0.0, &su.pos.alt, &parseError, context)
+            || !readOptionalFiniteDouble(u, "detectRange", 5000.0, &su.detectRange, &parseError, context)
+            || !readOptionalFiniteDouble(u, "attackRange", 1500.0, &su.attackRange, &parseError, context)
+            || !readOptionalFiniteDouble(u, "commRange", 20000.0, &su.commRange, &parseError, context)
+            || !readOptionalFiniteDouble(u, "speed", 50.0, &su.speed, &parseError, context)
+            || !readOptionalFiniteDouble(u, "maxHp", 100.0, &su.maxHp, &parseError, context)
+            || !readOptionalFiniteDouble(u, "armor", 0.0, &su.armor, &parseError, context)
+            || !readOptionalFiniteDouble(u, "repairRate", 2.0, &su.repairRate, &parseError, context)
+            || !readOptionalFiniteDouble(u, "subsystemRepairRate", 0.02,
+                                         &su.subsystemRepairRate, &parseError, context)
+            || !readOptionalFiniteDouble(u, "attackPower", 100.0, &su.attackPower,
+                                         &parseError, context)) {
+            return reject(parseError);
+        }
         // v1 scenarios only carried attackPower and attackRange. Derive the
         // new weapon profile from those values so old files remain playable.
-        auto integerField = [&u](const char* name, int fallback) {
-            const QJsonValue value = u.value(QLatin1String(name));
-            if (value.isUndefined()) return fallback;
-            const double number = value.toDouble(std::numeric_limits<double>::quiet_NaN());
-            if (!std::isfinite(number) || std::floor(number) != number
-                || number < static_cast<double>(std::numeric_limits<int>::min())
-                || number > static_cast<double>(std::numeric_limits<int>::max())) return -1;
-            return static_cast<int>(number);
-        };
-        auto numberField = [&u](const char* name, double fallback) {
-            const QJsonValue value = u.value(QLatin1String(name));
-            return value.isUndefined()
-                ? fallback : value.toDouble(std::numeric_limits<double>::quiet_NaN());
-        };
-        su.ammoCapacity = integerField("ammoCapacity", 4);
-        su.initialAmmo = integerField("initialAmmo", su.ammoCapacity);
-        su.hitProbability = numberField("hitProbability", 1.0);
-        su.optimalRange = numberField("optimalRange", su.attackRange);
-        su.minAttackRange = numberField("minAttackRange", 0.0);
-        su.cooldownSec = numberField("cooldownSec", 1.0);
-        su.damageMin = numberField("damageMin", su.attackPower);
-        su.damageMax = numberField("damageMax", su.attackPower);
-        su.rangeFalloff = numberField("rangeFalloff", 0.0);
-        su.fuelCapacitySec = numberField("fuelCapacitySec", 1800.0);
-        su.initialFuelSec = numberField("initialFuelSec", su.fuelCapacitySec);
-        su.rearmDurationSec = numberField("rearmDurationSec", 12.0);
-        for (auto sv : u.value("schedule").toArray()) {
-            auto sp = sv.toObject();
+        if (!readOptionalInteger(u, "ammoCapacity", 4, &su.ammoCapacity, &parseError, context)
+            || !readOptionalInteger(u, "initialAmmo", su.ammoCapacity, &su.initialAmmo,
+                                    &parseError, context)
+            || !readOptionalFiniteDouble(u, "hitProbability", 1.0, &su.hitProbability,
+                                         &parseError, context)
+            || !readOptionalFiniteDouble(u, "optimalRange", su.attackRange, &su.optimalRange,
+                                         &parseError, context)
+            || !readOptionalFiniteDouble(u, "minAttackRange", 0.0, &su.minAttackRange,
+                                         &parseError, context)
+            || !readOptionalFiniteDouble(u, "cooldownSec", 4.0, &su.cooldownSec,
+                                         &parseError, context)
+            || !readOptionalFiniteDouble(u, "damageMin", su.attackPower, &su.damageMin,
+                                         &parseError, context)
+            || !readOptionalFiniteDouble(u, "damageMax", su.attackPower, &su.damageMax,
+                                         &parseError, context)
+            || !readOptionalFiniteDouble(u, "rangeFalloff", 0.0, &su.rangeFalloff,
+                                         &parseError, context)
+            || !readOptionalFiniteDouble(u, "fuelCapacitySec", 1800.0, &su.fuelCapacitySec,
+                                         &parseError, context)
+            || !readOptionalFiniteDouble(u, "initialFuelSec", su.fuelCapacitySec,
+                                         &su.initialFuelSec, &parseError, context)
+            || !readOptionalFiniteDouble(u, "rearmDurationSec", 12.0, &su.rearmDurationSec,
+                                         &parseError, context)) {
+            return reject(parseError);
+        }
+
+        const QJsonValue scheduleValue = u.value(QStringLiteral("schedule"));
+        if (!scheduleValue.isUndefined() && !scheduleValue.isArray()) {
+            return reject(context + QStringLiteral(".schedule必须是数组"));
+        }
+        const QJsonArray schedule = scheduleValue.toArray();
+        su.schedule.reserve(schedule.size());
+        for (qsizetype scheduleIndex = 0; scheduleIndex < schedule.size(); ++scheduleIndex) {
+            const QJsonValue schedulePoint = schedule.at(scheduleIndex);
+            const QString scheduleContext =
+                QStringLiteral("%1.schedule[%2]").arg(context).arg(scheduleIndex);
+            if (!schedulePoint.isObject()) {
+                return reject(scheduleContext + QStringLiteral("必须是对象"));
+            }
+            const QJsonObject sp = schedulePoint.toObject();
             SchedulePoint pt;
-            pt.time = sp.value("time").toDouble();
-            pt.x = sp.value("x").toDouble();
-            pt.y = sp.value("y").toDouble();
+            if (!readRequiredFiniteDouble(sp, "time", &pt.time, &parseError, scheduleContext)
+                || !readRequiredFiniteDouble(sp, "x", &pt.x, &parseError, scheduleContext)
+                || !readRequiredFiniteDouble(sp, "y", &pt.y, &parseError, scheduleContext)) {
+                return reject(parseError);
+            }
             su.schedule.push_back(pt);
         }
         std::sort(su.schedule.begin(), su.schedule.end(),
@@ -153,7 +264,7 @@ Scenario ScenarioIo::loadFromFile(const QString& path, QString* err) {
         }
         return {};
     }
-    return fromJson(doc.object());
+    return fromJson(doc.object(), err);
 }
 
 bool ScenarioIo::saveToFile(const Scenario& s, const QString& path, QString* err) {

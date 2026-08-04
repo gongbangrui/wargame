@@ -1,78 +1,103 @@
-# AGENTS.md
+# PROJECT KNOWLEDGE BASE
 
-OpenCode instructions for the `wargame-master` (兵器推演) repository.
+**Generated:** 2026-07-29
+**Commit:** da7b0b3
+**Branch:** main
 
-## Build & Run
+## OVERVIEW
 
-```bash
-# One-time configure (adjust CMAKE_PREFIX_PATH to your Qt6 install)
-cmake -S . -B build -G Ninja \
-  -DCMAKE_PREFIX_PATH=/path/to/Qt/6.x/gcc_64 \
-  -DCMAKE_BUILD_TYPE=Debug
+Qt 6.10+/C++20 兵棋推演工程，包含 QML 桌面客户端、共享仿真/协议库、可选 Fast DDS 适配、无头权威游戏服务器和独立 Python 账号服务。客户端本地模式由 `SimulationEngine` 推进；联网模式由服务器推进，客户端只发送命令并消费经过权限裁剪的状态。
 
-ninja -C build           # incremental build
-./build/appindex         # run (binary is "appindex", not "index" or "wargame")
-./build/wargame_tests    # run unit tests
+## STRUCTURE
+
+```text
+./
+├── src/                 # 共享领域、协议、客户端网络和 QML 桥接
+├── qml/                 # Qt Quick 根壳、视图和组件
+├── server/              # C++ 权威游戏服务器与 Python 账号服务
+├── tests/               # GoogleTest 及账号生命周期测试
+├── deploy/              # Docker Compose、安装、恢复和发布脚本
+├── tools/               # 格式、基线、联网冒烟和 Docker 验证
+├── map/                 # 运行时瓦片、GIS 元数据和制图工具
+├── docs/                # 网络、部署、发布和验收说明
+└── cmake/               # 共享 CMake target helpers
 ```
 
-CMakeLists.txt requires Qt 6.10+ (`REQUIRES 6.10` in qt_standard_project_setup). The `.pro` file is a qmake leftover — **ignore it**, build with CMake only.
+## WHERE TO LOOK
 
-Google Test is fetched via `FetchContent` during CMake configure. No manual setup needed.
+| Task | Location | Notes |
+|------|----------|-------|
+| Domain simulation | `src/core/`, `src/units/` | `wargame_domain`; default tick is 50 ms |
+| Shared wire contract | `src/protocol/` | Snapshot, delta, envelope and command results |
+| Client network state | `src/network/` | HTTPS login, WebSocket, reconnect, resync and retries |
+| QML bridge | `src/view/SimulationController.*` | Sole business bridge exposed as `controller` |
+| QML UI | `Main.qml`, `qml/` | Use controller APIs; do not reach into engine objects |
+| Server authority | `server/game/` | Room, permissions, projection, persistence and WebSocket |
+| Account API | `server/account/` | FastAPI/Uvicorn and SQLite-backed administration |
+| Build graph | `CMakeLists.txt`, `server/CMakeLists.txt`, `cmake/` | Root and standalone server paths differ |
+| Quality gates | `.github/workflows/quality.yml`, `tools/` | Native and Docker recovery jobs |
+| Deployment | `deploy/`, `docs/ONLINE_DEPLOYMENT.md` | Production-facing scripts and data volumes |
 
-## Architecture (must-know)
+## CODE MAP
 
-- **Single process**: C++ backend (`SimulationEngine`) drives all units at 50ms ticks. QML UI reads state via `controller.*` context property. No network, no multi-process.
-- **`gbr` namespace**: all C++ classes.
-- **`controller`** (`SimulationController`) is the sole C++↔QML bridge. QML binds `controller.viewMode`, `controller.focusedSide`, `controller.units`, etc. Never call `engine->bus()` or unit methods from QML directly.
-- **`controller.command(action, args)`** is the universal action entry point — QML calls this, `SimulationEngine::command` dispatches to `MessageBus`.
-- **View modes**: exactly 4: `editor`, `commandpost-red`, `commandpost-blue`, `director`. Confirmed by `SimulationController::viewModeOptions()` and `SimulationRoot.qml` ListModel+Loader. Old views (`ReconUavView.qml`, `AttackUavView.qml`, `GroundScoutView.qml`) have been **removed** from disk.
-- **Unit types**: 5 kinds — `CommandPost`, `ReconUAV`, `AttackUAV`, `GroundScout`, `JammerUAV`. Confirmed in `UnitBase.h` enum.
-- **UnitFsm**: Each mobile unit (AttackUAV, ReconUAV, JammerUAV, GroundScout) now uses `UnitFsm` for state management (idle/moving/patrolling/withdrawing). `onTick` delegates to `m_fsm.tick(dt)`. New states should follow this pattern.
+| Symbol | Type | Location | Role |
+|--------|------|----------|------|
+| `main` | Client entry | `main.cpp` | Creates Qt app, controller, editor and QML engine |
+| `SimulationController` | QML facade | `src/view/SimulationController.*` | Selects local/online mode and forwards commands |
+| `SimulationEngine` | Domain engine | `src/core/SimulationEngine.*` | Owns local authoritative simulation and ticks |
+| `NetworkClient` | Client adapter | `src/network/NetworkClient.*` | Authenticates and exchanges WebSocket messages |
+| `ClientStateStore` | Client state machine | `src/network/ClientStateStore.*` | Applies snapshot/delta and requests resync on gaps |
+| `GameServer` | Server orchestrator | `server/game/GameServer.*` | Auth, sessions, commands, broadcast and recovery |
+| `AuthoritativeRoom` | Room authority | `server/game/AuthoritativeRoom.*` | Seats, deployment, readiness and lifecycle |
+| `StateProjector` | Security boundary | `server/game/StateProjector.*` | Filters state/events by role, side and communication |
+| `RoomPersistence` | Durable state | `server/game/RoomPersistence.*` | Checkpoints, event log, rotation and restore |
 
-## Critical invariants
+## CONVENTIONS
 
-- **Exactly one CP per side**: `SimulationEngine::recomputeReadyForSim()` requires each side to have exactly one alive CommandPost. Missing/duplicate/destroyed → `readyForSim = false` → run button disabled, red text, auto-pause.
-- **CP ids are hardcoded**: `SimulationEngine::command` uses `"red_cp"` / `"blue_cp"` literally for sender resolution when no live CP is found. Any scenario should name its command posts exactly these ids to avoid fallback issues.
-- **CP comms bypass distance**: `MessageBus::canCommunicate` checks `isCp` flag — CPs can always reach their own side's units.
-- **ECM jamming**: Each tick resets all units' jamming to 1.0, then `JammerUAV` applies 0.4 multiplier to hostile units within `detectRange` (repurposed as jam range), scaling their `detectRange` and `commRange`.
-- **CP detect dedup**: `CommandPost` won't re-report a `targetId` already in `m_pending` or `m_targets`.
-- **Command alive guard**: All `SimulationEngine::command()` actions now reject dead units.
+- Use CMake Presets and Ninja. Root builds require Qt 6.10+, Qt Quick, Network, WebSockets and Qt6Keychain; C++ is C++20.
+- `debug` builds client, server and tests in `build/debug`; `sanitizers` uses ASan/UBSan in `build/sanitizers`.
+- The standalone `server/` project has a lower Qt 6.4 minimum and intentionally avoids Qt Quick/QtKeychain; keep that distinction explicit.
+- C++ project types belong in namespace `gbr`; use paired headers/sources and four-space indentation.
+- `wargame_domain` must remain independent of QML and server implementation. `wargame_protocol` is shared by client and server.
+- QML receives `controller` from `main.cpp`/`Main.qml`; generic actions use `controller.command(action, args)`, while server-side permissions remain authoritative.
+- In online mode, the server advances simulation time and sends projected state. Client-side QML permission flags are UX gates, never security checks.
+- Exactly one live command post per side is required before a match can run. Stable command-post ids are `red_cp` and `blue_cp`.
+- Map source files under `map/` are authoritative; CMake stages the runtime subset into the build tree.
+- GoogleTest is fetched by CMake. Python, Node, QML lint, Docker recovery and source-format checks are separate validation surfaces.
 
-## Adding new unit types
+## ANTI-PATTERNS (THIS PROJECT)
 
-1. `src/core/UnitBase.h` — add to `enum class UnitKind` + `kindName`/`kindFromName`.
-2. `src/core/UnitBase.cpp` — add branch in `create()` factory.
-3. `src/units/Foo.h` + `Foo.cpp` — subclass `UnitBase`, implement `onTick(double)`, call `setupFsm()` in constructor and delegate to `m_fsm`.
-4. `CMakeLists.txt` — add to `corelib` source list.
-5. If new actions needed: `SimulationEngine::command` + `Message::Type`.
+- Do not restore the old single-process-only architecture description; online sessions are server-authoritative.
+- Do not expose complete enemy state, unprojected events, credentials, tokens, databases, checkpoints or logs to clients or Git.
+- Do not let QML call `SimulationEngine`, `MessageBus` or network internals directly, or treat QML permission state as authorization.
+- Do not execute remote simulation locally, optimistically confirm seats/commands, or apply a delta without a valid snapshot and contiguous revision.
+- Do not make a notification/event mutate authoritative combat state, and do not send a server command before durable-event handling where persistence requires it.
+- Do not edit a running scenario, change production data without an isolated backup, or run recovery scripts against a production Compose project.
+- Do not commit build outputs, `.env`, SQLite databases, JSONL/checkpoints, logs, Qt Creator state, generated releases or map build intermediates.
 
-## Adding new view modes
+## COMMANDS
 
-1. `qml/views/FooView.qml` (top-level `Item`).
-2. `SimulationRoot.qml` — add `ListElement` to `viewCombo` model + case in `pageLoader.sourceComponent` + `Component { id: fooPage; FooView {} }`.
-3. `SimulationController::viewModeOptions()`.
-4. `CMakeLists.txt` — add the new `.qml` file to `QML_FILES`.
+```bash
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug
 
-## File locations
+cmake --preset sanitizers
+cmake --build --preset sanitizers
+ctest --preset sanitizers
 
-| Concern | Path |
-|---------|------|
-| C++ core (engine, bus, geo, scenario, map) | `src/core/` |
-| Unit implementations | `src/units/` |
-| QML↔C++ bridge | `src/view/SimulationController.{h,cpp}` |
-| Scenario file IO helper | `src/view/ScenarioEditor.{h,cpp}` |
-| QML views | `qml/views/` |
-| QML reusable components | `qml/components/` |
-| Unit tests | `tests/` |
-| Saved scenarios | `./scenarios/editing.json` |
-| Map asset | `assets/sample_map.json` |
+cmake --build build/debug --target all_qmllint
+./tools/check-source-format.sh
+./tools/verify-test-baseline.sh build/debug build/sanitizers
+uv run --with-requirements server/account/requirements.txt python tests/test_account_room_lifecycle.py
+```
 
-## Caveats
+For deployment-level validation, use isolated credentials and ports with `tools/network-smoke.mjs`, `tools/room-hosting-contract.mjs`, and `tools/verify-docker-recovery.sh`. Release-specific sequencing and rollback rules live in `docs/RELEASE.md`.
 
-- **README.md is stale**: it lists `recon`/`attack`/`ground` views and omits `JammerUAV`. Trust `SimulationController::viewModeOptions()`, `UnitBase.h` enum, and `CMakeLists.txt` QML_FILES over README.
-- `UnitFsm` is now actively used by all mobile units. New units must follow the same pattern: `setupFsm()` in constructor, `m_fsm.tick(dt)` in `onTick`.
-- All UI text, comments, and status messages are **Chinese**. Keep new strings in Chinese.
-- QML uses `QtQuick.Controls.Basic` (not Material or Fusion). Theme object `id: theme` in `SimulationRoot.qml`; each view copies to local `id: t`.
-- Heavy QML JS computations (`attackableTargets`, `detectedEnemyOptions`, etc.) are moved to C++ `SimulationController` for performance. Add new QML-facing queries there, not as JS functions.
-- Use `controller.commandPostIdFor(side)` instead of hardcoding `"red_cp"`/`"blue_cp"` in QML.
+## NOTES
 
+- `corelib` is only a compatibility alias for `wargame_client`; do not treat it as the pure domain library.
+- Fast DDS is optional and discovery-based. WebSocket remains the current authoritative server data plane unless the implementation explicitly adds DDS ownership and consistency rules.
+- Fast DDS 首期只作为可选兼容适配：`WargameEnvelope.idl`/CMake 生成代码和 participant/topic/reader/writer 生命周期必须在 SDK 与 `fastddsgen` 同时存在时才启用；缺失依赖要明确显示 disabled。WebSocket 仍是登录、权威 snapshot/delta、命令和 resync 的唯一数据面。
+- `backups/` and `dist/` are runtime/release artifacts, not source modules. `build/` and Qt Creator generated directories must stay out of code navigation.
+- The working tree may contain broad user changes. Preserve unrelated changes when updating this knowledge base.

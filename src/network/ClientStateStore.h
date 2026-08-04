@@ -1,5 +1,7 @@
 #pragma once
 
+#include "protocol/Protocol.h"
+
 #include <QJsonObject>
 #include <QString>
 
@@ -31,12 +33,14 @@ public:
     quint64 lastSequence() const { return m_lastSequence; }
     qint64 stateRevision() const;
     const QJsonObject& snapshot() const { return m_snapshot; }
+    const Protocol::RoomLifecycleProjection& lifecycle() const { return m_lifecycle; }
     bool waitingForSnapshot() const { return m_waitingForSnapshot; }
     bool waitingForResync() const { return m_waitingForResync; }
 
 private:
     quint64 m_lastSequence = 0;
     QJsonObject m_snapshot;
+    Protocol::RoomLifecycleProjection m_lifecycle;
     bool m_waitingForSnapshot = true;
     bool m_waitingForResync = false;
 };

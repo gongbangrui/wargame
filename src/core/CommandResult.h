@@ -28,6 +28,9 @@ inline constexpr auto UnitNotMovable = "UNIT_NOT_MOVABLE";
 inline constexpr auto InvalidUnitKind = "INVALID_UNIT_KIND";
 inline constexpr auto InvalidTarget = "INVALID_TARGET";
 inline constexpr auto CommandPostUnavailable = "COMMAND_POST_UNAVAILABLE";
+inline constexpr auto WeaponReloading = "WEAPON_RELOADING";
+inline constexpr auto WeaponUnavailable = "WEAPON_UNAVAILABLE";
+inline constexpr auto CommunicationLost = "COMMUNICATION_LOST";
 } // namespace CommandCode
 
 } // namespace gbr

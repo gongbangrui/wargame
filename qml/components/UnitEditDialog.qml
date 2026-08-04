@@ -36,7 +36,7 @@ Dialog {
         "reconuav":    { detectRange: 8000, attackRange: 0,    commRange: 20000, speed: 80,   maxHp: 100, attackPower: 0,   alt: 3000, armor: 0.05, repairRate: 2, subsystemRepairRate: 0.02 },
         "attackuav":   { detectRange: 4000, attackRange: 2500, commRange: 15000, speed: 100,  maxHp: 120, attackPower: 100, alt: 2000,
                           ammoCapacity: 4, initialAmmo: 4, hitProbability: 1.0, optimalRange: 1800,
-                          minAttackRange: 0, cooldownSec: 1, damageMin: 80, damageMax: 120, rangeFalloff: 0.35,
+                          minAttackRange: 0, cooldownSec: 4, damageMin: 80, damageMax: 120, rangeFalloff: 0.35,
                           armor: 0.1, repairRate: 2, subsystemRepairRate: 0.02,
                           fuelCapacitySec: 1800, initialFuelSec: 1800, rearmDurationSec: 12 },
         "groundscout": { detectRange: 3000, attackRange: 0,    commRange: 10000, speed: 6,    maxHp: 80,  attackPower: 0,   alt: 0, armor: 0.15, repairRate: 2, subsystemRepairRate: 0.02 },

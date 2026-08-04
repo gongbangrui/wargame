@@ -8,6 +8,7 @@
 #include "units/AttackUAV.h"
 #include <algorithm>
 #include <QFile>
+#include <QJsonDocument>
 #include <QTemporaryDir>
 
 using namespace gbr;
@@ -24,6 +25,13 @@ protected:
 TEST_F(EngineTest, LoadDefaultScenario) {
     EXPECT_GE(engine.unitIds().size(), 10); // 10 units with jammers
     EXPECT_TRUE(engine.readyForSim());
+}
+
+TEST_F(EngineTest, UnitIterationOrderIsStableAndSorted) {
+    const QStringList ids = engine.unitIds();
+    QStringList sorted = ids;
+    sorted.sort();
+    EXPECT_EQ(ids, sorted);
 }
 
 TEST_F(EngineTest, NewUnitsStartAtFullHp) {
@@ -55,6 +63,35 @@ TEST_F(EngineTest, InvalidStepDoesNotMoveSimulationTime) {
     EXPECT_DOUBLE_EQ(engine.simTime(), 0.0);
 }
 
+TEST_F(EngineTest, SimulationSpeedMultiplierIsClampedToReplayRange) {
+    engine.setSpeedMul(1000.0);
+    EXPECT_DOUBLE_EQ(engine.speedMul(), 8.0);
+    engine.setSpeedMul(-5.0);
+    EXPECT_DOUBLE_EQ(engine.speedMul(), 0.0);
+}
+
+TEST_F(EngineTest, ReplayUsesTheRecordedVariableStepSequence) {
+    Scenario scenario = engine.scenario();
+    for (ScenarioUnit& unit : scenario.units) unit.schedule.clear();
+    ASSERT_TRUE(engine.setScenario(scenario));
+    ASSERT_TRUE(engine.executeCommand(
+                    QStringLiteral("moveTo"),
+                    QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_g1")},
+                                {QStringLiteral("pos"), QVariantMap{
+                                     {QStringLiteral("x"), scenario.map.widthMeters - 1000.0},
+                                     {QStringLiteral("y"), scenario.map.heightMeters - 1000.0}}}}).accepted);
+    engine.stepOnce(0.37);
+    engine.stepOnce(0.11);
+    const double duration = engine.simTime();
+    const QByteArray expected = QJsonDocument(engine.collectCheckpointState())
+                                    .toJson(QJsonDocument::Compact);
+
+    QString error;
+    ASSERT_TRUE(engine.seekReplay(duration, &error)) << error.toStdString();
+    EXPECT_EQ(QJsonDocument(engine.collectCheckpointState()).toJson(QJsonDocument::Compact),
+              expected);
+}
+
 TEST_F(EngineTest, CommandSetSpeed) {
     auto* u = engine.unit("red_a1");
     ASSERT_NE(u, nullptr);
@@ -77,6 +114,92 @@ TEST_F(EngineTest, CommandMoveTo) {
     engine.command("moveTo", args);
     // should not crash; actual movement happens on tick
     SUCCEED();
+}
+
+TEST_F(EngineTest, CommanderOrdersPreserveTypedTextAndSelectedPoints) {
+    const QVariantMap point{{QStringLiteral("x"), 5200.0},
+                            {QStringLiteral("y"), 6100.0}};
+
+    const auto textResult = engine.executeCommand(
+        QStringLiteral("unitOrder"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_a1")},
+                    {QStringLiteral("text"), QStringLiteral("保持编队并报告状态")}});
+    ASSERT_TRUE(textResult.accepted) << textResult.message.toStdString();
+    QVariantMap message = engine.recentMessages().constFirst().toMap();
+    EXPECT_EQ(message.value(QStringLiteral("type")).toString(), QStringLiteral("UnitOrder"));
+    EXPECT_EQ(message.value(QStringLiteral("receiver")).toString(), QStringLiteral("red_a1"));
+    EXPECT_EQ(message.value(QStringLiteral("payload")).toMap().value(QStringLiteral("text")).toString(),
+              QStringLiteral("保持编队并报告状态"));
+
+    const QMap<QString, QString> messageTypes{
+        {QStringLiteral("attackAt"), QStringLiteral("AttackOrder")},
+        {QStringLiteral("moveTo"), QStringLiteral("Guidance")},
+        {QStringLiteral("withdraw"), QStringLiteral("Withdraw")}};
+    for (auto it = messageTypes.constBegin(); it != messageTypes.constEnd(); ++it) {
+        const QString& action = it.key();
+        const auto result = engine.executeCommand(
+            action, QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_a1")},
+                                {QStringLiteral("pos"), point}});
+        ASSERT_TRUE(result.accepted) << action.toStdString() << ": "
+                                     << result.message.toStdString();
+        for (const QVariant& candidate : engine.recentMessages()) {
+            const QVariantMap candidateMap = candidate.toMap();
+            if (candidateMap.value(QStringLiteral("type")).toString() == it.value()
+                && candidateMap.value(QStringLiteral("receiver")).toString()
+                    == QLatin1String("red_a1")) {
+                message = candidateMap;
+                break;
+            }
+        }
+        ASSERT_EQ(message.value(QStringLiteral("type")).toString(), it.value());
+        const QVariantMap payload = message.value(QStringLiteral("payload")).toMap();
+        EXPECT_DOUBLE_EQ(payload.value(QStringLiteral("x")).toDouble(), 5200.0);
+        EXPECT_DOUBLE_EQ(payload.value(QStringLiteral("y")).toDouble(), 6100.0);
+    }
+}
+
+TEST_F(EngineTest, NotificationOnlyOrdersRemainVisibleWithoutActingOnUnit) {
+    UnitBase* unit = engine.unit(QStringLiteral("red_a1"));
+    ASSERT_NE(unit, nullptr);
+    const QString initialStatus = unit->checkpointState()
+                                      .value(QStringLiteral("status")).toString();
+    const QVariantMap point{{QStringLiteral("x"), 5200.0},
+                            {QStringLiteral("y"), 6100.0}};
+    const QList<QPair<QString, QVariantMap>> orders{
+        {QStringLiteral("unitOrder"),
+         {{QStringLiteral("unitId"), unit->id()},
+          {QStringLiteral("text"), QStringLiteral("保持编队并报告状态")},
+          {QStringLiteral("notificationOnly"), true}}},
+        {QStringLiteral("assignTarget"),
+         {{QStringLiteral("attackerId"), unit->id()},
+          {QStringLiteral("targetId"), QStringLiteral("blue_a1")},
+          {QStringLiteral("notificationOnly"), true}}},
+        {QStringLiteral("moveTo"),
+         {{QStringLiteral("unitId"), unit->id()},
+          {QStringLiteral("pos"), point},
+          {QStringLiteral("notificationOnly"), true}}},
+        {QStringLiteral("withdraw"),
+         {{QStringLiteral("unitId"), unit->id()},
+          {QStringLiteral("notificationOnly"), true}}}
+    };
+
+    for (const auto& [action, args] : orders) {
+        const auto result = engine.executeCommand(action, args);
+        ASSERT_TRUE(result.accepted) << action.toStdString() << ": "
+                                     << result.message.toStdString();
+        EXPECT_EQ(unit->checkpointState().value(QStringLiteral("status")).toString(),
+                  initialStatus)
+            << action.toStdString();
+        ASSERT_FALSE(engine.recentMessages().isEmpty());
+        const QVariantMap message = engine.recentMessages().constFirst().toMap();
+        const QVariantMap payload = message.value(QStringLiteral("payload")).toMap();
+        EXPECT_TRUE(payload.value(QStringLiteral("notificationOnly")).toBool())
+            << action.toStdString();
+        if (action == QLatin1String("withdraw")) {
+            EXPECT_FALSE(payload.contains(QStringLiteral("homeX")));
+            EXPECT_FALSE(payload.contains(QStringLiteral("homeY")));
+        }
+    }
 }
 
 TEST_F(EngineTest, RecomputeReadyAfterCpDeath) {
@@ -441,10 +564,14 @@ TEST_F(EngineTest, AttackUavRepursuesTargetLeavingAttackPosition) {
     attacker->setPosition(GeoPos{0, 0, 2000});
     target->setPosition(GeoPos{100, 0, 2000});
 
-    engine.command("assignTarget", QVariantMap{{"attackerId", "red_a1"},
-                                                {"targetId", "blue_r1"}});
-    engine.command("moveTo", QVariantMap{{"unitId", "red_a1"},
-                                          {"pos", QVariantMap{{"x", 100.0}, {"y", 0.0}}}});
+    // Set ROE to "hold" so the UAV monitors in attack position without firing.
+    // This keeps the target alive for the repursuit test after it moves away.
+    engine.command("setRoe", QVariantMap{{"unitId", "red_a1"}, {"roe", "hold"}});
+    // Use "pursue" (not "assignTarget"+"moveTo") so the unit flies to the attack
+    // area WITH its targetId intact.  "moveTo" sends a Guidance message that
+    // clears m_targetId, which would prevent any repursuit when the target flees.
+    engine.command("pursue", QVariantMap{{"attackerId", "red_a1"},
+                                          {"targetId", "blue_r1"}});
     engine.stepOnce(1.0);
     engine.stepOnce(0.1);
     engine.stepOnce(0.1);
@@ -551,6 +678,31 @@ TEST_F(EngineTest, DeadGroundScoutCannotGuideAttack) {
     });
 
     EXPECT_EQ(engine.recentMessages().size(), messagesBefore);
+}
+
+TEST_F(EngineTest, GuideAttackRequiresCommunicationWithAttacker) {
+    UnitBase* guide = engine.unit(QStringLiteral("red_g1"));
+    UnitBase* attacker = engine.unit(QStringLiteral("red_a1"));
+    ASSERT_NE(guide, nullptr);
+    ASSERT_NE(attacker, nullptr);
+    guide->clearSchedule();
+    attacker->clearSchedule();
+    guide->setPosition(GeoPos{0.0, 0.0, 0.0});
+    attacker->setPosition(GeoPos{10000.0, 10000.0, 1000.0});
+    guide->setCommRange(1.0);
+    attacker->setCommRange(1.0);
+
+    const CommandResult result = engine.executeCommand(
+        QStringLiteral("guideAttack"),
+        QVariantMap{{QStringLiteral("guideId"), QStringLiteral("red_g1")},
+                    {QStringLiteral("attackerId"), QStringLiteral("red_a1")},
+                    {QStringLiteral("targetId"), QStringLiteral("blue_r1")},
+                    {QStringLiteral("targetPos"),
+                     QVariantMap{{QStringLiteral("x"), 16000.0},
+                                 {QStringLiteral("y"), 11000.0}}}});
+
+    EXPECT_FALSE(result.accepted);
+    EXPECT_EQ(result.code, QStringLiteral("COMMUNICATION_LOST"));
 }
 
 TEST_F(EngineTest, MutualJammerEffectsAreOrderIndependent) {

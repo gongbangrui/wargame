@@ -11,19 +11,18 @@ Item {
 
     QtObject {
         id: t
-        property color panel: "#0e1322"; property color panelAlt: "#131a2c"
-        property color border: "#1e2d4a"; property color borderSoft: "#17213a"
-        property color text: "#e8edf5"; property color textStrong: "#ffffff"
-        property color textDim: "#bcc8de"; property color muted: "#8896b8"
+        property color panel: AppContext.panel; property color panelAlt: AppContext.raised
+        property color border: AppContext.line; property color borderSoft: AppContext.softLine
+        property color text: AppContext.text; property color textStrong: AppContext.textStrong
+        property color textDim: AppContext.textDim; property color muted: AppContext.muted
         property color dimmer: "#5a6a88"
-        property color accent: "#4090ff"; property color success: "#36c98a"
-        property color warning: "#f0a040"; property color danger: "#f04760"
-        property color red: "#f04760"; property color blue: "#4090ff"
-        property color rowA: "#0c1120"; property color rowB: "#111728"
+        property color accent: AppContext.signal; property color success: AppContext.success
+        property color warning: AppContext.warning; property color danger: AppContext.danger
+        property color red: AppContext.red; property color blue: AppContext.blue
+        property color rowA: "#0d151b"; property color rowB: "#121d24"
     }
 
     property var units: root.controller.allUnits()
-    property bool bothReady: root.controller.redReady && root.controller.blueReady
     Component.onCompleted: {
         canvas.zoom = 0.1
         canvas.centerOn(canvas.mapSize.w / 2, canvas.mapSize.h / 2)
@@ -144,52 +143,11 @@ Item {
                         Text { text: "导演视角"; color: t.textStrong; font.pixelSize: 18; font.bold: true; renderType: Text.NativeRendering }
                         Item { Layout.fillWidth: true }
                         GhostButton {
-                            visible: !root.controller.networked
                             text: "回放战报"; iconName: "history"
                             onClicked: reportDialog.open()
                         }
                     }
                     Text { text: "全局态势 · 路径（实线=已完成，虚线=未完成）"; color: t.muted; font.pixelSize: 11; renderType: Text.NativeRendering }
-                }
-
-                Rectangle {
-                    visible: root.controller.networked
-                    Layout.fillWidth: true; Layout.preferredHeight: 104
-                    color: t.panelAlt; border.color: root.bothReady ? t.success : t.border; radius: 6
-                    ColumnLayout {
-                        anchors.fill: parent; anchors.margins: 10; spacing: 7
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Text { text: "红方"; color: t.red; font.bold: true; font.pixelSize: 12 }
-                            Text { text: root.controller.redReady ? "已就绪" : "未就绪"; color: root.controller.redReady ? t.success : t.muted; font.pixelSize: 11 }
-                            Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 14; color: t.border }
-                            Text { text: "蓝方"; color: t.blue; font.bold: true; font.pixelSize: 12 }
-                            Text { text: root.controller.blueReady ? "已就绪" : "未就绪"; color: root.controller.blueReady ? t.success : t.muted; font.pixelSize: 11 }
-                            Item { Layout.fillWidth: true }
-                            Text { text: root.controller.matchPhase === "preparing" ? "准备阶段" : root.controller.matchPhase === "running" ? (root.controller.running ? "推演进行中" : "推演已暂停") : "推演已结束"; color: t.textDim; font.pixelSize: 11 }
-                        }
-                        RowLayout {
-                            Layout.fillWidth: true; spacing: 8
-                            TonalButton {
-                                visible: root.controller.matchPhase === "preparing"
-                                text: "开启推演"; base: t.success
-                                enabled: root.bothReady && root.controller.readyForSim
-                                onClicked: root.controller.setRunning(true)
-                            }
-                            TonalButton {
-                                visible: root.controller.matchPhase === "running"
-                                text: root.controller.running ? "暂停" : "继续"
-                                base: root.controller.running ? t.warning : t.success
-                                onClicked: root.controller.setRunning(!root.controller.running)
-                            }
-                            TonalButton {
-                                visible: root.controller.matchPhase !== "preparing"
-                                text: "结束并重置"; base: t.danger
-                                onClicked: root.controller.endMatch()
-                            }
-                            Item { Layout.fillWidth: true }
-                        }
-                    }
                 }
 
                 SectionTitle { text: "双方态势" }

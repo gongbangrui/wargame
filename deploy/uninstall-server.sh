@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# 兵器推演联网服务一键卸载器
+# 兵棋推演联网服务一键卸载器
 # 默认保留账号、场景和对局数据；使用 --purge-data 才会删除数据卷。
 # Copyright (c) 2026 Gbr
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="$ROOT_DIR/deploy/compose.yml"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CURRENT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+if [[ -f "$CURRENT_ROOT/../.wargame-install" ]]; then
+  ROOT_DIR="$(cd -- "$CURRENT_ROOT/.." && pwd)"
+  CURRENT_ROOT="$ROOT_DIR/current"
+else
+  ROOT_DIR="$CURRENT_ROOT"
+fi
+COMPOSE_FILE="$CURRENT_ROOT/deploy/compose.yml"
 ENV_FILE="$ROOT_DIR/.env"
+if [[ ! -f "$ROOT_DIR/.wargame-install" ]]; then
+  [[ "$ROOT_DIR" == "$CURRENT_ROOT" ]] || { printf '  [FAIL] managed installation marker not found\n' >&2; exit 1; }
+  COMPOSE_FILE="$ROOT_DIR/deploy/compose.yml"
+fi
 WARGAME_DATA_VOLUME="wargame-data"
 PURGE_DATA=0
 REMOVE_CONFIG=0
@@ -19,7 +30,7 @@ die() { printf '  [FAIL] %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-兵器推演联网服务一键卸载器
+兵棋推演联网服务一键卸载器
 
 用法:
   sudo ./deploy/uninstall-server.sh [选项]
@@ -44,9 +55,12 @@ docker_cmd() {
 
 compose_cmd() {
   if [[ -f "$ENV_FILE" ]]; then
-    docker_cmd compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+    local project
+    project="$(sed -n 's/^WARGAME_COMPOSE_PROJECT=//p' "$ENV_FILE" | head -n1)"
+    project="${project:-wargame}"
+    docker_cmd compose --project-name "$project" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
   else
-    docker_cmd compose -f "$COMPOSE_FILE" "$@"
+    docker_cmd compose --project-name wargame -f "$COMPOSE_FILE" "$@"
   fi
 }
 
@@ -77,7 +91,7 @@ parse_args() {
 confirm_uninstall() {
   (( ASSUME_YES == 1 )) && return 0
   [[ -t 0 ]] || die "非交互卸载请使用 --yes"
-  printf '  将停止并删除兵器推演服务容器、网络和本地镜像'
+  printf '  将停止并删除兵棋推演服务容器、网络和本地镜像'
   (( PURGE_DATA == 1 )) && printf '，并永久删除数据卷 %s' "$WARGAME_DATA_VOLUME"
   (( REMOVE_CONFIG == 1 )) && printf '，并永久删除 .env'
   printf '。继续？[y/N] '

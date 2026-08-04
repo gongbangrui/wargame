@@ -64,6 +64,7 @@ TEST(Phase1Fixes, TargetDestroyedTriggersAck) {
     CommandPost cp("cp", Side::Red, &bus);
     cp.setPosition(GeoPos{0, 0, 0});
     bus.setUnitCommandPost("cp", true);
+    bus.subscribe("atk", [](const Message&) {});
     bus.updateUnitPosition("atk", QPointF(100, 0), 20000, "red");
 
     int acksSeen = 0;
@@ -87,6 +88,37 @@ TEST(Phase1Fixes, TargetDestroyedTriggersAck) {
 
     EXPECT_EQ(acksSeen, 1);
     EXPECT_EQ(lastInReplyTo, "dest_42");
+}
+
+TEST(Phase1Fixes, RepeatedTargetDetectRefreshesKnownTrack) {
+    MessageBus bus;
+    CommandPost cp("cp", Side::Red, &bus);
+    cp.setPosition(GeoPos{0, 0, 0});
+    bus.setUnitCommandPost("cp", true);
+    bus.subscribe("recon", [](const Message&) {});
+    bus.updateUnitPosition("recon", QPointF(100, 0), 20000, "red");
+
+    Message first;
+    first.type = Message::Type::TargetDetect;
+    first.sender = "recon";
+    first.receiver = "cp";
+    first.requiresAck = true;
+    first.payload = QJsonObject{{QStringLiteral("targetId"), QStringLiteral("blue_a1")},
+                                {QStringLiteral("x"), 10.0}, {QStringLiteral("y"), 20.0},
+                                {QStringLiteral("distance"), 100.0}};
+    bus.send(first);
+    ASSERT_DOUBLE_EQ(cp.knownTarget(QStringLiteral("blue_a1")).value(QStringLiteral("x")).toDouble(), 10.0);
+
+    Message second = first;
+    second.id = QStringLiteral("detect-2");
+    second.payload[QStringLiteral("x")] = 30.0;
+    second.payload[QStringLiteral("y")] = 40.0;
+    second.payload[QStringLiteral("distance")] = 50.0;
+    bus.send(second);
+    const QJsonObject refreshed = cp.knownTarget(QStringLiteral("blue_a1"));
+    EXPECT_DOUBLE_EQ(refreshed.value(QStringLiteral("x")).toDouble(), 30.0);
+    EXPECT_DOUBLE_EQ(refreshed.value(QStringLiteral("y")).toDouble(), 40.0);
+    EXPECT_DOUBLE_EQ(refreshed.value(QStringLiteral("distance")).toDouble(), 50.0);
 }
 
 // F10: setFlightPlan after setSchedule must NOT clear the schedule

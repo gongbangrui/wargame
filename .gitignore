@@ -9,6 +9,8 @@ server.dev.json
 *.db-wal
 *.jsonl
 room-checkpoint.json
+backups/
+*.autosave
 
 # Build and tool output
 /build/

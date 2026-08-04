@@ -18,9 +18,11 @@ void requestStop(int) {
 int main(int argc, char* argv[]) {
     QCoreApplication application(argc, argv);
     application.setApplicationName(QStringLiteral("wargame_server"));
-    application.setApplicationVersion(QStringLiteral(WARGAME_VERSION));
+    application.setApplicationVersion(QStringLiteral("%1+%2")
+                                          .arg(QStringLiteral(WARGAME_VERSION),
+                                               QStringLiteral(WARGAME_SOURCE_DIGEST)));
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("兵器推演权威服务器"));
+    parser.setApplicationDescription(QStringLiteral("兵棋推演权威服务器"));
     parser.addHelpOption();
     parser.addVersionOption();
     parser.process(application);
@@ -33,7 +35,7 @@ int main(int argc, char* argv[]) {
         qCritical() << "无法监听 WebSocket 端口" << port;
         return 2;
     }
-    qInfo() << "兵器推演联网服务器已监听" << port;
+    qInfo() << "兵棋推演联网服务器已监听" << port;
     std::signal(SIGINT, requestStop);
     std::signal(SIGTERM, requestStop);
     QTimer shutdownPoll;

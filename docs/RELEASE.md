@@ -5,6 +5,25 @@
 
 ## 自动化门禁
 
+### 独立服务发布包
+
+生成的服务发布物必须包含 authority server、account-web 静态资源、Docker 输入和安装器，
+同时生成同名 SHA-256 sidecar。发布包不得包含 `.env`、数据库、JSONL、检查点、日志、备份、
+构建目录或 Docker 镜像。接收方使用以下流程，不需要 Git 仓库或固定下载主机：
+
+```bash
+sha256sum -c wargame-server-<version>.tar.gz.sha256
+tar -xzf wargame-server-<version>.tar.gz -C /tmp
+cd /tmp/wargame-server-<version>
+sudo ./deploy/install-server.sh --install-dir "$HOME/wargame" --compose-project wargame
+sudo docker compose --project-name wargame --env-file "$HOME/wargame/.env" \
+  -f "$HOME/wargame/current/deploy/compose.yml" ps
+```
+
+发布包验收使用 `RECOVERY_HTTP_PORT=18180 RECOVERY_WS_PORT=18190
+./tools/verify-standalone-deployment.sh`，该验证器使用临时 Compose 项目、数据卷、端口和
+用户目录，并在退出时清理全部资源。
+
 在干净工作区执行：
 
 ```bash
@@ -20,6 +39,22 @@ cmake --build build/debug --target all_qmllint
 ./tools/verify-docker-recovery.sh
 ```
 
+联网房间专项回归还需执行以下独立检查：账号生命周期测试位于
+`tests/test_account_room_lifecycle.py`，房间托管契约脚本位于
+`tools/room-hosting-contract.mjs`，权威房间测试源文件位于
+`tests/test_authoritative_room.cpp`，CMake 目标为 `authoritative_room_tests`，并注册为
+`GameServer.AuthoritativeRoom`：
+
+```bash
+uv run --with-requirements server/account/requirements.txt python tests/test_account_room_lifecycle.py
+ADMIN_PASSWORD='管理员密码' node tools/room-hosting-contract.mjs
+cmake --build build/debug --target authoritative_room_tests
+build/debug/authoritative_room_tests --gtest_color=no
+```
+
+账号生命周期测试使用临时数据目录独立运行；托管契约脚本需要按
+`docs/ONLINE_DEPLOYMENT.md` 启动的服务，并会创建和清理临时房间。
+
 推送后，GitHub Actions 的 `Native quality gate` 与 `Docker smoke and recovery` 必须都通过。
 Docker 演练会验证联网认证、权限、消息幂等、优雅停止最终检查点、数据卷备份、还原卷和
 恢复后的再次联网冒烟。
@@ -31,7 +66,7 @@ Docker 演练会验证联网认证、权限、消息幂等、优雅停止最终�
 - 1100x720、1360x860 和高 DPI/字体缩放下的四席位与账号管理界面。
 - 断网 30 秒、服务端重启、丢失 delta 与自动重连后的状态恢复。
 - 32 个连接、500 单元的压力测试；记录 tick 耗时、内存、发送队列和重连率。
-- 管理员登录、角色权限、敌方视野裁剪和检查点恢复。
+- 管理员登录、账号单客户端约束、战位权限、敌方视野裁剪和检查点恢复。
 
 完整项目清单见 `docs/NETWORK_TEST_CHECKLIST.md`；任何未通过项均不能标记为正式发布。
 
@@ -40,7 +75,8 @@ Docker 演练会验证联网认证、权限、消息幂等、优雅停止最终�
 1. 记录目标 commit、`WARGAME_VERSION`、CI 链接和人工验收结果。
 2. 在 staging 使用与生产相同的 `.env` 字段和持久卷配置部署候选镜像。
 3. 对生产数据卷执行归档备份，验证归档可还原到隔离卷。
-4. 更新生产 `.env` 的 `WARGAME_VERSION` 并执行 `docker compose -f deploy/compose.yml up -d --build`。
+4. 更新生产 `.env` 的 `WARGAME_VERSION` 并执行
+   `docker compose --project-name wargame --env-file /path/to/.env -f /path/to/current/deploy/compose.yml up -d --build`。
 5. 通过管理员“服务器监控”确认 game-server 状态为 `healthy`，再执行联网冒烟验证。
 6. 出现回归时，停止服务但保留卷，将 `WARGAME_VERSION` 回退到上一已验证版本并重新部署。
 

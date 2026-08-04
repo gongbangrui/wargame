@@ -6,6 +6,10 @@ using namespace gbr;
 class MessageBusTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        bus.subscribe("red_cp", [](const Message&) {});
+        bus.subscribe("red_r1", [](const Message&) {});
+        bus.subscribe("blue_cp", [](const Message&) {});
+        bus.subscribe("blue_r1", [](const Message&) {});
         bus.updateUnitPosition("red_cp", QPointF(0, 0), 20000, "red");
         bus.updateUnitPosition("red_r1", QPointF(0, 0), 15000, "red");
         bus.updateUnitPosition("blue_cp", QPointF(50000, 0), 20000, "blue");
@@ -60,6 +64,17 @@ TEST_F(MessageBusTest, BroadcastMessage) {
 
     // red_r1 is same-side, should receive; blue_r1 is cross-side, should not
     EXPECT_EQ(deliverCount, 1);
+}
+
+TEST_F(MessageBusTest, EmptyReceiverIsNotBroadcast) {
+    int deliveries = 0;
+    bus.subscribe("red_r1", [&](const Message&) { ++deliveries; });
+    Message msg;
+    msg.sender = "red_cp";
+    msg.receiver.clear();
+    msg.type = Message::Type::PositionReport;
+    bus.send(msg);
+    EXPECT_EQ(deliveries, 0);
 }
 
 TEST_F(MessageBusTest, DirectMessage) {
@@ -139,6 +154,11 @@ TEST_F(MessageBusTest, MissingSideCannotCommunicateInEitherDirection) {
     EXPECT_FALSE(bus.canCommunicate("red_r1", "unknown_side"));
 }
 
+TEST_F(MessageBusTest, UnknownPositionUpdateDoesNotRegisterUnit) {
+    bus.updateUnitPosition("unknown_new", QPointF(0, 0), 1000, "red");
+    EXPECT_FALSE(bus.isRegistered("unknown_new"));
+}
+
 TEST_F(MessageBusTest, HandlerMayUnsubscribeItselfDuringDelivery) {
     int deliveries = 0;
     bus.subscribe("red_r1", [&](const Message&) {
@@ -156,6 +176,7 @@ TEST_F(MessageBusTest, HandlerMayUnsubscribeItselfDuringDelivery) {
 }
 
 TEST_F(MessageBusTest, BroadcastHandlerMayUnregisterItself) {
+    bus.subscribe("red_r2", [](const Message&) {});
     bus.updateUnitPosition("red_r2", QPointF(0, 0), 15000, "red");
     int selfDeliveries = 0;
     int otherDeliveries = 0;

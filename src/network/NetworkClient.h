@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ClientStateStore.h"
+#include "FastDdsTransport.h"
 
 #include <QElapsedTimer>
 #include <QHash>
@@ -8,6 +9,7 @@
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QObject>
+#include <QPointer>
 #include <QTimer>
 #include <QUrl>
 #include <QVariantMap>
@@ -17,17 +19,34 @@ namespace gbr {
 
 class NetworkClient final : public QObject {
     Q_OBJECT
+    friend class SimulationControllerTestPeer;
 public:
     explicit NetworkClient(QObject* parent = nullptr);
 
     void login(const QString& accountServer, const QString& username, const QString& password);
     void diagnoseServer(const QString& accountServer);
-    void close();
+    void close(bool waitForLogout = false);
 
     void sendCommand(const QString& action, const QVariantMap& args);
+    void sendUnitOrder(const QString& unitId, const QString& text);
     void sendControl(const QString& action, double speed = -1.0);
     void sendReady(bool ready);
-    void sendChat(const QString& text);
+    void sendChat(const QString& text, const QStringList& recipientSeatIds = {});
+    void requestRooms();
+    void joinRoom(const QString& roomId);
+    void claimSeat(const QString& seatId);
+    void approveSeatTransfer(const QString& seatId, qint64 userId, qint64 requestedRevision);
+    void rejectSeatTransfer(const QString& seatId, qint64 userId, qint64 requestedRevision);
+    void leaveRoom();
+    void sendSeatReady(bool ready);
+    void sendDeployment(const QString& unitId, const QVariantMap& position);
+    void requestRedeploy();
+    void redeploy(const QString& seatId);
+    void sendUnitName(const QString& unitName);
+    void shareIntel(const QString& targetId, const QStringList& recipientSeatIds,
+                    const QString& note = QString());
+    void sendMapMark(const QVariantMap& position, const QString& label,
+                     const QStringList& recipientSeatIds = {});
     void sendScenarioUpsert(const QJsonObject& unit);
     void sendScenarioRemove(const QString& unitId);
     void sendScenarioReplace(const QJsonObject& scenario);
@@ -38,11 +57,17 @@ public:
     QString diagnosticMessage() const { return m_diagnosticMessage; }
     int accountLatencyMs() const { return m_accountLatencyMs; }
     int gameLatencyMs() const { return m_gameLatencyMs; }
+    QString dataPlaneName() const { return m_dataPlane.backendName(); }
 
 signals:
     void stateChanged(const QString& state, const QString& message);
     void authenticated(const QString& username, const QString& displayName,
-                       const QString& role, const QString& accountServer);
+                       const QString& seatId, const QString& accountServer);
+    void roomDirectoryReceived(const QJsonArray& rooms);
+    void seatStateReceived(const QJsonObject& state);
+    void deploymentPromptReceived(const QJsonObject& prompt);
+    void intelShareReceived(const QJsonObject& share);
+    void transferEventReceived(const QJsonObject& event);
     void snapshotReceived(const QJsonObject& payload);
     void chatHistoryReceived(const QJsonArray& messages);
     void chatReceived(const QJsonObject& message);
@@ -71,6 +96,7 @@ private:
     void sendPendingCommand(const QString& commandId, bool retry);
     void retransmitPendingCommands();
     void clearPendingCommands(const QString& status, const QString& message);
+    void sendSimple(const QString& type, const QJsonObject& payload);
     QUrl normalizeAccountServer(const QString& input) const;
 
     struct PendingCommand {
@@ -82,6 +108,8 @@ private:
     };
 
     QNetworkAccessManager m_network;
+    QPointer<QNetworkReply> m_loginReply;
+    QPointer<QNetworkReply> m_logoutReply;
     QWebSocket m_socket;
     QTimer m_reconnectTimer;
     QTimer m_latencyTimer;
@@ -91,6 +119,8 @@ private:
     QElapsedTimer m_monotonic;
     QString m_accountServer;
     QString m_token;
+    QString m_loginTokenCandidate;
+    QString m_ddsTicket;
     QUrl m_webSocketUrl;
     QString m_state = QStringLiteral("disconnected");
     bool m_manualClose = false;
@@ -98,9 +128,11 @@ private:
     ClientStateStore m_stateStore;
     QHash<QString, PendingCommand> m_pendingCommands;
     QJsonObject m_welcomePayload;
+    FastDdsTransport m_dataPlane;
     quint64 m_loginGeneration = 0;
     bool m_authenticated = false;
     bool m_identityPublished = false;
+    QString m_currentSeatId;
     QString m_diagnosticState = QStringLiteral("idle");
     QString m_diagnosticMessage = QStringLiteral("尚未检测服务器");
     int m_accountLatencyMs = -1;

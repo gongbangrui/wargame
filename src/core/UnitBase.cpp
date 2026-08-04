@@ -254,6 +254,7 @@ void UnitBase::handleMessage(const Message& m) {
             rememberShared(QStringLiteral("unit:%1:last").arg(m.sender), f);
         }
     }
+    if (m.payload.value(QStringLiteral("notificationOnly")).toBool()) return;
     onMessage(m);
 }
 

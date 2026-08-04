@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <QPointF>
+#include <QSizeF>
 #include <algorithm>
 #include <cmath>
 
@@ -46,6 +47,53 @@ struct GeoCoord {
     double lat = 0.0;
     double lon = 0.0;
 };
+
+namespace MapCoordinates {
+
+inline QPointF logicalToScreen(const GeoPos& logical, const GeoPos& center,
+                               const QSizeF& viewport, double pixelsPerMeter) {
+    if (!std::isfinite(viewport.width()) || !std::isfinite(viewport.height())
+        || viewport.width() <= 0.0 || viewport.height() <= 0.0
+        || !std::isfinite(pixelsPerMeter) || pixelsPerMeter <= 0.0
+        || !std::isfinite(logical.x) || !std::isfinite(logical.y)
+        || !std::isfinite(center.x) || !std::isfinite(center.y)) {
+        return QPointF{viewport.width() * 0.5, viewport.height() * 0.5};
+    }
+    return QPointF{viewport.width() * 0.5 + (logical.x - center.x) * pixelsPerMeter,
+                   viewport.height() * 0.5 - (logical.y - center.y) * pixelsPerMeter};
+}
+
+inline GeoPos screenToLogical(const QPointF& screen, const GeoPos& center,
+                              const QSizeF& viewport, double pixelsPerMeter) {
+    if (!std::isfinite(screen.x()) || !std::isfinite(screen.y())
+        || !std::isfinite(viewport.width()) || !std::isfinite(viewport.height())
+        || viewport.width() <= 0.0 || viewport.height() <= 0.0
+        || !std::isfinite(pixelsPerMeter) || pixelsPerMeter <= 0.0
+        || !std::isfinite(center.x) || !std::isfinite(center.y)) return center;
+    return GeoPos{center.x + (screen.x() - viewport.width() * 0.5) / pixelsPerMeter,
+                  center.y - (screen.y() - viewport.height() * 0.5) / pixelsPerMeter,
+                  0.0};
+}
+
+inline GeoPos clampToExtent(const GeoPos& logical, const QSizeF& extent) {
+    if (!std::isfinite(extent.width()) || !std::isfinite(extent.height())
+        || extent.width() <= 0.0 || extent.height() <= 0.0) {
+        return logical;
+    }
+    const double safeX = std::isfinite(logical.x) ? logical.x : extent.width() * 0.5;
+    const double safeY = std::isfinite(logical.y) ? logical.y : extent.height() * 0.5;
+    const double safeAlt = std::isfinite(logical.alt) ? logical.alt : 0.0;
+    return GeoPos{std::clamp(safeX, 0.0, extent.width()),
+                  std::clamp(safeY, 0.0, extent.height()), safeAlt};
+}
+
+inline GeoPos screenToBoundedLogical(const QPointF& screen, const GeoPos& center,
+                                     const QSizeF& viewport, double pixelsPerMeter,
+                                     const QSizeF& extent) {
+    return clampToExtent(screenToLogical(screen, center, viewport, pixelsPerMeter), extent);
+}
+
+}
 
 /// @brief Web Mercator projection utilities for tile-based GIS map.
 namespace Mercator {

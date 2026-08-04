@@ -5,12 +5,18 @@
 提供本机 Docker 部署。实际启动、账号初始化和客户端连接方式以
 `docs/ONLINE_DEPLOYMENT.md` 为准；本文后续分阶段内容属于演进记录。
 
+> **历史规划警告**：第 1 至 9.5 节保留早期架构、Caddy、镜像仓库和路径示例，全部仅供
+> 背景审阅，不能直接执行。当前部署唯一入口是安装器生成的
+> `$HOME/wargame/current/deploy/compose.yml`，必须配合固定 Compose 项目名和
+> `$HOME/wargame/.env`；可执行命令只以 `docs/ONLINE_DEPLOYMENT.md`、`deploy/QUICK_START.md`
+> 和 `docs/RELEASE.md` 为准。
+
 ## 1. 先明确产品边界
 
-第一版建议只支持以下规模：
+以下规模是早期规划记录，当前房间容量由网页管理员逐房间配置：
 
 - 一个服务器实例承载 1 至 10 个推演房间。
-- 每房间 2 名阵营用户、1 名导演、若干只读观察员，最多 32 个连接。
+- 每房间最多 32 个联网客户端；账号不绑定导演、编辑或阵营身份，进入房间后占用由管理员配置的独立战位。
 - 每房间最多 500 个单元，服务器固定以 50 ms 仿真 tick 推进。
 - Qt 桌面客户端，不是浏览器网页。玩家仍需安装客户端。
 - Linux 服务器，推荐 Ubuntu 24.04 LTS、2 vCPU、4 GB 内存、40 GB SSD 起步。
@@ -20,7 +26,7 @@
 
 1. 编辑器是否只能在房间暂停时改场景。建议第一版只允许暂停时修改。
 2. 红蓝双方是否能看到“曾发现但已丢失”的目标，以及轨迹保留多久。
-3. 观察员看到导演全图还是某一阵营视野。
+3. 非指挥官战位看到本单位视角还是由指挥官主动共享的情报。
 4. 房间在所有人离线后保留多久，服务器重启后是否恢复。
 5. 最大房间数、最大单元数、允许的最大地图和场景文件大小。
 
@@ -32,7 +38,7 @@
 - QML 只通过 `SimulationController` 交互。
 - `controller.command(action, args)` 已形成统一命令入口。
 - 场景可序列化，已有运行时快照雏形和 50 ms 时钟抽象。
-- `LocalTransport`、`MessageBus`、角色视图和大量单元测试已经存在。
+- `LocalTransport`、`MessageBus`、本地视图和大量单元测试已经存在。
 
 当前不能直接部署联网的原因：
 
@@ -43,8 +49,8 @@
 | `ITransport` 包装 `MessageBus` | 容易把互联网连接和战场通信距离混为一谈 | WebSocket 网关放在引擎外部 |
 | `SnapshotCodec` 没有协议版本、房间 revision 和事件序号 | 无法可靠升级、补包或拒绝旧客户端 | 增加协议 envelope 和 schema 校验 |
 | 命令只返回 `void`，错误依赖字符串信号 | 客户端无法关联请求和结果 | 引入结构化 `CommandResult` |
-| 所有状态都存在本地引擎中 | 若直接发完整快照，红蓝客户端可读取敌方全图 | 服务器生成按角色裁剪的视图 |
-| 没有登录、权限、限流、审计 | 任意连接可控制任意单元 | 身份和角色只由服务器绑定 |
+| 所有状态都存在本地引擎中 | 若直接发完整快照，联网战位可读取敌方全图 | 服务器生成按战位裁剪的视图 |
+| 没有登录、权限、限流、审计 | 任意连接可控制任意单元 | 身份和战位只由服务器绑定 |
 | 没有 headless server、健康检查和指标 | 无法可靠托管 | 新建独立服务器目标和运维接口 |
 
 ## 3. 目标架构
@@ -78,12 +84,24 @@ Qt 桌面客户端
 - 客户端发送“意图”，例如移动、攻击、暂停，不发送最终坐标或 HP。
 - 客户端不推进仿真，不参与服务器锁步，也不能因断线让服务器停钟。
 - `MessageBus` 继续表达仿真域内通信规则，例如距离、ECM、CP 旁路。
-- WebSocket 只表达客户端与服务器之间的可靠互联网传输。
+- WebSocket 表达账号认证、房间控制、实时快照和战位消息，服务端统一执行权限与视野裁剪。
 - 红蓝视野裁剪发生在服务器序列化之前，不能把全图发给客户端再由 QML 隐藏。
-- 导演和编辑器权限也必须由服务器校验，不能信任客户端传来的 `role`。
+- 网页管理员负责房间生命周期，战位命令和情报共享由服务器校验，不能信任客户端传来的 `seatId` 或 `side`。
 
 `LockedStepClock` 可用于测试、回放和服务器确定性验证，但不应等待所有客户端确认后才推进。
 权威服务器如果等待客户端，任何弱网或恶意连接都能拖停整个房间。
+
+### Fast DDS 首期边界
+
+Fast DDS 是可选的低延迟兼容适配层，不是当前权威状态源。`src/protocol/dds/WargameEnvelope.idl`
+定义了带版本、序号、状态 revision 和大小限制的共享 envelope，payload 首期仍为已校验 JSON
+字节。SDK 或 `fastddsgen` 缺失时，构建会把 DDS 标记为 disabled，不能回退成“本地回调已联网”。
+WebSocket 继续承载登录、权威 snapshot/delta、命令和 resync；DDS 只在单独验收通过后才可承载
+非权威聊天、地图标记、心跳等低延迟消息。每个房间使用 `room/<roomId>` Partition，客户端和服务端
+均须在 Qt 线程中处理 reader 入队，权限、限流、持久化仍复用 WebSocket 管线。
+客户端在 WebSocket welcome 中取得短时 DDS 会话票据，首个 DDS envelope 先完成握手；服务端只接受
+通过票据校验的聊天和地图标记，并再次按 seat 执行现有权限、限流和持久化逻辑。票据过期或 DDS
+发现失败不会改变 WebSocket 权威状态。
 
 ## 4. 建议的代码模块
 
@@ -120,7 +138,7 @@ wargame_integration_tests
 
 ### 5.1 首版传输
 
-第一版使用 Qt WebSockets 的 WSS：
+入口使用 Qt WebSockets 的 WSS，实时数据面保持 WebSocket 权威路径：
 
 - 开发环境：`ws://127.0.0.1:8080/ws`。
 - 生产环境：`wss://game.example.com/ws`。
@@ -148,15 +166,15 @@ wargame_integration_tests
 }
 ```
 
-客户端上传的 `role`、`side` 只能作为显示信息，服务器必须以登录会话中保存的角色为准。
+客户端上传的 `seatId`、`side` 只能作为显示信息，服务器必须以登录会话和房间分配结果为准。
 
 ### 5.3 首版消息类型
 
 | type | 方向 | 用途 |
 |---|---|---|
 | `hello` | 客户端 -> 服务端 | 协议版本、客户端版本、token、恢复游标 |
-| `welcome` | 服务端 -> 客户端 | 身份、角色、房间、当前 tick、版本范围 |
-| `snapshot` | 服务端 -> 客户端 | 角色裁剪后的完整状态 |
+| `welcome` | 服务端 -> 客户端 | 身份、当前战位、房间、当前 tick、版本范围 |
+| `snapshot` | 服务端 -> 客户端 | 按战位裁剪后的完整状态 |
 | `delta` | 服务端 -> 客户端 | 连续增量状态 |
 | `command` | 客户端 -> 服务端 | 用户意图和唯一 `commandId` |
 | `commandResult` | 服务端 -> 客户端 | accepted/rejected、错误码、对应 commandId |
@@ -228,7 +246,7 @@ wargame_integration_tests
 1. 包结构、大小、字段类型和协议版本。
 2. token 是否有效、是否过期、是否绑定当前房间。
 3. `commandId` 是否已经处理。
-4. 角色是否允许该 action。
+4. 当前战位是否允许该 action。
 5. 阵营是否拥有目标单元。
 6. 单元是否存在、存活、可移动，参数是否有限且在地图边界内。
 7. 场景 revision 是否匹配。
@@ -287,12 +305,12 @@ wargame_integration_tests
 
 验收：两个独立客户端进程连接同一服务器，红方命令只改变服务器状态，断开任一客户端不影响时钟。
 
-### 阶段 4：身份、角色和视野裁剪，约 5 至 8 天
+### 阶段 4：身份、战位和视野裁剪，约 5 至 8 天（已实现）
 
 第一版私有部署可使用管理员预生成的 256 bit 随机 token：
 
 - 数据库只保存 token 哈希和固定 pepper，不保存明文。
-- token 绑定用户、角色、阵营、房间和过期时间。
+- token 绑定用户、房间会话和过期时间；阵营与战位由房间服务端在入场时分配。
 - token 只能经 TLS 发送，客户端保存在系统密钥环，不写 `settings.json`。
 - 后续有统一账号体系时再接 OIDC/JWT，不要自行设计密码哈希算法。
 
@@ -301,7 +319,7 @@ wargame_integration_tests
 - 实现权限矩阵和服务器视野投影 `VisibleStateProjector`。
 - 红蓝快照只包含己方完整状态和合法探测信息。
 - 事件、消息日志、目标详情也必须经过同样的裁剪。
-- 对越权命令和伪造 side/role 写安全审计。
+- 对越权命令和伪造 side/seat 写安全审计。
 
 验收：测试直接解析红方收到的原始 JSON，确认其中不存在未探测蓝方坐标、HP、计划或内部 ID。
 
@@ -313,7 +331,7 @@ wargame_integration_tests
 - 每 10 秒或每 200 tick 写一次原子检查点；关键命令追加事件日志。
 - 重启时读取最新检查点，再重放其后的命令。
 - 房间级 `scenarioRevision` 每次编辑后递增。
-- 推演运行时禁止编辑，或由导演显式暂停后编辑。
+- 推演运行时禁止编辑；网页管理员停止、重置或重新部署后才允许改变准备态。
 - 数据库和快照放持久卷，容器升级不能丢数据。
 
 验收：强制终止服务器后重启，房间恢复到最后已确认 tick，命令不会重复执行。
@@ -325,14 +343,14 @@ wargame_integration_tests
 - 延迟 50/200/500 ms，抖动 100 ms，断网 30 秒后恢复。
 - 消息重复、重排、截断、超大 JSON、错误 UTF-8、未知 action。
 - 32 个连接、500 单元、连续运行 8 小时。
-- token 过期、撤销、跨房间使用、角色伪造、命令刷屏。
+- token 过期、撤销、跨房间使用、战位伪造、命令刷屏。
 - 服务器重启、磁盘满、数据库只读、日志目录不可写。
 
 验收建议：
 
 - p95 命令回执小于 250 ms（同地域正常网络）。
 - 单个 50 ms tick 的 p99 执行时间小于 25 ms。
-- 500 单元完整角色快照压缩前小于 2 MiB。
+- 500 单元完整战位快照压缩前小于 2 MiB。
 - 8 小时无持续内存增长，ASan/UBSan 无报告。
 - 未授权和视野泄漏测试全部通过。
 
@@ -534,13 +552,20 @@ game.example.com {
 
 ### 9.6 首次启动
 
+本节的早期 Caddy/server 拓扑属于演进记录，不能按旧的 `config/compose.yml` 示例执行。
+当前发布包统一使用安装器生成的 `$HOME/wargame/current/deploy/compose.yml`、固定项目名和
+同一 `.env`；实际命令如下：
+
 ```bash
-cd /opt/wargame
-docker compose --env-file .env -f config/compose.yml config
-docker compose --env-file .env -f config/compose.yml pull
-docker compose --env-file .env -f config/compose.yml up -d
-docker compose --env-file .env -f config/compose.yml ps
-docker compose --env-file .env -f config/compose.yml logs --tail=200 server
+install_root="$HOME/wargame"
+sudo docker compose --project-name wargame --env-file "$install_root/.env" \
+  -f "$install_root/current/deploy/compose.yml" config --quiet
+sudo docker compose --project-name wargame --env-file "$install_root/.env" \
+  -f "$install_root/current/deploy/compose.yml" up -d --build
+sudo docker compose --project-name wargame --env-file "$install_root/.env" \
+  -f "$install_root/current/deploy/compose.yml" ps
+sudo docker compose --project-name wargame --env-file "$install_root/.env" \
+  -f "$install_root/current/deploy/compose.yml" logs --tail=200 account-web game-server
 
 curl --fail https://game.example.com/healthz
 ```
@@ -570,7 +595,7 @@ Network/WebSockets/Sql 动态库、CA 证书和时区数据，不包含编译器
 
 至少暴露以下指标：
 
-- 当前连接数、房间数、每角色连接数。
+- 当前连接数、房间数、每战位连接数。
 - 命令 accepted/rejected 总数和按错误码计数。
 - 命令排队、处理和回执延迟的 p50/p95/p99。
 - tick 执行耗时、超时 tick、服务器事件循环延迟。
@@ -602,11 +627,12 @@ Network/WebSockets/Sql 动态库、CA 证书和时区数据，不包含编译器
 ### 12.2 升级
 
 ```bash
-cd /opt/wargame
-# 先修改 .env 中 WARGAME_VERSION 为已在 staging 验证的固定版本
-docker compose --env-file .env -f config/compose.yml pull server
-docker compose --env-file .env -f config/compose.yml up -d server
-docker compose --env-file .env -f config/compose.yml ps
+install_root="$HOME/wargame"
+# 先修改 "$install_root/.env" 中 WARGAME_VERSION 为已在 staging 验证的固定版本
+sudo docker compose --project-name wargame --env-file "$install_root/.env" \
+  -f "$install_root/current/deploy/compose.yml" up -d --build
+sudo docker compose --project-name wargame --env-file "$install_root/.env" \
+  -f "$install_root/current/deploy/compose.yml" ps
 curl --fail https://game.example.com/healthz
 ```
 
@@ -615,7 +641,9 @@ curl --fail https://game.example.com/healthz
 ### 12.3 回滚
 
 1. 将 `.env` 的 `WARGAME_VERSION` 改回上一个已验证版本。
-2. `docker compose up -d server`。
+2. 使用安装根的固定项目和 Compose 文件执行
+   `sudo docker compose --project-name wargame --env-file "$HOME/wargame/.env"`
+   `-f "$HOME/wargame/current/deploy/compose.yml" up -d --build`。
 3. 若新版本已执行不可逆数据库 migration，按发布说明恢复升级前备份。
 4. 运行 smoke test，检查房间恢复、客户端协议和视野隔离。
 
@@ -625,7 +653,7 @@ curl --fail https://game.example.com/healthz
 - [ ] WebSocket 网关没有替换仿真域 `MessageBus`。
 - [ ] 红蓝原始网络包通过视野泄漏测试。
 - [ ] 所有命令有稳定结果码、幂等 ID、权限和参数校验。
-- [ ] WSS 证书有效，8080/9090 未暴露公网。
+- [ ] WSS 证书有效，8080/8090 未暴露公网。
 - [ ] token 仅保存哈希，客户端使用系统密钥环。
 - [ ] 包大小、速率、发送队列、连接数和超时均有限制。
 - [ ] 单元、协议、集成、弱网、压力、ASan/UBSan 测试通过。

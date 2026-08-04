@@ -66,6 +66,7 @@ write_env "$restore_env" "$restore_volume" "$restore_http_port" "$restore_ws_por
 docker compose -p "$source_project" --env-file "$source_env" -f "$compose_file" up -d --build
 wait_healthy "$source_project" "$source_env"
 ADMIN_PASSWORD="$admin_password" ACCOUNT_URL="http://127.0.0.1:$http_port" node "$root_dir/tools/network-smoke.mjs"
+ADMIN_PASSWORD="$admin_password" ACCOUNT_URL="http://127.0.0.1:$http_port" node "$root_dir/tools/room-hosting-contract.mjs"
 
 docker compose -p "$source_project" --env-file "$source_env" -f "$compose_file" stop --timeout 30 game-server
 docker compose -p "$source_project" --env-file "$source_env" -f "$compose_file" up -d game-server

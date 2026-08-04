@@ -20,6 +20,7 @@ struct Message {
         TargetDetect,          // 发现目标
         TargetTrack,           // 跟踪目标
         TargetDestroyed,       // 目标摧毁确认
+        UnitOrder,
         AttackOrder,           // 攻击命令
         FlightPlan,            // 航路规划
         Guidance,              // 引导指令
@@ -40,6 +41,7 @@ struct Message {
         case Type::TargetDetect: return QStringLiteral("TargetDetect");
         case Type::TargetTrack: return QStringLiteral("TargetTrack");
         case Type::TargetDestroyed: return QStringLiteral("TargetDestroyed");
+        case Type::UnitOrder: return QStringLiteral("UnitOrder");
         case Type::AttackOrder: return QStringLiteral("AttackOrder");
         case Type::FlightPlan: return QStringLiteral("FlightPlan");
         case Type::Guidance: return QStringLiteral("Guidance");

@@ -53,6 +53,16 @@ void SnapshotCodec::decodeRuntimeUnits(SimulationEngine& engine, const QJsonArra
             unit->setPosition(GeoPos{x, y, alt});
         }
 
+        if (u.contains(QStringLiteral("baseSpeed")) || u.contains(QStringLiteral("speed"))) {
+            const double speed = u.value(u.contains(QStringLiteral("baseSpeed"))
+                                             ? QStringLiteral("baseSpeed")
+                                             : QStringLiteral("speed"))
+                                     .toDouble(-1.0);
+            if (std::isfinite(speed) && speed >= 0.0 && speed <= 1000.0) {
+                unit->setSpeed(speed);
+            }
+        }
+
         // Schedule
         QJsonArray sched = u.value("schedule").toArray();
         std::vector<SchedulePoint> sp;
@@ -87,6 +97,14 @@ void SnapshotCodec::decodeRuntimeUnits(SimulationEngine& engine, const QJsonArra
                 u.value(QStringLiteral("lastShotOutcome")).toString(),
                 u.value(QStringLiteral("fuelRemaining")).toDouble(-1.0),
                 u.value(QStringLiteral("turnaroundElapsed")).toDouble(0.0));
+            attacker->restoreRemoteAttackState(
+                u.contains(QStringLiteral("targetId"))
+                    ? u.value(QStringLiteral("targetId")).toString() : attacker->targetId(),
+                u.contains(QStringLiteral("armed"))
+                    ? u.value(QStringLiteral("armed")).toBool() : attacker->armed(),
+                u.contains(QStringLiteral("rulesOfEngagement"))
+                    ? u.value(QStringLiteral("rulesOfEngagement")).toString()
+                    : attacker->rulesOfEngagement());
         }
     }
 }

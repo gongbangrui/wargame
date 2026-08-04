@@ -27,6 +27,7 @@ PACKAGE_INPUTS=(
     cmake
     src
     server
+    map/metadata.json
     deploy
     .dockerignore
     README.md
@@ -99,6 +100,7 @@ for required in \
     "$PACKAGE_ROOT/server/account/static/app.js" \
     "$PACKAGE_ROOT/server/account/static/app.css" \
     "$PACKAGE_ROOT/server/game/main.cpp" \
+    "$PACKAGE_ROOT/map/metadata.json" \
     "$PACKAGE_ROOT/deploy/QUICK_START.md" \
     "$PACKAGE_ROOT/src"; do
     if [[ "$required" == "$PACKAGE_ROOT/src" ]]; then

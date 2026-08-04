@@ -3,14 +3,27 @@ from __future__ import annotations
 import getpass
 import sys
 
-from app import database, initialize_database, iso_time, password_hasher, utc_now
+from app import (
+    MIN_PASSWORD_LENGTH,
+    database,
+    initialize_database,
+    iso_time,
+    password_hasher,
+    utc_now,
+)
 
 
 def main() -> int:
     initialize_database()
-    password = sys.argv[1] if len(sys.argv) > 1 else getpass.getpass("新的管理员密码: ")
-    if len(password) < 8:
-        print("管理员密码至少需要 8 个字符", file=sys.stderr)
+    if len(sys.argv) > 1:
+        print("密码不能通过命令行参数传入；请使用交互输入或 stdin", file=sys.stderr)
+        return 2
+    if sys.stdin.isatty():
+        password = getpass.getpass("新的管理员密码: ")
+    else:
+        password = sys.stdin.readline().rstrip("\r\n")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        print(f"管理员密码必须至少为 {MIN_PASSWORD_LENGTH} 个字符", file=sys.stderr)
         return 2
     with database() as db:
         admin = db.execute("SELECT id, username FROM admins ORDER BY id LIMIT 1").fetchone()
@@ -28,4 +41,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

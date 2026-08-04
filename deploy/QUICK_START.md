@@ -21,6 +21,13 @@ cd "$release_dir/wargame-server-<version>"
 The package contains the source and Docker files for both `account-web` and
 the authority `game-server`; the installer builds both services locally.
 
+The game-server image disables the optional Fast DDS adapter by default. The
+installer persists `WARGAME_ENABLE_FASTDDS`, `WARGAME_FASTDDS_MODE`,
+`FASTDDS_DOMAIN_ID`, `FASTDDS_DISCOVERY_TIMEOUT_MS`, and `FASTDDS_STATIC_PEERS`
+in the managed `.env`; compatibility mode is rejected until authenticated and
+encrypted DDS transport is deployed. WebSocket remains the only authoritative
+snapshot/delta/command channel.
+
 Run the installer as the deployment user (or through `sudo`); it prompts for
 the administrator password when one is not supplied. The default managed root
 is the invoking user's `~/wargame` directory. Use an explicit root and stable

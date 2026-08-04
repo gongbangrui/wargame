@@ -97,7 +97,7 @@ def write_metadata(root: Path, source: Path, tiles: list[Path]) -> None:
         "schemaVersion": 1,
         "mapId": "coastal-mountain-theater-v1",
         "name": "海岸山地联合作战区",
-        "description": "为兵器推演 Qt 项目原创生成的虚构卫星地图",
+        "description": "为兵棋推演 Qt 项目原创生成的虚构卫星地图",
         "source": {
             "type": "AI-generated original fictional raster",
             "master": str(source.relative_to(root)),

@@ -106,12 +106,12 @@ Item {
 
     QtObject {
         id: t
-        property color panel: "#0b1728"; property color panelAlt: "#142943"
-        property color border: "#315173"; property color text: "#f5f8fc"
-        property color textDim: "#d6e1ef"; property color muted: "#bdcde0"
-        property color accent: "#4090ff"; property color danger: "#f04760"
-        property color red: "#f04760"; property color blue: "#4090ff"
-        property color success: "#36c98a"
+        property color panel: AppContext.panel; property color panelAlt: AppContext.raised
+        property color border: AppContext.line; property color text: AppContext.text
+        property color textDim: AppContext.textDim; property color muted: AppContext.muted
+        property color accent: AppContext.signal; property color danger: AppContext.danger
+        property color red: AppContext.red; property color blue: AppContext.blue
+        property color success: AppContext.success
     }
 
     function reload() {

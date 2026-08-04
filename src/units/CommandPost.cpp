@@ -21,6 +21,15 @@ void CommandPost::onMessage(const Message& m) {
         const QString tid = m.payload.value("targetId").toString();
         if (tid.isEmpty()) break;
         if (m_pending.contains(tid) || m_targets.contains(tid)) {
+            QJsonObject refreshed = m_pending.contains(tid)
+                ? m_pending.value(tid).toObject() : m_targets.value(tid).toObject();
+            for (auto it = m.payload.begin(); it != m.payload.end(); ++it)
+                refreshed.insert(it.key(), it.value());
+            refreshed["lastReportAt"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+            refreshed["reportedBy"] = m.sender;
+            if (m_pending.contains(tid)) m_pending.insert(tid, refreshed);
+            else m_targets.insert(tid, refreshed);
+            emit sharedKnowledgeChanged();
             sendAck(m);
             break;
         }

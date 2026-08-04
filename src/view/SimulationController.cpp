@@ -1,6 +1,7 @@
 ﻿#include "SimulationController.h"
 #include "../core/UnitBase.h"
 #include "../core/SnapshotCodec.h"
+#include "../protocol/Protocol.h"
 
 #include <QJsonArray>
 #include <QDateTime>
@@ -11,13 +12,25 @@
 #include <QSaveFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QCryptographicHash>
+#include <QCoreApplication>
+#include <QTimer>
 #include <QUrl>
+
+#include <qt6keychain/keychain.h>
 #include <algorithm>
 #include <cmath>
 
 namespace gbr {
 
 namespace {
+
+constexpr auto kPasswordService = "org.gbr.wargame";
+
+QString rememberedPasswordKey(const QString& server, const QString& username) {
+    const QByteArray identity = server.trimmed().toUtf8() + '\0' + username.trimmed().toUtf8();
+    return QString::fromLatin1(QCryptographicHash::hash(identity, QCryptographicHash::Sha256).toHex());
+}
 
 ScenarioUnit scenarioUnitFromVariantMap(const QVariantMap& data, bool generateId) {
     ScenarioUnit unit;
@@ -84,10 +97,16 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
     }
     setViewMode("commandpost-red");
 
+    if (QCoreApplication::instance()) {
+        connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                this, [this]() { m_networkClient.close(true); }, Qt::DirectConnection);
+    }
+
     connect(&m_engine, &SimulationEngine::simTimeChanged, this, &SimulationController::simTimeForward);
     connect(&m_engine, &SimulationEngine::runningChanged, this, &SimulationController::runningForward);
     connect(&m_engine, &SimulationEngine::unitsChanged, this, [this]() {
         invalidateCaches();
+        ++m_unitStateRevision;
         emit unitsForward();
     });
     connect(&m_engine, &SimulationEngine::messagesChanged, this, &SimulationController::messagesForward);
@@ -125,11 +144,17 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
             });
     connect(&m_networkClient, &NetworkClient::authenticated, this,
             [this](const QString& username, const QString& displayName,
-                   const QString& role, const QString& server) {
+                   const QString& seatId, const QString& server) {
                 const bool wasNetworked = isNetworked();
                 m_username = username;
                 m_displayName = displayName;
-                m_userRole = role;
+                m_userRole.clear();
+                m_currentSeatId = seatId;
+                m_currentRoomId.clear();
+                m_currentSeatType.clear();
+                m_currentSeatSide.clear();
+                m_communicationState = QStringLiteral("disconnected");
+                m_onlineStage = QStringLiteral("roomSelect");
                 m_serverAddress = server;
                 rememberServerAddress(server);
                 m_remoteScenarioRevision = -1;
@@ -137,6 +162,133 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 applyRoleView();
                 emit sessionChanged();
                 if (!wasNetworked) emit networkedChanged();
+                emit onlineStateChanged();
+                m_networkClient.requestRooms();
+            });
+    connect(&m_networkClient, &NetworkClient::roomDirectoryReceived, this,
+            [this](const QJsonArray& rooms) {
+                m_onlineRooms = rooms.toVariantList();
+                const bool leavingRoom = m_leaveRoomPending;
+                if (m_leaveRoomPending) {
+                    m_leaveRoomPending = false;
+                    emit leaveRoomPendingChanged();
+                }
+                const bool activeRoomStillListed = !m_currentRoomId.isEmpty()
+                    && std::any_of(rooms.cbegin(), rooms.cend(), [this](const QJsonValue& value) {
+                           return value.toObject().value(QStringLiteral("roomId")).toString()
+                               == m_currentRoomId;
+                       });
+                if (leavingRoom || !activeRoomStillListed) clearOnlineRoomDerivedState(false);
+                emit onlineRoomsChanged();
+            });
+    connect(&m_networkClient, &NetworkClient::seatStateReceived, this,
+            [this](const QJsonObject& state) {
+                Protocol::SeatDirectoryProjection directory;
+                const Protocol::ValidationResult validation =
+                    Protocol::projectSeatDirectory(state, &directory);
+                if (!validation.valid) {
+                    m_remoteLastError = validation.message;
+                    emit errorForward(validation.message);
+                    return;
+                }
+                m_onlineSeats = Protocol::seatVariants(directory.seats);
+                m_currentRoomId = directory.roomId;
+                const QString& yours = directory.yourSeatId;
+                if (!yours.isEmpty()) {
+                    m_currentSeatId = yours;
+                    const QStringList parts = yours.split(QLatin1Char('_'));
+                    m_currentSeatSide = parts.value(0);
+                    m_currentSeatType = parts.value(1);
+                    for (const QVariant& value : m_onlineSeats) {
+                        const QVariantMap seat = value.toMap();
+                        if (seat.value(QStringLiteral("seatId")).toString() == m_currentSeatId) {
+                            m_seatReady = seat.value(QStringLiteral("ready")).toBool();
+                            break;
+                        }
+                    }
+                    // A confirmed seat is the transition into the operational
+                    // page. Keep this stable when later seat-state broadcasts
+                    // refresh the directory for another client.
+                    m_onlineStage = (m_matchPhase == QLatin1String("running")
+                                     || m_matchPhase == QLatin1String("paused")
+                                     || m_matchPhase == QLatin1String("finished"))
+                        ? QStringLiteral("battle") : QStringLiteral("deployment");
+                } else {
+                    m_currentSeatId.clear();
+                    m_currentSeatType.clear();
+                    m_currentSeatSide.clear();
+                    m_seatReady = false;
+                    m_onlineStage = m_currentRoomId.isEmpty()
+                        ? QStringLiteral("roomSelect") : QStringLiteral("seatSelect");
+                }
+                emit onlineSeatsChanged();
+                emit onlineStateChanged();
+            });
+    connect(&m_networkClient, &NetworkClient::deploymentPromptReceived, this,
+            [this](const QJsonObject& prompt) {
+                Protocol::DeploymentPromptProjection projection;
+                const Protocol::ValidationResult validation =
+                    Protocol::projectDeploymentPrompt(prompt, &projection);
+                if (!validation.valid) {
+                    m_remoteLastError = validation.message;
+                    emit errorForward(validation.message);
+                    return;
+                }
+                emit deploymentPrompt(QVariantMap{{QStringLiteral("unitId"), projection.unitId},
+                                                  {QStringLiteral("seatId"), projection.seatId},
+                                                  {QStringLiteral("targetSeatId"), projection.targetSeatId},
+                                                  {QStringLiteral("message"), projection.message}});
+            });
+    connect(&m_networkClient, &NetworkClient::intelShareReceived, this,
+            [this](const QJsonObject& share) {
+                Protocol::IntelShareProjection projection;
+                const Protocol::ValidationResult validation =
+                    Protocol::projectIntelShare(share, &projection);
+                if (!validation.valid) {
+                    m_remoteLastError = validation.message;
+                    emit errorForward(validation.message);
+                    return;
+                }
+                emit intelShareReceived(QVariantMap{{QStringLiteral("senderSeatId"), projection.senderSeatId},
+                                                    {QStringLiteral("targetId"), projection.targetId},
+                                                    {QStringLiteral("sharedAt"), projection.sharedAt},
+                                                    {QStringLiteral("note"), projection.note}});
+            });
+    connect(&m_networkClient, &NetworkClient::transferEventReceived, this,
+            [this](const QJsonObject& event) {
+                Protocol::TransferEventProjection transfer;
+                const Protocol::ValidationResult validation =
+                    Protocol::projectTransferEvent(event, &transfer);
+                if (!validation.valid) {
+                    m_remoteLastError = validation.message;
+                    emit errorForward(validation.message);
+                    return;
+                }
+                const qint64 userId = transfer.userId;
+                if (transfer.kind == QLatin1String("transferRequested")
+                    && m_currentSeatType == QLatin1String("commander")
+                    && transfer.sourceSeatId.startsWith(m_currentSeatSide + QLatin1Char('_'))) {
+                    for (qsizetype i = m_pendingSeatTransfers.size() - 1; i >= 0; --i) {
+                        if (m_pendingSeatTransfers.at(i).toMap()
+                                .value(QStringLiteral("userId")).toLongLong() == userId) {
+                            m_pendingSeatTransfers.removeAt(i);
+                        }
+                    }
+                    m_pendingSeatTransfers.append(event.toVariantMap());
+                    emit pendingSeatTransfersChanged();
+                } else if (transfer.kind == QLatin1String("transferCompleted")
+                           || transfer.kind == QLatin1String("transferRejected")) {
+                    bool removed = false;
+                    for (qsizetype i = m_pendingSeatTransfers.size() - 1; i >= 0; --i) {
+                        if (m_pendingSeatTransfers.at(i).toMap()
+                                .value(QStringLiteral("userId")).toLongLong() == userId) {
+                            m_pendingSeatTransfers.removeAt(i);
+                            removed = true;
+                        }
+                    }
+                    if (removed) emit pendingSeatTransfersChanged();
+                }
+                emit transferEventReceived(event.toVariantMap());
             });
     connect(&m_networkClient, &NetworkClient::snapshotReceived,
             this, &SimulationController::applyRemoteSnapshot);
@@ -154,11 +306,23 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
     connect(&m_networkClient, &NetworkClient::eventReceived, this,
             [this](const QJsonObject& event) {
         const QString kind = event.value(QStringLiteral("kind")).toString();
-        if (kind == QLatin1String("simulationEnded")) {
+        if (kind == QLatin1String("simulationEnded") || kind == QLatin1String("forfeit")) {
             m_matchPhase = QStringLiteral("finished");
+            m_onlineStage = m_currentSeatId.isEmpty()
+                ? QStringLiteral("seatSelect") : QStringLiteral("battle");
             emit roomStateChanged();
+            emit onlineStateChanged();
             emit simEndForward(event.value(QStringLiteral("winner")).toString(),
                                event.value(QStringLiteral("loser")).toString());
+        } else if (kind == QLatin1String("matchEndedByAdmin")) {
+            m_matchPhase = QStringLiteral("finished");
+            m_onlineStage = m_currentSeatId.isEmpty()
+                ? QStringLiteral("seatSelect") : QStringLiteral("battle");
+            emit roomStateChanged();
+            emit onlineStateChanged();
+            emit eventForward(QStringLiteral("联网推演"),
+                              event.value(QStringLiteral("message")).toString(),
+                              QStringLiteral("warning"), QString());
         } else if (kind == QLatin1String("matchStarted")) {
             m_matchPhase = QStringLiteral("running");
             emit roomStateChanged();
@@ -167,22 +331,32 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                               QStringLiteral("info"), QString());
         } else if (kind == QLatin1String("matchReset")) {
             // 重置事件先于完整快照抵达，先解除阵容编辑锁定以避免界面停留在旧阶段。
-            m_matchPhase = QStringLiteral("preparing");
-            m_redReady = false;
-            m_blueReady = false;
-            emit roomStateChanged();
+            clearOnlineRoomDerivedState(true);
             emit eventForward(QStringLiteral("联网推演"),
                               event.value(QStringLiteral("message")).toString(),
                               QStringLiteral("info"), QString());
+        } else if (kind == QLatin1String("roomClosed")) {
+            clearOnlineRoomDerivedState(false);
+            m_networkClient.requestRooms();
+            const QString closeMessage = event.value(QStringLiteral("message")).toString().trimmed();
+            emit eventForward(QStringLiteral("联网房间"),
+                              closeMessage.isEmpty()
+                                  ? QStringLiteral("房间已关闭，已返回房间目录；登录身份保持有效")
+                                  : closeMessage + QStringLiteral("；已返回房间目录，登录身份保持有效"),
+                              QStringLiteral("warning"), QString());
         } else if (kind == QLatin1String("simulationEvent")) {
                     emit eventForward(event.value(QStringLiteral("title")).toString(),
                                       event.value(QStringLiteral("body")).toString(),
                                       event.value(QStringLiteral("level")).toString(),
                                       event.value(QStringLiteral("sourceUnitId")).toString());
-                } else if (kind == QLatin1String("targetDestroyed")) {
+        } else if (kind == QLatin1String("targetDestroyed")) {
                     emit targetDestroyedVisual(event.value(QStringLiteral("unitId")).toString(),
                                                event.value(QStringLiteral("x")).toDouble(),
                                                event.value(QStringLiteral("y")).toDouble());
+                } else if (kind == QLatin1String("mapMark")) {
+                    m_onlineMapMarks.append(event.toVariantMap());
+                    while (m_onlineMapMarks.size() > 200) m_onlineMapMarks.removeFirst();
+                    emit onlineMapMarksChanged();
                 } else {
                     emit eventForward(QStringLiteral("联网推演"),
                                       event.value(QStringLiteral("message")).toString(),
@@ -190,6 +364,10 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 }
             });
     const auto reportNetworkError = [this](const QString& message) {
+        if (m_leaveRoomPending) {
+            m_leaveRoomPending = false;
+            emit leaveRoomPendingChanged();
+        }
         m_remoteLastError = message;
         emit errorForward(message);
     };
@@ -1083,8 +1261,8 @@ void SimulationController::saveSetting(const QString& key, const QVariant& value
         obj = QJsonDocument::fromJson(f.readAll()).object();
         f.close();
     }
-    QJsonValue jv = QJsonValue::fromVariant(value);
-    obj[key] = jv;
+    if (key == QLatin1String("network/password")) obj.remove(key);
+    else obj[key] = QJsonValue::fromVariant(value);
     const QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
     if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) {
         emit errorForward(QStringLiteral("保存设置失败: %1").arg(key));
@@ -1092,7 +1270,56 @@ void SimulationController::saveSetting(const QString& key, const QVariant& value
     }
     // 信号会同步触发 QML 读取；先关闭文件，避免读取到尚未刷新的旧快捷键配置。
     f.close();
+    if (key == QLatin1String("network/password")) {
+        emit errorForward(QStringLiteral("密码仅能存储在系统密钥链中"));
+        return;
+    }
     if (key.startsWith(QStringLiteral("shortcuts/"))) emit shortcutsChanged();
+}
+
+void SimulationController::saveRememberedPassword(const QString& server, const QString& username,
+                                                  const QString& password, bool remember) {
+    if (server.trimmed().isEmpty() || username.trimmed().isEmpty()) return;
+    QKeychain::Job* job = nullptr;
+    if (remember) {
+        auto* write = new QKeychain::WritePasswordJob(QString::fromLatin1(kPasswordService), this);
+        write->setTextData(password);
+        job = write;
+    } else {
+        job = new QKeychain::DeletePasswordJob(QString::fromLatin1(kPasswordService), this);
+    }
+    job->setInsecureFallback(false);
+    job->setKey(rememberedPasswordKey(server, username));
+    connect(job, &QKeychain::Job::finished, this, [this, remember](QKeychain::Job* completed) {
+        if (completed->error() == QKeychain::NoError
+            || (!remember && completed->error() == QKeychain::EntryNotFound)) return;
+        emit errorForward(QStringLiteral("无法更新系统密钥链中的登录密码: %1")
+                              .arg(completed->errorString()));
+    });
+    job->start();
+}
+
+void SimulationController::loadRememberedPassword(const QString& server, const QString& username) {
+    if (server.trimmed().isEmpty() || username.trimmed().isEmpty()) {
+        emit rememberedPasswordLoaded(QString());
+        return;
+    }
+    auto* job = new QKeychain::ReadPasswordJob(QString::fromLatin1(kPasswordService), this);
+    job->setInsecureFallback(false);
+    job->setKey(rememberedPasswordKey(server, username));
+    connect(job, &QKeychain::Job::finished, this, [this](QKeychain::Job* completed) {
+        auto* read = qobject_cast<QKeychain::ReadPasswordJob*>(completed);
+        if (completed->error() == QKeychain::NoError && read) {
+            emit rememberedPasswordLoaded(read->textData());
+            return;
+        }
+        if (completed->error() != QKeychain::EntryNotFound) {
+            emit errorForward(QStringLiteral("无法读取系统密钥链中的登录密码: %1")
+                                  .arg(completed->errorString()));
+        }
+        emit rememberedPasswordLoaded(QString());
+    });
+    job->start();
 }
 
 QVariant SimulationController::loadSetting(const QString& key, const QVariant& defaultValue) const {
@@ -1107,6 +1334,7 @@ QVariant SimulationController::loadSetting(const QString& key, const QVariant& d
 
 void SimulationController::useLocalMode() {
     const bool wasNetworked = isNetworked();
+    const bool wasLeaveRoomPending = m_leaveRoomPending;
     m_networkClient.close();
     if (wasNetworked && !m_savedLocalScenario.units.empty()) m_engine.setScenario(m_savedLocalScenario);
     m_sessionMode = QStringLiteral("local");
@@ -1122,11 +1350,29 @@ void SimulationController::useLocalMode() {
     m_lastCommandId.clear();
     m_lastCommandStatus.clear();
     m_lastCommandMessage.clear();
+    m_onlineRooms.clear();
+    m_onlineSeats.clear();
+    m_onlineMapMarks.clear();
+    m_pendingSeatTransfers.clear();
+    m_communicationState = QStringLiteral("disconnected");
+    m_currentRoomId.clear();
+    m_currentSeatId.clear();
+    m_currentSeatType.clear();
+    m_currentSeatSide.clear();
+    m_onlineStage = QStringLiteral("login");
+    m_seatReady = false;
+    m_leaveRoomPending = false;
     emit sessionChanged();
     emit networkStatusChanged();
     emit messagesForward();
     emit chatMessagesChanged();
     emit commandStatusChanged();
+    emit onlineRoomsChanged();
+    emit onlineSeatsChanged();
+    emit onlineMapMarksChanged();
+    emit pendingSeatTransfersChanged();
+    emit onlineStateChanged();
+    if (wasLeaveRoomPending) emit leaveRoomPendingChanged();
     if (wasNetworked) emit networkedChanged();
     ensureFocusedConsistent();
 }
@@ -1172,17 +1418,117 @@ void SimulationController::logoutOnline() {
 }
 
 void SimulationController::setReady(bool ready) {
-    if (isNetworked() && (m_userRole == QLatin1String("red") || m_userRole == QLatin1String("blue")))
-        m_networkClient.sendReady(ready);
+    setSeatReady(ready);
 }
 
 void SimulationController::endMatch() {
-    if (isNetworked() && m_userRole == QLatin1String("director"))
-        m_networkClient.sendControl(QStringLiteral("end"));
+    if (isNetworked()) {
+        emit errorForward(QStringLiteral("联网推演由网页管理员停止或重置"));
+    }
 }
 
-void SimulationController::sendChat(const QString& text) {
-    if (isNetworked() && !text.trimmed().isEmpty()) m_networkClient.sendChat(text.trimmed());
+void SimulationController::sendChat(const QString& text, const QStringList& recipientSeatIds) {
+    if (isNetworked() && !text.trimmed().isEmpty()) {
+        m_networkClient.sendChat(text.trimmed(), recipientSeatIds);
+    }
+}
+
+void SimulationController::sendUnitOrder(const QString& unitId, const QString& text) {
+    const QVariantMap args{{QStringLiteral("unitId"), unitId},
+                           {QStringLiteral("text"), text.trimmed()}};
+    if (isNetworked()) m_networkClient.sendUnitOrder(unitId, text);
+    else m_engine.command(QStringLiteral("unitOrder"), args);
+    emit commandExecuted(QStringLiteral("unitOrder"), args);
+}
+
+void SimulationController::requestOnlineRooms() {
+    if (!isNetworked()) return;
+    m_onlineStage = QStringLiteral("roomSelect");
+    m_networkClient.requestRooms();
+    emit onlineStateChanged();
+}
+
+void SimulationController::joinOnlineRoom(const QString& roomId) {
+    if (!isNetworked() || roomId.trimmed().isEmpty()) return;
+    m_networkClient.joinRoom(roomId.trimmed());
+}
+
+void SimulationController::claimOnlineSeat(const QString& seatId) {
+    if (!isNetworked() || seatId.trimmed().isEmpty()) return;
+    // The server is authoritative. Do not show an occupied seat as selected
+    // before the seatState response confirms the claim.
+    m_networkClient.claimSeat(seatId.trimmed());
+}
+
+void SimulationController::approveSeatTransfer(qint64 userId, qint64 requestedRevision) {
+    if (!isNetworked() || m_currentSeatType != QLatin1String("commander")
+        || userId <= 0 || requestedRevision <= 0) return;
+    const QVariantMap args{{QStringLiteral("userId"), userId},
+                           {QStringLiteral("requestedRevision"), requestedRevision}};
+    m_networkClient.approveSeatTransfer(m_currentSeatId, userId, requestedRevision);
+    emit commandExecuted(QStringLiteral("approveSeatTransfer"), args);
+}
+
+void SimulationController::rejectSeatTransfer(qint64 userId, qint64 requestedRevision) {
+    if (!isNetworked() || m_currentSeatType != QLatin1String("commander")
+        || userId <= 0 || requestedRevision <= 0) return;
+    const QVariantMap args{{QStringLiteral("userId"), userId},
+                           {QStringLiteral("requestedRevision"), requestedRevision}};
+    m_networkClient.rejectSeatTransfer(m_currentSeatId, userId, requestedRevision);
+    emit commandExecuted(QStringLiteral("rejectSeatTransfer"), args);
+}
+
+void SimulationController::leaveOnlineRoom() {
+    if (!isNetworked() || m_leaveRoomPending) return;
+    m_leaveRoomPending = true;
+    emit leaveRoomPendingChanged();
+    m_networkClient.leaveRoom();
+    QTimer::singleShot(1500, this, [this]() {
+        if (m_leaveRoomPending) m_networkClient.requestRooms();
+    });
+    QTimer::singleShot(5000, this, [this]() {
+        if (!m_leaveRoomPending) return;
+        m_leaveRoomPending = false;
+        emit leaveRoomPendingChanged();
+        emit errorForward(QStringLiteral("退出请求未获服务器确认，请检查连接后重试"));
+    });
+}
+
+void SimulationController::setSeatReady(bool ready) {
+    if (!isNetworked() || m_currentSeatId.isEmpty()) return;
+    m_networkClient.sendSeatReady(ready);
+}
+
+void SimulationController::deployOnlineUnit(const QString& unitId, const QVariantMap& position) {
+    if (isNetworked()) m_networkClient.sendDeployment(unitId, position);
+}
+
+void SimulationController::requestOnlineRedeploy() {
+    if (isNetworked()) m_networkClient.requestRedeploy();
+}
+
+void SimulationController::redeployOnlineUnit(const QString& seatId) {
+    const QString targetSeatId = seatId.trimmed();
+    if (!isNetworked() || targetSeatId.isEmpty()) return;
+    m_networkClient.redeploy(targetSeatId);
+    emit commandExecuted(QStringLiteral("redeploy"),
+                         QVariantMap{{QStringLiteral("seatId"), targetSeatId}});
+}
+
+void SimulationController::setOnlineUnitName(const QString& unitName) {
+    if (isNetworked() && !unitName.trimmed().isEmpty()) {
+        m_networkClient.sendUnitName(unitName.trimmed());
+    }
+}
+
+void SimulationController::shareOnlineIntel(const QString& targetId, const QStringList& recipientSeatIds,
+                                            const QString& note) {
+    if (isNetworked()) m_networkClient.shareIntel(targetId, recipientSeatIds, note);
+}
+
+void SimulationController::markOnlineMap(const QVariantMap& position, const QString& label,
+                                         const QStringList& recipientSeatIds) {
+    if (isNetworked()) m_networkClient.sendMapMark(position, label, recipientSeatIds);
 }
 
 QString SimulationController::connectToPeer(const QString& host, int port) {
@@ -1207,6 +1553,47 @@ void SimulationController::applyRoleView() {
     ensureFocusedConsistent();
 }
 
+void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
+    if (!preserveRoomId) m_currentRoomId.clear();
+    m_currentSeatId.clear();
+    m_currentSeatType.clear();
+    m_currentSeatSide.clear();
+    m_seatReady = false;
+    m_matchPhase = QStringLiteral("preparing");
+    m_redReady = false;
+    m_blueReady = false;
+    m_remoteReadyForSim = false;
+    m_remoteCpIssues.clear();
+    m_communicationState = QStringLiteral("disconnected");
+    m_onlineSeats.clear();
+    m_onlineMapMarks.clear();
+    m_pendingSeatTransfers.clear();
+    m_remoteMessages.clear();
+    m_chatMessages.clear();
+    m_remoteScenarioRevision = -1;
+    m_lastCommandId.clear();
+    m_lastCommandStatus.clear();
+    m_lastCommandMessage.clear();
+    m_onlineStage = preserveRoomId && !m_currentRoomId.isEmpty()
+        ? QStringLiteral("seatSelect") : QStringLiteral("roomSelect");
+
+    Scenario emptyProjection = m_engine.scenario();
+    emptyProjection.units.clear();
+    m_engine.setRemoteScenario(emptyProjection);
+    invalidateCaches();
+    ensureFocusedConsistent();
+    emit onlineSeatsChanged();
+    emit onlineMapMarksChanged();
+    emit pendingSeatTransfersChanged();
+    emit messagesForward();
+    emit chatMessagesChanged();
+    emit commandStatusChanged();
+    emit readyForSimForward();
+    emit roomStateChanged();
+    emit onlineStateChanged();
+    emit mapInfoForward();
+}
+
 QJsonObject SimulationController::scenarioUnitJson(const ScenarioUnit& unit) const {
     Scenario wrapper;
     wrapper.units.push_back(unit);
@@ -1216,16 +1603,84 @@ QJsonObject SimulationController::scenarioUnitJson(const ScenarioUnit& unit) con
 
 void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
     if (!isNetworked()) return;
-    const QJsonObject room = payload.value(QStringLiteral("roomState")).toObject();
-    m_matchPhase = room.value(QStringLiteral("phase")).toString(QStringLiteral("preparing"));
-    m_redReady = room.value(QStringLiteral("redReady")).toBool();
-    m_blueReady = room.value(QStringLiteral("blueReady")).toBool();
-    m_remoteReadyForSim = room.value(QStringLiteral("readyForSim")).toBool();
-    m_remoteCpIssues = room.value(QStringLiteral("cpIssues")).toString();
-    const qint64 revision = room.value(QStringLiteral("scenarioRevision")).toInteger();
+    Protocol::SnapshotProjection projection;
+    const Protocol::ValidationResult validation = Protocol::projectSnapshot(payload, &projection);
+    if (!validation.valid) {
+        m_remoteLastError = validation.message;
+        emit errorForward(validation.message);
+        return;
+    }
+    const Protocol::RoomLifecycleProjection& room = projection.lifecycle;
+    // roomState is shared by all clients and therefore contains the server's
+    // room id even for a client that has just left. Do not resurrect a room
+    // selection while the controller is already showing the room directory.
+    if (!room.roomId.isEmpty() && m_onlineStage != QLatin1String("roomSelect")) {
+        m_currentRoomId = room.roomId;
+    }
+    const bool roomSelectionConfirmed = !m_currentRoomId.isEmpty()
+        && m_currentRoomId == room.roomId && m_onlineStage != QLatin1String("roomSelect");
+    if (roomSelectionConfirmed
+        && payload.value(QStringLiteral("roomState")).toObject().contains(QStringLiteral("seats"))) {
+        m_onlineSeats = Protocol::seatVariants(room.seats);
+    } else if (!roomSelectionConfirmed) {
+        m_onlineSeats.clear();
+    }
+    m_matchPhase = room.phase;
+    m_redReady = room.redReady;
+    m_blueReady = room.blueReady;
+    const QString projectedCommunication = payload.value(QStringLiteral("roomState"))
+                                               .toObject()
+                                               .value(QStringLiteral("communicationState"))
+                                               .toString();
+    if (projectedCommunication == QLatin1String("twoWay")) {
+        m_communicationState = QStringLiteral("bilateral");
+    } else if (projectedCommunication == QLatin1String("bilateral")
+               || projectedCommunication == QLatin1String("receiveOnly")
+               || projectedCommunication == QLatin1String("disconnected")) {
+        m_communicationState = projectedCommunication;
+    } else {
+        m_communicationState = QStringLiteral("disconnected");
+    }
+    const QVariantList roomSeats = Protocol::seatVariants(room.seats);
+    bool currentSeatPresent = false;
+    if (roomSelectionConfirmed && !m_currentSeatId.isEmpty()) {
+        for (const QVariant& value : roomSeats) {
+            const QVariantMap seat = value.toMap();
+            if (seat.value(QStringLiteral("seatId")).toString() == m_currentSeatId
+                && seat.value(QStringLiteral("occupied")).toBool()) {
+                currentSeatPresent = true;
+                m_seatReady = seat.value(QStringLiteral("ready")).toBool();
+                break;
+            }
+        }
+    }
+    if (!currentSeatPresent) {
+        m_currentSeatId.clear();
+        m_currentSeatType.clear();
+        m_currentSeatSide.clear();
+        m_seatReady = false;
+        m_onlineStage = m_currentRoomId.isEmpty()
+            ? QStringLiteral("roomSelect") : QStringLiteral("seatSelect");
+    }
+    const bool activePhase = m_matchPhase == QLatin1String("running")
+        || m_matchPhase == QLatin1String("paused")
+        || m_matchPhase == QLatin1String("finished");
+    if (roomSelectionConfirmed && currentSeatPresent && activePhase) {
+        m_onlineStage = QStringLiteral("battle");
+    } else if (roomSelectionConfirmed && currentSeatPresent) {
+        m_onlineStage = QStringLiteral("deployment");
+    } else if (roomSelectionConfirmed) {
+        m_onlineStage = QStringLiteral("seatSelect");
+    } else {
+        m_onlineStage = QStringLiteral("roomSelect");
+    }
+    m_remoteReadyForSim = room.readyForSim;
+    m_remoteCpIssues = room.cpIssues;
+    const qint64 revision = room.scenarioRevision;
 
     const QJsonObject scenarioObject = payload.value(QStringLiteral("scenario")).toObject();
-    const Scenario incomingScenario = ScenarioIo::fromJson(scenarioObject);
+    Scenario incomingScenario = ScenarioIo::fromJson(scenarioObject);
+    if (!roomSelectionConfirmed) incomingScenario.units.clear();
     QStringList incomingIds;
     incomingIds.reserve(static_cast<qsizetype>(incomingScenario.units.size()));
     for (const auto& unit : incomingScenario.units) incomingIds.append(unit.id);
@@ -1233,20 +1688,30 @@ void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
     std::sort(incomingIds.begin(), incomingIds.end());
     std::sort(currentIds.begin(), currentIds.end());
     if (revision != m_remoteScenarioRevision || incomingIds != currentIds) {
-        if (!incomingScenario.units.empty()) m_engine.setScenario(incomingScenario);
+        if (!m_engine.setRemoteScenario(incomingScenario)) {
+            m_remoteLastError = m_engine.lastError();
+            emit errorForward(m_remoteLastError);
+            return;
+        }
         m_remoteScenarioRevision = revision;
     }
 
-    m_remoteMessages = payload.value(QStringLiteral("messages")).toArray().toVariantList();
-    m_engine.applyRemoteRuntimeState(payload.value(QStringLiteral("units")).toArray(),
-                                     room.value(QStringLiteral("simTime")).toDouble(),
-                                     room.value(QStringLiteral("running")).toBool(),
-                                     room.value(QStringLiteral("speed")).toDouble(1.0));
+    m_remoteMessages = roomSelectionConfirmed
+        ? payload.value(QStringLiteral("messages")).toArray().toVariantList() : QVariantList{};
+    m_onlineMapMarks = roomSelectionConfirmed
+        ? payload.value(QStringLiteral("mapMarks")).toArray().toVariantList() : QVariantList{};
+    emit onlineMapMarksChanged();
+    const QJsonArray runtimeUnits = roomSelectionConfirmed
+        ? payload.value(QStringLiteral("units")).toArray() : QJsonArray{};
+    m_engine.applyRemoteRuntimeState(runtimeUnits,
+                                     room.simTime, room.running, room.speed);
     invalidateCaches();
     ensureFocusedConsistent();
     emit messagesForward();
     emit readyForSimForward();
     emit roomStateChanged();
+    emit onlineSeatsChanged();
+    emit onlineStateChanged();
     emit mapInfoForward();
 }
 

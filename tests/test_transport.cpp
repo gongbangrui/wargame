@@ -29,6 +29,7 @@ TEST(LocalTransportTest, IsLocalFlag) {
 TEST(LocalTransportTest, SubscribeAndDeliver) {
     LocalTransport t;
     int delivered = 0;
+    t.subscribe("red_cp", [](const Message&) {});
     t.subscribe("red_a1", [&](const Message&){ ++delivered; });
     t.updateUnitPosition("red_cp", QPointF(0, 0), 20000, "red");
     t.updateUnitPosition("red_a1", QPointF(1000, 0), 20000, "red");
@@ -45,6 +46,8 @@ TEST(LocalTransportTest, SubscribeAndDeliver) {
 TEST(LocalTransportTest, SinkReceivesEveryEmission) {
     LocalTransport t;
     int sinkHits = 0;
+    t.subscribe("red_cp", [](const Message&) {});
+    t.subscribe("red_a1", [](const Message&) {});
     t.setMessageSink([&](const QJsonObject&){ ++sinkHits; });
 
     t.updateUnitPosition("red_cp", QPointF(0, 0), 20000, "red");
@@ -60,6 +63,7 @@ TEST(LocalTransportTest, SinkReceivesEveryEmission) {
 
 TEST(LocalTransportTest, UnregisterCleansState) {
     LocalTransport t;
+    t.subscribe("red_x", [](const Message&) {});
     t.updateUnitPosition("red_x", QPointF(0, 0), 20000, "red");
     EXPECT_TRUE(t.isRegistered("red_x"));
     t.unregisterUnit("red_x");
@@ -69,6 +73,8 @@ TEST(LocalTransportTest, UnregisterCleansState) {
 
 TEST(LocalTransportTest, CrossSideBlocked) {
     LocalTransport t;
+    t.subscribe("red_a1", [](const Message&) {});
+    t.subscribe("blue_a1", [](const Message&) {});
     t.updateUnitPosition("red_a1", QPointF(0, 0), 20000, "red");
     t.updateUnitPosition("blue_a1", QPointF(0, 0), 20000, "blue");
 
@@ -87,6 +93,8 @@ TEST(LocalTransportTest, CrossSideBlocked) {
 
 TEST(LocalTransportTest, CpBypassesRange) {
     LocalTransport t;
+    t.subscribe("red_cp", [](const Message&) {});
+    t.subscribe("red_a1", [](const Message&) {});
     t.updateUnitPosition("red_cp", QPointF(0, 0), 20000, "red");
     t.updateUnitPosition("red_a1", QPointF(50000, 50000), 1000, "red");
     t.setUnitCommandPost("red_cp", true);

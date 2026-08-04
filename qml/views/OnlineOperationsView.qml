@@ -1,0 +1,1555 @@
+pragma ComponentBehavior: Bound
+import QtQuick
+import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import "../components"
+
+Item {
+    id: root
+    property var controller: null
+    property var editor: null
+    property var canvas: onlineCanvas
+    property bool autoFollow: true
+    property string deployUnitId: ""
+    property string deploymentTargetSeatId: ""
+    property string deploymentState: "idle"
+    property string selectedUnitId: ""
+    property string attackTargetId: ""
+    property bool commanderPointSelectionActive: false
+    property bool showCommunicationRange: false
+    property bool showDetectionRange: true
+    property bool showAttackRange: true
+    property string subordinateMessageDraft: ""
+    property string deploymentNotice: ""
+    property string unitNameDraft: ""
+    property string unitNameDraftSeatId: ""
+    property bool unitNameDirty: false
+    property int unitSpeedDraft: 1
+    property string unitSpeedDraftUnitId: ""
+    property bool unitSpeedDirty: false
+    property string selectedCommandMarkerId: ""
+    property var dismissedCommandMarkerIds: []
+    property var selectedRecipientIds: []
+    property bool switchSeatSelection: false
+    property bool switchRequestPending: false
+    property bool exitRequestPending: false
+    property string switchSourceSeatId: ""
+    property string switchTargetSeatId: ""
+    property string observedMatchPhase: ""
+    property bool compactLayout: width < 760
+    property color page: AppContext.page
+    property color ink: AppContext.text
+    property color dim: AppContext.muted
+    property color panel: AppContext.panel
+    property color panelAlt: AppContext.raised
+    property color line: AppContext.line
+    property color cyan: AppContext.signal
+    property color orange: AppContext.warning
+    property color info: AppContext.info
+    property color danger: AppContext.danger
+
+    signal openChatRequested()
+
+    property bool isCommander: root.controller && root.controller.currentSeatType === "commander"
+    property bool canDeploy: root.isCommander && root.controller.matchPhase === "preparing"
+                            && root.deploymentTargetSeatId.length > 0 && root.deployUnitId.length > 0
+    property var selectedUnitSnapshot: {
+        if (!root.controller || !root.selectedUnitId) return ({})
+        if (root.controller.unitStateRevision >= 0)
+            return root.controller.unitAt(root.selectedUnitId) || ({})
+        return ({})
+    }
+
+    function resetRoundViewState() {
+        root.selectedUnitId = ""
+        root.attackTargetId = ""
+        root.deployUnitId = ""
+        root.deploymentTargetSeatId = ""
+        root.deploymentState = "idle"
+        root.selectedCommandMarkerId = ""
+        root.dismissedCommandMarkerIds = []
+        root.selectedRecipientIds = []
+        root.subordinateMessageDraft = ""
+        root.unitNameDraft = ""
+        root.unitNameDraftSeatId = ""
+        root.unitNameDirty = false
+        root.unitSpeedDraft = 1
+        root.unitSpeedDraftUnitId = ""
+        root.unitSpeedDirty = false
+        root.switchSeatSelection = false
+        root.switchRequestPending = false
+        root.switchSourceSeatId = ""
+        root.switchTargetSeatId = ""
+        if (root.commanderPointSelectionActive) root.cancelCommanderPointSelection()
+        commanderCommandPanel.mapSelectionCanceled()
+    }
+
+    function normalizedCommunicationState() {
+        return root.controller.communicationState === "twoWay"
+            ? "bilateral" : root.controller.communicationState
+    }
+    function communicationLabel() {
+        if (root.isCommander) return "指挥链路已接入"
+        var state = root.normalizedCommunicationState()
+        if (state === "bilateral") return "双向通信"
+        if (state === "receiveOnly") return "仅可接收"
+        return "通信中断"
+    }
+    function communicationColor() {
+        if (root.isCommander) return root.cyan
+        var state = root.normalizedCommunicationState()
+        return state === "bilateral" ? root.cyan
+             : state === "receiveOnly" ? root.orange : root.danger
+    }
+    function commanderSeatId() {
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            if (seats[i].side === root.controller.currentSeatSide
+                    && seats[i].seatType === "commander" && seats[i].occupied)
+                return seats[i].seatId
+        }
+        return ""
+    }
+    function subordinateCanSend() {
+        if (!root.commanderSeatId()) return false
+        if (root.controller.matchPhase === "preparing") return true
+        return root.controller.matchPhase === "running"
+            && root.normalizedCommunicationState() === "bilateral"
+    }
+    function rangeDisplayUnitIds() {
+        if (root.selectedUnitId) return [root.selectedUnitId]
+        var ownSeat = root.seatById(root.controller.currentSeatId)
+        return ownSeat && ownSeat.unitId ? [ownSeat.unitId] : []
+    }
+    function selectedFriendlySeat() {
+        return root.seatForUnit(root.selectedUnitId)
+    }
+
+    function roomStatusLabel(status) {
+        var labels = {
+            stopped: "停止",
+            preparing: "准备",
+            paused: "暂停",
+            running: "推演",
+            finished: "已结束",
+            ready: "已就绪",
+            stale: "状态过期",
+            unknown: "状态未知"
+        }
+        return labels[status] || "状态未知"
+    }
+    function roomStatusColor(status) {
+        return status === "preparing" ? root.cyan
+             : status === "running" || status === "ready" ? root.info
+             : status === "paused" || status === "stale" ? root.orange
+             : status === "stopped" || status === "finished" ? root.danger
+             : root.dim
+    }
+    function roomCanJoin(room) {
+        return room && room.hostedByGameServer === true && room.status === "preparing"
+    }
+    function orderedRooms() {
+        var rooms = (root.controller.onlineRooms || []).filter(function(room) {
+            return room && room.roomId
+        })
+        rooms.sort(function(a, b) {
+            var aJoinable = root.roomCanJoin(a) ? 0 : 1
+            var bJoinable = root.roomCanJoin(b) ? 0 : 1
+            if (aJoinable !== bJoinable) return aJoinable - bJoinable
+            return String(a.name || a.roomId).localeCompare(String(b.name || b.roomId))
+        })
+        return rooms
+    }
+    function isRoomEmpty() {
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) if (seats[i].occupied) return false
+        return true
+    }
+    function seatById(seatId) {
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) if (seats[i].seatId === seatId) return seats[i]
+        return null
+    }
+    function canClaimSeat(seat) {
+        if (!seat || seat.occupied || root.controller.matchPhase !== "preparing") return false
+        if (root.switchSeatSelection) {
+            return !root.switchRequestPending && seat.side === root.controller.currentSeatSide
+                    && seat.seatType !== "commander"
+        }
+        var redCommander = root.seatById("red_commander")
+        var blueCommander = root.seatById("blue_commander")
+        if (root.isRoomEmpty()) return seat.seatId === "red_commander"
+        if (!redCommander || !redCommander.occupied) return seat.seatId === "red_commander"
+        if (!blueCommander || !blueCommander.occupied) return seat.seatId === "blue_commander"
+        return true
+    }
+    function seatHint(seat) {
+        if (seat.occupied) return seat.displayName || "已占用"
+        if (root.switchSeatSelection && seat.side !== root.controller.currentSeatSide)
+            return "只能申请本方战位"
+        if (root.switchSeatSelection && seat.seatType === "commander")
+            return "指挥官战位不可在此切换"
+        if (root.switchRequestPending && seat.seatId === root.switchTargetSeatId)
+            return "等待本方指挥官确认"
+        if (root.canClaimSeat(seat)) return "可选择"
+        if (root.isRoomEmpty()) return "请先选择红方指挥官"
+        return "等待双方指挥官就位"
+    }
+    function seatStatusLabel(seat) {
+        if (!seat.occupied) return "空缺"
+        if (seat.pendingTransfer) return "交接中"
+        if (!seat.connected) return "失联"
+        if (!seat.deployed) return seat.seatType === "commander" ? "待选指挥所" : "等待指挥官部署"
+        if (seat.ready) return "已就绪"
+        return "已部署"
+    }
+    function seatStatusColor(seat) {
+        if (!seat.occupied) return root.dim
+        if (seat.pendingTransfer || !seat.deployed) return root.orange
+        if (!seat.connected) return root.danger
+        if (seat.ready) return root.cyan
+        return root.info
+    }
+    function pendingDeploymentSeats() {
+        var result = []
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            var seat = seats[i]
+            if (seat.occupied && seat.side === root.controller.currentSeatSide && !seat.deployed)
+                result.push(seat)
+        }
+        return result
+    }
+    function pendingRedeploySeats() {
+        var result = []
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            var seat = seats[i]
+            if (seat.occupied && seat.side === root.controller.currentSeatSide
+                    && seat.redeployRequested) result.push(seat)
+        }
+        return result
+    }
+    function friendlySeatsReady() {
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            var seat = seats[i]
+            if (seat.occupied && seat.side === root.controller.currentSeatSide
+                    && seat.seatType !== "commander" && (!seat.deployed || !seat.ready)) return false
+        }
+        return true
+    }
+    function hasFriendlyDeployment() {
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            if (seats[i].occupied && seats[i].side === root.controller.currentSeatSide
+                    && seats[i].deployed) return true
+        }
+        return false
+    }
+    function deployedUnitIds() {
+        var ids = []
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            if (seats[i].occupied && seats[i].deployed && seats[i].unitId)
+                ids.push(seats[i].unitId)
+        }
+        return ids
+    }
+    function deployedFriendlyUnits() {
+        var deployed = root.deployedUnitIds()
+        return (root.controller.units || []).filter(function(unit) {
+            return unit.alive && unit.side === root.controller.currentSeatSide
+                    && deployed.indexOf(unit.id) >= 0
+        })
+    }
+    function seatsForSide(side) {
+        var seats = (root.controller.onlineSeats || []).filter(function(seat) {
+            return seat.side === side
+        })
+        seats.sort(function(a, b) {
+            var aCommander = a.seatType === "commander" ? 0 : 1
+            var bCommander = b.seatType === "commander" ? 0 : 1
+            if (aCommander !== bCommander) return aCommander - bCommander
+            if (a.seatType !== b.seatType) return String(a.seatType).localeCompare(String(b.seatType))
+            return Number(a.slot || 0) - Number(b.slot || 0)
+        })
+        return seats
+    }
+    function refreshUnitNameDraft() {
+        var seat = root.seatById(root.controller.currentSeatId) || {}
+        var unit = root.controller.unitAt(seat.unitId) || {}
+        var seatId = seat.seatId || ""
+        var authoritativeName = seat.unitName || unit.callsign || ""
+        if (root.unitNameDraftSeatId !== seatId) {
+            root.unitNameDraftSeatId = seatId
+            root.unitNameDirty = false
+            root.unitNameDraft = authoritativeName
+            return
+        }
+        if (root.unitNameDirty) {
+            if (authoritativeName !== root.unitNameDraft.trim()) return
+            root.unitNameDirty = false
+        }
+        root.unitNameDraft = authoritativeName
+    }
+    function refreshUnitSpeedDraft() {
+        var seat = root.seatById(root.controller.currentSeatId) || {}
+        var unit = root.controller.unitAt(seat.unitId) || {}
+        var speed = Math.round(Number(unit.speed || 1))
+        var unitId = seat.unitId || ""
+        if (root.unitSpeedDraftUnitId !== unitId) {
+            root.unitSpeedDraftUnitId = unitId
+            root.unitSpeedDirty = false
+            root.unitSpeedDraft = Math.max(1, Math.min(1000, speed))
+            return
+        }
+        if (root.unitSpeedDirty) {
+            if (speed !== root.unitSpeedDraft) return
+            root.unitSpeedDirty = false
+        }
+        root.unitSpeedDraft = Math.max(1, Math.min(1000, speed))
+    }
+    function dismissSelectedCommandMarker() {
+        if (!root.selectedCommandMarkerId) return
+        var dismissed = root.dismissedCommandMarkerIds.slice()
+        if (dismissed.indexOf(root.selectedCommandMarkerId) < 0)
+            dismissed.push(root.selectedCommandMarkerId)
+        root.dismissedCommandMarkerIds = dismissed
+        root.selectedCommandMarkerId = ""
+    }
+    function selectDeploymentSeat(seat) {
+        if (!root.isCommander || !seat || seat.side !== root.controller.currentSeatSide
+                || !seat.occupied || seat.deployed || !seat.unitId) return
+        root.deploymentTargetSeatId = seat.seatId
+        root.deployUnitId = seat.unitId
+        root.deploymentState = "selected"
+        root.deploymentNotice = "已选择 " + root.seatLabel(seat) + "，请在地图上点击指挥所位置"
+    }
+    function reconcileDeploymentState() {
+        if (!root.isCommander) {
+            var ownSeat = root.seatById(root.controller.currentSeatId)
+            if (ownSeat && ownSeat.deployed) {
+                root.deploymentState = "deployed"
+                root.deployUnitId = ""
+                root.selectedUnitId = ownSeat.unitId || root.selectedUnitId
+            } else if (ownSeat && ownSeat.occupied) {
+                root.deploymentState = "waiting"
+                root.selectedUnitId = ""
+            }
+            return
+        }
+        if (root.deploymentTargetSeatId) {
+            var target = root.seatById(root.deploymentTargetSeatId)
+            if (target && target.deployed) {
+                root.deploymentState = "deployed"
+                root.deploymentNotice = root.seatLabel(target) + " 已完成部署"
+                root.deploymentTargetSeatId = ""
+                root.deployUnitId = ""
+            }
+        }
+        if (!root.deploymentTargetSeatId && root.controller.matchPhase === "preparing") {
+            var pending = root.pendingDeploymentSeats()
+            if (pending.length > 0) root.selectDeploymentSeat(pending[0])
+        }
+    }
+    function selectUnit(unit) {
+        if (!unit || unit.side !== root.controller.currentSeatSide) return
+        var ownSeat = root.seatById(root.controller.currentSeatId)
+        if (!root.isCommander && ownSeat && ownSeat.unitId && ownSeat.unitId !== unit.id) return
+        root.selectedUnitId = unit.id
+        if (root.isCommander && root.controller.matchPhase !== "running") return
+        root.attackTargetId = ""
+    }
+    function seatForUnit(unitId) {
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            if (seats[i].occupied && seats[i].unitId === unitId) return seats[i]
+        }
+        return null
+    }
+    function cancelCommanderPointSelection() {
+        root.commanderPointSelectionActive = false
+        onlineCanvas.stopGuideMode()
+    }
+    function selectAttackTarget(unitId) {
+        root.attackTargetId = root.attackTargetId === unitId ? "" : unitId
+    }
+    function startSwitchSeatSelection() {
+        root.switchSourceSeatId = root.controller.currentSeatId
+        root.switchTargetSeatId = ""
+        root.switchRequestPending = false
+        root.switchSeatSelection = true
+        root.deploymentNotice = "当前战位保持不变。选择目标战位后将提交给本方指挥官确认。"
+    }
+    function cancelSwitchSeatSelection() {
+        if (root.switchRequestPending) return
+        root.switchSeatSelection = false
+        root.switchTargetSeatId = ""
+        root.deploymentNotice = "已取消战位切换，当前战位未变更。"
+    }
+    function requestSeat(seat) {
+        if (!root.canClaimSeat(seat)) return
+        root.switchTargetSeatId = seat.seatId
+        root.controller.claimOnlineSeat(seat.seatId)
+        if (root.switchSeatSelection) {
+            root.switchRequestPending = true
+            root.deploymentNotice = "切换请求已提交，当前战位将在服务器确认后变更。"
+        }
+    }
+
+    function seatLabel(seat) {
+        var labels = { commander: "指挥官", attack: "攻击机", recon: "侦察机", ground: "地面单位", jammer: "干扰机" }
+        var slot = seat.slot && seat.seatType !== "commander" ? " #" + seat.slot : ""
+        return (seat.side === "red" ? "红方 · " : "蓝方 · ") + (labels[seat.seatType] || seat.seatId) + slot
+    }
+
+    function recipientSeats() {
+        var result = []
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            var seat = seats[i]
+            if (seat.occupied && seat.side === root.controller.currentSeatSide
+                    && seat.seatId !== root.controller.currentSeatId
+                    && root.selectedRecipientIds.indexOf(seat.seatId) >= 0)
+                result.push(seat.seatId)
+        }
+        return result
+    }
+    function mapMarkRecipientSeats() {
+        var selected = root.recipientSeats()
+        if (selected.length > 0 || !root.isCommander) return selected
+        var result = []
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            var seat = seats[i]
+            if (seat.occupied && seat.deployed && seat.side === root.controller.currentSeatSide
+                    && seat.seatId !== root.controller.currentSeatId)
+                result.push(seat.seatId)
+        }
+        return result
+    }
+    function toggleRecipient(seatId, checked) {
+        var next = root.selectedRecipientIds.slice()
+        var index = next.indexOf(seatId)
+        if (checked && index < 0) next.push(seatId)
+        if (!checked && index >= 0) next.splice(index, 1)
+        root.selectedRecipientIds = next
+    }
+    function selectedRecipient(seatId) { return root.selectedRecipientIds.indexOf(seatId) >= 0 }
+
+    function seatForUnitId(unitId) {
+        var seats = root.controller.onlineSeats || []
+        for (var i = 0; i < seats.length; i++) {
+            if (seats[i].unitId === unitId) return seats[i]
+        }
+        return null
+    }
+    function commandKind(message) {
+        if (!message) return ""
+        if (message.type === "UnitOrder") return "text"
+        if (message.type === "AttackOrder") return "attack"
+        if (message.type === "Withdraw") return "withdrawal"
+        if (message.type === "Guidance" && message.payload && message.payload.kind === "moveTo")
+            return "maneuver"
+        return ""
+    }
+    function commandKindLabel(kind) {
+        var labels = { text: "文字命令", attack: "攻击", maneuver: "机动", withdrawal: "撤离" }
+        return labels[kind] || "命令"
+    }
+    function commandSourceLabel(unitId, seatId) {
+        var seat = seatId ? root.seatById(seatId) : root.seatForUnitId(unitId)
+        if (seat) return root.seatLabel(seat)
+        var unit = unitId ? root.controller.unitAt(unitId) : null
+        return (unit && (unit.callsign || unit.id)) || "指挥席"
+    }
+    function commandResultFor(message, messages) {
+        var payload = message.payload || {}
+        if (payload.result === "rejected" || payload.status === "rejected") return "已拒绝"
+        if (payload.result === "completed" || payload.status === "completed") return "已完成"
+        for (var i = 0; i < messages.length; i++) {
+            var acknowledgement = messages[i]
+            if (acknowledgement.type === "Ack" && acknowledgement.payload
+                    && acknowledgement.payload.inReplyTo === message.id) return "已确认"
+        }
+        return message.requiresAck ? "待回执" : ""
+    }
+    function targetLabel(targetId) {
+        var target = targetId ? root.controller.unitAt(targetId) : null
+        return target ? (target.callsign || target.id) : "已授权目标"
+    }
+    function participantCommandFeed() {
+        if (root.controller.unitStateRevision < 0) return []
+        var ownSeat = root.seatById(root.controller.currentSeatId)
+        var ownUnitId = ownSeat ? ownSeat.unitId : ""
+        if (!root.isCommander && !ownUnitId) return []
+        var feed = []
+        var messages = root.controller.messages || []
+        for (var i = 0; i < messages.length; i++) {
+            var message = messages[i]
+            var kind = root.commandKind(message)
+            if (!kind) continue
+            var receiverSeat = root.seatForUnitId(message.receiver)
+            if (root.isCommander) {
+                if (!receiverSeat || receiverSeat.side !== root.controller.currentSeatSide) continue
+            } else if (message.receiver !== ownUnitId) continue
+            var payload = message.payload || {}
+            var commanderOrder = payload.notificationOnly === true
+            feed.push({
+                id: message.id || (message.type + "_" + i),
+                kind: kind,
+                commanderOrder: commanderOrder,
+                source: root.commandSourceLabel(
+                    commanderOrder ? (message.sender || "") : (message.receiver || ""), ""),
+                time: message.time || "",
+                text: payload.text || "",
+                targetId: payload.targetId || "",
+                point: payload.x !== undefined && payload.y !== undefined
+                    ? { x: Number(payload.x), y: Number(payload.y) }
+                    : kind === "withdrawal" && payload.homeX !== undefined && payload.homeY !== undefined
+                    ? { x: Number(payload.homeX), y: Number(payload.homeY) } : null,
+                status: root.commandResultFor(message, messages)
+            })
+        }
+        feed.sort(function(a, b) { return String(b.time).localeCompare(String(a.time)) })
+        return feed.slice(0, 30)
+    }
+    function participantMapMarkers() {
+        if (root.controller.unitStateRevision < 0) return []
+        var markers = (root.controller.onlineMapMarks || []).slice()
+        var feed = root.participantCommandFeed()
+        var hasParticipantMarker = false
+        for (var i = 0; i < feed.length; i++) {
+            var command = feed[i]
+            if (root.dismissedCommandMarkerIds.indexOf(command.id) >= 0) continue
+            if (!command.commanderOrder) {
+                // A subordinate's movement guidance is personal intent, not a
+                // commander order. Keep only its newest point and never
+                // synthesize it on the commander's canvas.
+                if (root.isCommander || hasParticipantMarker) continue
+            }
+            var point = command.point
+            if (!point && command.kind === "attack") {
+                var target = root.controller.unitAt(command.targetId)
+                if (target && target.position && target.position.length >= 2)
+                    point = { x: target.position[0], y: target.position[1] }
+            }
+            if (!point || !isFinite(point.x) || !isFinite(point.y)) continue
+            if (!command.commanderOrder) hasParticipantMarker = true
+            markers.push({ id: command.id, position: point, side: root.controller.currentSeatSide,
+                           seatId: command.commanderOrder ? "" : root.controller.currentSeatId,
+                           category: command.commanderOrder ? "command" : "selfMove",
+                           markType: command.commanderOrder ? "commander" : "self",
+                           commandKind: command.kind, label: root.commandKindLabel(command.kind),
+                           source: command.source, status: command.status, time: command.time })
+        }
+        return markers
+    }
+    function visibleMapMarkFeed() {
+        var marks = (root.controller.onlineMapMarks || []).slice()
+        marks.sort(function(a, b) { return String(b.time || "").localeCompare(String(a.time || "")) })
+        return marks.slice(0, 8)
+    }
+    function mapMarkRoleLabel(mark) {
+        if (!mark) return "战术标点"
+        if (mark.markType === "commander") return "指挥标点"
+        if (mark.seatId === root.controller.currentSeatId) return "我的标点"
+        var seat = root.seatById(mark.seatId)
+        return root.isCommander && seat ? "下属标点 · " + root.seatLabel(seat) : "友方标点"
+    }
+    function mapMarkCoordinate(mark) {
+        var position = mark && mark.position
+        if (!position) return ""
+        var x = position.x !== undefined ? Number(position.x) : Number(position[0])
+        var y = position.y !== undefined ? Number(position.y) : Number(position[1])
+        if (!isFinite(x) || !isFinite(y)) return ""
+        return "X " + Math.round(x) + "  /  Y " + Math.round(y) + " m"
+    }
+    function attackTargetLabel(fallback) {
+        if (!root.attackTargetId) return fallback || "选择已掌握的敌方目标"
+        var target = root.controller.unitAt(root.attackTargetId)
+        return target && target.callsign ? target.callsign : root.attackTargetId
+    }
+
+    Rectangle { anchors.fill: parent; color: root.page }
+    Rectangle { visible: root.deploymentNotice.length > 0; anchors.top: parent.top; anchors.horizontalCenter: parent.horizontalCenter; z: 20; width: Math.min(parent.width - 40, 620); height: Math.max(38, noticeText.implicitHeight + 16); color: root.panelAlt; border.color: root.orange; radius: 5
+        Text { id: noticeText; anchors.fill: parent; anchors.margins: 8; text: root.deploymentNotice; color: root.orange; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+        Timer { interval: 6500; running: root.deploymentNotice.length > 0; onTriggered: root.deploymentNotice = "" }
+    }
+
+    Connections {
+        target: root.controller
+        function onDeploymentPrompt(prompt) {
+            if (root.isCommander && prompt.targetSeatId) {
+                root.deploymentTargetSeatId = prompt.targetSeatId
+                root.deployUnitId = prompt.unitId || ""
+                root.deploymentState = "awaiting"
+                root.deploymentNotice = prompt.message || "请为待部署战位选择位置"
+            } else {
+                root.deploymentTargetSeatId = ""
+                root.deployUnitId = ""
+                root.deploymentState = "waiting"
+                root.deploymentNotice = prompt.message || "等待本方指挥官部署"
+            }
+        }
+        function onOnlineSeatsChanged() {
+            root.reconcileDeploymentState()
+            root.refreshUnitNameDraft()
+            root.refreshUnitSpeedDraft()
+            if (root.commanderPointSelectionActive && !root.seatForUnit(root.selectedUnitId)) {
+                commanderCommandPanel.mapSelectionCanceled()
+                root.cancelCommanderPointSelection()
+            }
+        }
+        function onOnlineStateChanged() {
+            if (root.controller.onlineStage === "login") root.controller.requestOnlineRooms()
+            if (root.controller.onlineStage === "seatSelect"
+                    && root.controller.currentSeatId === ""
+                    && (root.selectedUnitId !== "" || root.deployUnitId !== "")) {
+                root.resetRoundViewState()
+            }
+            root.refreshUnitNameDraft()
+            root.refreshUnitSpeedDraft()
+            if (root.exitRequestPending && root.controller.onlineStage === "roomSelect") {
+                root.exitRequestPending = false
+                root.switchSeatSelection = false
+                root.switchRequestPending = false
+                root.deploymentNotice = "已退出房间，正在刷新房间目录。"
+            }
+            if (root.switchSeatSelection && root.controller.onlineStage === "roomSelect") {
+                root.switchSeatSelection = false
+                root.switchRequestPending = false
+                root.switchTargetSeatId = ""
+            }
+        }
+        function onUnitsForward() {
+            if (root.attackTargetId && !root.controller.unitAt(root.attackTargetId)) {
+                root.attackTargetId = ""
+            }
+            root.refreshUnitNameDraft()
+            root.refreshUnitSpeedDraft()
+        }
+        function onRoomStateChanged() {
+            var phase = root.controller.matchPhase
+            if (phase === "preparing" && root.observedMatchPhase !== ""
+                    && root.observedMatchPhase !== "preparing") {
+                root.resetRoundViewState()
+                root.deploymentNotice = "新一局已准备，请重新选择战位并部署单位。"
+            }
+            root.observedMatchPhase = phase
+        }
+        function onErrorForward(message) {
+            if (root.exitRequestPending) {
+                root.exitRequestPending = false
+                root.deploymentNotice = "退出请求被服务器拒绝，当前战位保持不变。"
+            }
+            if (root.switchRequestPending) {
+                root.switchRequestPending = false
+                root.switchSeatSelection = false
+                root.switchTargetSeatId = ""
+                root.deploymentNotice = "切换请求被服务器拒绝，当前战位保持不变。"
+            }
+        }
+        function onEventForward(title, body) {
+            if (title === "联网房间" && body) root.deploymentNotice = body
+        }
+        function onTransferEventReceived(event) {
+            if (!root.switchSeatSelection || !event
+                    || event.sourceSeatId !== root.switchSourceSeatId
+                    || event.targetSeatId !== root.switchTargetSeatId) return
+            if (event.kind === "transferRequested") {
+                root.switchRequestPending = true
+                root.deploymentNotice = "切换请求已送达，等待本方指挥官确认。"
+            } else if (event.kind === "transferCompleted") {
+                root.switchSeatSelection = false
+                root.switchRequestPending = false
+                root.deploymentNotice = "服务器已确认战位切换。"
+            } else if (event.kind === "transferRejected") {
+                root.switchSeatSelection = false
+                root.switchRequestPending = false
+                root.switchTargetSeatId = ""
+                root.deploymentNotice = "服务器未批准战位切换，当前战位保持不变。"
+            }
+        }
+        function onIntelShareReceived(share) {
+            if (!share) return
+            var source = root.seatById(share.senderSeatId)
+            var target = root.controller.unitAt(share.targetId)
+            var sourceLabel = source ? root.seatLabel(source) : (share.senderSeatId || "友方战位")
+            var targetLabel = target && target.callsign ? target.callsign : (share.targetId || "未知目标")
+            root.deploymentNotice = sourceLabel + "共享敌情 · " + targetLabel
+        }
+    }
+
+    Component.onCompleted: {
+        root.observedMatchPhase = root.controller.matchPhase
+        if (root.controller.onlineStage === "login") root.controller.requestOnlineRooms()
+        root.refreshUnitNameDraft()
+        root.refreshUnitSpeedDraft()
+    }
+
+    Dialog {
+        id: switchSeatConfirmation
+        anchors.centerIn: parent
+        modal: true
+        title: "切换战位"
+        closePolicy: Popup.CloseOnEscape
+        standardButtons: Dialog.Cancel | Dialog.Ok
+        background: Rectangle { color: root.panelAlt; border.color: root.line; radius: AppContext.radius }
+        contentItem: Item {
+            Accessible.name: "确认切换战位"
+            implicitWidth: 280
+            implicitHeight: switchSeatMessage.implicitHeight
+
+            Text {
+                id: switchSeatMessage
+                anchors.left: parent.left
+                anchors.right: parent.right
+                text: "选择目标战位后，当前战位会保持不变，直到本方指挥官确认。"
+                color: root.ink
+                wrapMode: Text.WordWrap
+            }
+        }
+        onAccepted: root.startSwitchSeatSelection()
+    }
+
+    Dialog {
+        id: exitRoomConfirmation
+        anchors.centerIn: parent
+        modal: true
+        title: "退出房间"
+        closePolicy: Popup.CloseOnEscape
+        standardButtons: Dialog.NoButton
+        enter: Transition {
+            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppContext.stateMotion }
+            NumberAnimation { property: "scale"; from: 0.97; to: 1; duration: AppContext.stateMotion; easing.type: Easing.OutCubic }
+        }
+        exit: Transition {
+            NumberAnimation { property: "opacity"; from: 1; to: 0; duration: AppContext.fastMotion }
+        }
+        background: Rectangle { color: root.panelAlt; border.color: root.orange; radius: AppContext.radius }
+        contentItem: Item {
+            Accessible.name: "确认退出当前房间"
+            implicitWidth: 280
+            implicitHeight: exitRoomMessage.implicitHeight
+
+            Text {
+                id: exitRoomMessage
+                anchors.left: parent.left
+                anchors.right: parent.right
+                text: "退出后将释放当前战位并返回房间目录。当前登录身份会保留。"
+                color: root.ink
+                wrapMode: Text.WordWrap
+            }
+        }
+        footer: DialogButtonBox {
+            spacing: 8
+            padding: 10
+            background: Rectangle { color: root.panel; radius: AppContext.radius }
+            GhostButton {
+                text: "留在房间"
+                Accessible.name: "取消退出并留在当前房间"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                onClicked: exitRoomConfirmation.reject()
+            }
+            TonalButton {
+                text: "确认退出"
+                base: root.orange
+                Accessible.name: "确认退出当前房间"
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+                onClicked: exitRoomConfirmation.accept()
+            }
+        }
+        onAccepted: {
+            root.exitRequestPending = true
+            root.deploymentNotice = "退出请求已提交，等待服务器确认。"
+            root.controller.leaveOnlineRoom()
+        }
+    }
+
+    ColumnLayout {
+        anchors.fill: parent; anchors.margins: 18; spacing: 14
+            RowLayout {
+                Layout.fillWidth: true; Layout.preferredHeight: 54; spacing: 14
+                ColumnLayout { Layout.fillWidth: true; spacing: 2
+                Text { Layout.fillWidth: true; text: root.controller.onlineStage === "roomSelect" ? "选择推演房间" : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? "选择战位" : "联网实战席"; color: root.ink; font.pixelSize: root.compactLayout ? 20 : 23; font.bold: true; elide: Text.ElideRight }
+                Text { Layout.fillWidth: true; text: root.controller.currentRoomId ? root.controller.currentRoomId : "选择准备中的房间"; color: root.dim; font.pixelSize: 12; elide: Text.ElideRight }
+            }
+            Rectangle { Layout.preferredWidth: root.compactLayout ? 148 : 180; Layout.preferredHeight: 34; color: root.panelAlt; border.color: root.line; radius: 5
+                RowLayout { anchors.fill: parent; anchors.margins: 8; spacing: 8
+                    Rectangle { Layout.preferredWidth: 8; Layout.preferredHeight: 8; radius: 4; color: root.controller.networkState === "connected" ? root.cyan : root.orange }
+                    Text { Layout.fillWidth: true; text: root.controller.networkState === "connected" ? ("数据面 · " + root.controller.dataPlaneName) : root.controller.networkStatus; color: root.dim; font.pixelSize: 10; elide: Text.ElideRight }
+                }
+            }
+        }
+
+        Rectangle {
+            visible: root.controller.onlineStage === "deployment" || root.controller.onlineStage === "battle"
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? 42 : 0
+            color: root.panel
+            border.color: root.line
+            radius: 6
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 14
+                anchors.rightMargin: 14
+                spacing: 12
+                Rectangle {
+                    Layout.preferredWidth: 8; Layout.preferredHeight: 8; radius: 4
+                    color: root.controller.matchPhase === "running" ? root.cyan : root.orange
+                    Behavior on color { ColorAnimation { duration: 220 } }
+                }
+                Text {
+                    text: root.controller.matchPhase === "running" ? "推演执行中" : root.controller.matchPhase === "finished" ? "推演已结束" : "部署准备阶段"
+                    color: root.ink; font.pixelSize: 11; font.bold: true
+                }
+                Item { Layout.fillWidth: true }
+                Text {
+                    visible: root.isCommander && root.controller.matchPhase === "preparing"
+                    text: "待部署 " + root.pendingDeploymentSeats().length
+                    color: root.pendingDeploymentSeats().length > 0 ? root.orange : root.cyan
+                    font.pixelSize: 10; font.bold: true
+                }
+                Text {
+                    text: "战位 " + root.controller.currentSeatId
+                    color: root.dim; font.pixelSize: 10; font.family: "Consolas"
+                }
+            }
+            Behavior on opacity { NumberAnimation { duration: 220 } }
+        }
+
+        StackLayout { id: stages; Layout.fillWidth: true; Layout.fillHeight: true; currentIndex: root.controller.onlineStage === "roomSelect" ? 0 : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? 1 : 2
+            Item {
+                ColumnLayout { anchors.centerIn: parent; width: Math.min(parent.width - 40, 760); spacing: 14
+                    Text { text: "可用推演室"; color: root.ink; font.pixelSize: 16; font.bold: true }
+                    ListView { id: roomList; Layout.fillWidth: true; Layout.preferredHeight: Math.min(430, Math.max(130, contentHeight)); spacing: 8; model: root.orderedRooms(); clip: true
+                    delegate: Button { id: roomDelegate; required property var modelData; required property int index; width: roomList.width; height: 72; padding: 0; hoverEnabled: true; focusPolicy: Qt.TabFocus; enabled: root.roomCanJoin(roomDelegate.modelData); Accessible.name: (enabled ? "进入" : roomDelegate.modelData.hostedByGameServer === true ? "不可进入" : "未托管，不可进入") + roomDelegate.modelData.name; onClicked: root.controller.joinOnlineRoom(roomDelegate.modelData.roomId)
+                            Component.onCompleted: if (roomDelegate.index === 0) Qt.callLater(roomDelegate.forceActiveFocus)
+                            contentItem: RowLayout { anchors.fill: parent; anchors.margins: 14; spacing: 14
+                                Rectangle { Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: 18; color: roomDelegate.modelData.status === "running" ? root.panelAlt : root.panel
+                                    Text { anchors.centerIn: parent; text: roomDelegate.modelData.status === "running" ? "战" : "室"; color: root.cyan; font.bold: true }
+                                }
+                                ColumnLayout { Layout.fillWidth: true; spacing: 2
+                                    Text { Layout.fillWidth: true; text: roomDelegate.modelData.name; color: root.ink; font.bold: true; font.pixelSize: 14; elide: Text.ElideRight }
+                                    Text { Layout.fillWidth: true; text: roomDelegate.modelData.roomId; color: root.dim; font.family: "Consolas"; font.pixelSize: 11; elide: Text.ElideRight }
+                                }
+                                ColumnLayout { spacing: 2
+                                    Text { text: root.roomStatusLabel(roomDelegate.modelData.status); color: root.roomStatusColor(roomDelegate.modelData.status); font.pixelSize: 11; font.bold: true }
+                                    Text { text: roomDelegate.modelData.hostedByGameServer === true ? "可进入" : "未托管"; color: root.dim; font.pixelSize: 9 }
+                                }
+                            }
+                            background: Rectangle { color: roomDelegate.down ? root.page : roomDelegate.hovered ? root.panelAlt : root.panel; border.color: roomDelegate.hovered || roomDelegate.visualFocus ? root.cyan : root.line; radius: 6 }
+                        }
+                    }
+                    Text { visible: roomList.count === 0; text: "暂无房间"; color: root.dim; font.pixelSize: 11; Layout.alignment: Qt.AlignHCenter }
+                    Button { id: refreshRoomsButton; Layout.alignment: Qt.AlignHCenter; text: "刷新"
+                        onClicked: root.controller.requestOnlineRooms()
+                        contentItem: Text { text: refreshRoomsButton.text; color: root.cyan; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        background: Rectangle { color: "transparent"; border.color: root.line; radius: 4 }
+                    }
+                }
+            }
+            Item {
+                ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: 12
+                    RowLayout { Layout.fillWidth: true
+                        Text { text: root.switchSeatSelection ? "申请切换战位" : "房间战位"; color: root.ink; font.pixelSize: 16; font.bold: true }
+                        Item { Layout.fillWidth: true }
+                        Button { id: backToRoomsButton; text: root.switchSeatSelection ? "取消切换" : root.controller.leaveRoomPending ? "正在退出…" : "退出房间"; enabled: !root.switchRequestPending && !root.controller.leaveRoomPending; Accessible.name: text; onClicked: root.switchSeatSelection ? root.cancelSwitchSeatSelection() : exitRoomConfirmation.open()
+                            contentItem: Text { text: backToRoomsButton.text; color: root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            background: Rectangle { color: "transparent"; border.color: root.line; radius: 4 }
+                        }
+                    }
+                    Text { text: root.switchSeatSelection ? (root.switchRequestPending ? "请求已提交，当前战位仍有效，等待本方指挥官确认。" : "当前战位保持不变。仅可申请本方非指挥官战位。") : root.isRoomEmpty() ? "空房间：请先选择红方指挥官。" : "红方指挥官优先，随后选择蓝方指挥官。"; color: root.isRoomEmpty() || root.switchSeatSelection ? root.orange : root.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                    GridLayout { Layout.fillWidth: true; Layout.fillHeight: true; columns: width > 900 ? 2 : 1; columnSpacing: 14; rowSpacing: 14
+                        Repeater { model: ["red", "blue"]
+                            delegate: Rectangle { id: sidePanel; required property string modelData; Layout.fillWidth: true; Layout.fillHeight: true; color: root.panel; border.color: sidePanel.modelData === "red" ? root.danger : root.info; radius: 6
+                            ColumnLayout { anchors.fill: parent; anchors.margins: 14; spacing: 8
+                                Text { text: sidePanel.modelData === "red" ? "红方战位" : "蓝方战位"; color: sidePanel.modelData === "red" ? root.danger : root.info; font.bold: true; font.pixelSize: 14 }
+                                ListView { id: seatList; Layout.fillWidth: true; Layout.fillHeight: true; spacing: 6; clip: true; model: root.seatsForSide(sidePanel.modelData)
+                                    delegate: Rectangle { id: seatDelegate
+                                        required property var modelData
+                                        width: seatList.width; height: 58
+                                        color: seatDelegate.modelData.occupied ? root.panelAlt : root.page
+                                        border.color: seatDelegate.modelData.occupied ? root.line : root.canClaimSeat(seatDelegate.modelData) ? root.cyan : root.line
+                                        radius: 5
+                                        RowLayout { anchors.fill: parent; anchors.margins: 10; spacing: 10
+                                            Rectangle { Layout.preferredWidth: 3; Layout.preferredHeight: 28; radius: 2; color: root.seatStatusColor(seatDelegate.modelData) }
+                                            ColumnLayout { Layout.fillWidth: true; spacing: 2
+                                                Text { Layout.fillWidth: true; text: root.seatLabel(seatDelegate.modelData); color: root.ink; font.pixelSize: 11; font.bold: true; elide: Text.ElideRight }
+                                                Text { Layout.fillWidth: true; text: seatDelegate.modelData.occupied && seatDelegate.modelData.selectedTemplate ? (root.seatHint(seatDelegate.modelData) + " · " + seatDelegate.modelData.selectedTemplate) : root.seatHint(seatDelegate.modelData); color: root.dim; font.pixelSize: 9; elide: Text.ElideRight }
+                                            }
+                                            Text { text: root.seatStatusLabel(seatDelegate.modelData); color: root.seatStatusColor(seatDelegate.modelData); font.pixelSize: 9; font.bold: true }
+                                            Button { id: claimSeatButton; visible: !seatDelegate.modelData.occupied; enabled: root.canClaimSeat(seatDelegate.modelData); text: root.switchSeatSelection ? "申请" : "进入"; onClicked: root.requestSeat(seatDelegate.modelData)
+                                                Component.onCompleted: if (claimSeatButton.enabled) Qt.callLater(claimSeatButton.forceActiveFocus)
+                                                onEnabledChanged: if (enabled) Qt.callLater(claimSeatButton.forceActiveFocus)
+                                                contentItem: Text { text: claimSeatButton.text; color: claimSeatButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
+                                                background: Rectangle { color: claimSeatButton.enabled ? root.cyan : root.panelAlt; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
+                                            }
+                                        }
+                                        Behavior on border.color { ColorAnimation { duration: 180 } }
+                                    }
+                                }
+                            }
+                            }
+                        }
+                    }
+                }
+            }
+            Item {
+                    GridLayout { id: battleLayout; anchors.fill: parent; columns: root.compactLayout ? 1 : 2; columnSpacing: 12; rowSpacing: 12
+                    Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 420; Layout.preferredWidth: root.compactLayout ? -1 : Math.max(420, battleLayout.width - 368); Layout.minimumHeight: root.compactLayout ? 250 : 0; Layout.preferredHeight: root.compactLayout ? Math.max(260, battleLayout.height * 0.52) : -1; color: root.panel; border.color: root.line; radius: 6
+                        MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.currentSeatSide || "red"; showAllSides: false; visibleUnitIds: root.deployedUnitIds(); detectedEnemyIds: root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: true; showCommRange: root.showCommunicationRange; showDetectRange: root.showDetectionRange; showAttackRange: root.showAttackRange; rangeUnitIds: root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.participantMapMarkers(); selectedMapMarkerId: root.selectedCommandMarkerId
+                            onClickedMap: function(point) {
+                                if (root.canDeploy) {
+                                    root.controller.deployOnlineUnit(root.deployUnitId, point)
+                                    root.deploymentState = "submitting"
+                                    root.deploymentNotice = "部署位置已提交，等待服务器确认"
+                                    onlineCanvas.pulseActionAt(point, root.cyan)
+                                } else if (root.isCommander && root.controller.matchPhase === "running" && root.selectedUnitId) {
+                                    root.deploymentNotice = "请在右侧指挥面板选择命令并确认下达。"
+                                } else if (!root.isCommander && root.controller.matchPhase === "running" && root.selectedUnitId) {
+                                    root.controller.command("moveTo", {"unitId": root.selectedUnitId, "pos": point})
+                                    onlineCanvas.pulseActionAt(point, root.cyan)
+                                }
+                            }
+                            onRightClickedMap: function(point) {
+                                if (root.controller.matchPhase === "running") {
+                                    var recipients = root.mapMarkRecipientSeats()
+                                    root.controller.markOnlineMap(point,
+                                        root.isCommander ? "指挥标点" : "我的标点",
+                                        recipients)
+                                    onlineCanvas.pulseActionAt(point,
+                                        root.isCommander ? AppContext.markCommander : AppContext.markSelf)
+                                    root.deploymentNotice = root.isCommander
+                                        ? "指挥标点已提交 · 接收战位 " + recipients.length
+                                        : "我的标点已更新 · 旧标点已替换"
+                                }
+                            }
+                            onUnitClicked: function(unitId, button) {
+                                var unit = root.controller.unitAt(unitId)
+                                if (!unit) return
+                                if (unit.side === root.controller.currentSeatSide) {
+                                    root.selectUnit(unit)
+                                } else if (root.isCommander && commanderCommandPanel.awaitingAttackTarget) {
+                                    commanderCommandPanel.mapTargetSelected(unitId)
+                                    root.deploymentNotice = "已选中攻击目标 · " + (unit.callsign || unit.id)
+                                } else if (root.controller.currentSeatType === "attack") {
+                                    root.selectAttackTarget(unitId)
+                                } else if (root.controller.currentSeatType === "recon" && button === "right") {
+                                    root.controller.shareOnlineIntel(unitId, root.recipientSeats(), "地图标记敌情")
+                                }
+                            }
+                            onGuideSourceChanged: function(unitId) {
+                                var unit = root.controller.unitAt(unitId)
+                                if (unit) root.selectUnit(unit)
+                            }
+                            onGuidePointPicked: function(point) {
+                                if (!root.commanderPointSelectionActive) return
+                                root.commanderPointSelectionActive = false
+                                onlineCanvas.stopGuideMode()
+                                commanderCommandPanel.mapPointSelected(point)
+                                onlineCanvas.pulseActionAt(point, root.cyan)
+                            }
+                            onGuideCancelled: {
+                                if (!root.commanderPointSelectionActive) return
+                                root.commanderPointSelectionActive = false
+                                commanderCommandPanel.mapSelectionCanceled()
+                                root.deploymentNotice = "已取消地图选点，未发送命令。"
+                            }
+                            onMapMarkerClicked: function(marker) {
+                                if (!root.isCommander && marker && marker.category === "command")
+                                    root.selectedCommandMarkerId = marker.id || ""
+                            }
+                            Rectangle {
+                                visible: root.selectedCommandMarkerId.length > 0
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.bottom: parent.bottom
+                                anchors.bottomMargin: 14
+                                z: 70
+                                width: Math.min(parent.width - 24, markerActionRow.implicitWidth + 20)
+                                height: markerActionRow.implicitHeight + 14
+                                color: root.panelAlt
+                                border.color: root.cyan
+                                radius: 5
+                                RowLayout {
+                                    id: markerActionRow
+                                    anchors.centerIn: parent
+                                    spacing: 8
+                                    Text { text: "已选中命令标点"; color: root.ink; font.pixelSize: 10 }
+                                    Button {
+                                        id: dismissMarkerButton
+                                        text: "隐藏标点"
+                                        onClicked: root.dismissSelectedCommandMarker()
+                                        contentItem: Text { text: dismissMarkerButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
+                                        background: Rectangle { color: root.cyan; radius: 4 }
+                                    }
+                                    Button {
+                                        id: closeMarkerSelectionButton
+                                        text: "关闭"
+                                        onClicked: root.selectedCommandMarkerId = ""
+                                        contentItem: Text { text: closeMarkerSelectionButton.text; color: root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                        background: Rectangle { color: root.panel; border.color: root.line; radius: 4 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle { Layout.fillWidth: root.compactLayout; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 332; Layout.minimumHeight: root.compactLayout ? 300 : 0; Layout.preferredWidth: root.compactLayout ? -1 : 356; Layout.preferredHeight: root.compactLayout ? Math.max(300, battleLayout.height * 0.48) : -1; color: root.panel; border.color: root.line; radius: 6
+                        ScrollView { id: commandScroll; anchors.fill: parent; anchors.margins: 14; clip: true; contentWidth: availableWidth; contentHeight: commandColumn.implicitHeight
+                        ColumnLayout { id: commandColumn; width: commandScroll.availableWidth; spacing: 10
+                            RowLayout { Layout.fillWidth: true; spacing: 8
+                                Text { Layout.fillWidth: true; text: (root.controller.currentSeatSide === "red" ? "红方" : "蓝方") + " · " + (root.controller.currentSeatType === "commander" ? "指挥官" : root.controller.currentSeatType === "attack" ? "攻击机" : root.controller.currentSeatType === "recon" ? "侦察机" : root.controller.currentSeatType === "ground" ? "地面单位" : "干扰机"); color: root.ink; font.bold: true; font.pixelSize: 15; elide: Text.ElideRight }
+                                Text { text: root.controller.matchPhase === "running" ? "推演中" : root.controller.matchPhase === "finished" ? "已结束" : "准备阶段"; color: root.controller.matchPhase === "running" ? root.cyan : root.orange; font.pixelSize: 10; font.bold: true }
+                            }
+                            RowLayout { Layout.fillWidth: true; spacing: 8
+                                Item { Layout.fillWidth: true }
+                                Button { id: switchSeatButton; text: "切换战位"; visible: root.controller.currentSeatType !== "commander" && root.controller.matchPhase === "preparing"; enabled: !root.switchRequestPending; onClicked: switchSeatConfirmation.open()
+                                    contentItem: Text { text: switchSeatButton.text; color: root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    background: Rectangle { color: switchSeatButton.hovered ? root.panelAlt : "transparent"; border.color: root.line; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
+                                }
+                                Button { id: exitRoomButton; text: root.controller.leaveRoomPending ? "正在退出…" : "退出房间"; enabled: !root.controller.leaveRoomPending; Accessible.name: text; onClicked: exitRoomConfirmation.open()
+                                    contentItem: Text { text: exitRoomButton.text; color: root.orange; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    background: Rectangle { color: exitRoomButton.hovered ? root.panelAlt : "transparent"; border.color: root.orange; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
+                                }
+                            }
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Rectangle {
+                                    visible: !root.isCommander
+                                    Layout.preferredWidth: 10; Layout.preferredHeight: 10; radius: 5
+                                    color: root.communicationColor()
+                                }
+                                Text { text: root.isCommander ? "指挥官通信" : "指挥链路"; color: root.dim; font.pixelSize: 10 }
+                                Text {
+                                    visible: !root.isCommander
+                                    Layout.fillWidth: true
+                                    text: root.communicationLabel()
+                                    color: root.communicationColor(); font.pixelSize: 10; font.bold: true
+                                    Accessible.name: "指挥链路状态：" + text
+                                }
+                                Item { visible: root.isCommander; Layout.fillWidth: true }
+                                Button {
+                                    id: openInboxButton
+                                    visible: root.isCommander
+                                    text: "实时收件箱 · " + root.controller.chatMessages.length
+                                    Accessible.name: "打开指挥官实时通信收件箱"
+                                    onClicked: root.openChatRequested()
+                                    contentItem: Text { text: openInboxButton.text; color: root.cyan; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 9 }
+                                    background: Rectangle { color: openInboxButton.hovered ? root.panelAlt : "transparent"; border.color: root.line; radius: 4 }
+                                }
+                            }
+                            ColumnLayout {
+                                visible: root.controller.matchPhase === "running"
+                                         && root.visibleMapMarkFeed().length > 0
+                                Layout.fillWidth: true
+                                spacing: 6
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Text { Layout.fillWidth: true; text: "战术标点"; color: root.ink; font.pixelSize: 11; font.bold: true }
+                                    Text { text: root.visibleMapMarkFeed().length + " 个"; color: root.dim; font.pixelSize: 9 }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 14
+                                    RowLayout { spacing: 5
+                                        Rectangle { Layout.preferredWidth: 42; Layout.preferredHeight: 18; radius: 3; color: "transparent"; border.color: AppContext.markSelf
+                                            Text { anchors.centerIn: parent; text: root.isCommander ? "下属点" : "我的点"; color: AppContext.markSelf; font.pixelSize: 9; font.bold: true }
+                                        }
+                                    }
+                                    RowLayout { spacing: 5
+                                        Rectangle { Layout.preferredWidth: 52; Layout.preferredHeight: 18; radius: 3; color: AppContext.markCommander; border.color: AppContext.markCommander
+                                            Text { anchors.centerIn: parent; text: "指挥令"; color: root.page; font.pixelSize: 9; font.bold: true }
+                                        }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+                                ListView {
+                                    id: mapMarkList
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: Math.min(152, Math.max(38, contentHeight))
+                                    model: root.visibleMapMarkFeed()
+                                    clip: true; spacing: 0
+                                    delegate: Item {
+                                        id: mapMarkDelegate
+                                        required property var modelData
+                                        width: mapMarkList.width; height: 38
+                                        property bool commanderMark: modelData.markType === "commander"
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 2; anchors.rightMargin: 2
+                                            spacing: 8
+                                            Rectangle {
+                                                Layout.preferredWidth: mapMarkDelegate.commanderMark ? 52 : 42
+                                                Layout.preferredHeight: 20
+                                                radius: 3
+                                                color: mapMarkDelegate.commanderMark ? AppContext.markCommander : "transparent"
+                                                border.color: mapMarkDelegate.commanderMark ? AppContext.markCommander : AppContext.markSelf
+                                                Text { anchors.centerIn: parent; text: mapMarkDelegate.commanderMark ? "指挥令" : (root.isCommander ? "下属点" : "我的点"); color: mapMarkDelegate.commanderMark ? root.page : AppContext.markSelf; font.pixelSize: 9; font.bold: true }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true; spacing: 1
+                                                Text { Layout.fillWidth: true; text: root.mapMarkRoleLabel(mapMarkDelegate.modelData); color: root.ink; font.pixelSize: 9; font.bold: true; elide: Text.ElideRight }
+                                                Text { Layout.fillWidth: true; text: root.mapMarkCoordinate(mapMarkDelegate.modelData); color: root.dim; font.pixelSize: 9; font.family: "Consolas"; elide: Text.ElideRight }
+                                            }
+                                            Text { text: mapMarkDelegate.modelData.time ? new Date(mapMarkDelegate.modelData.time).toLocaleTimeString(Qt.locale(), "HH:mm") : ""; color: root.dim; font.pixelSize: 8 }
+                                        }
+                                        Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: root.line; opacity: 0.7 }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                visible: !root.isCommander
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? subordinateComposer.implicitHeight + 16 : 0
+                                color: root.panelAlt; border.color: root.subordinateCanSend() ? root.line : root.orange; radius: 5
+                                ColumnLayout {
+                                    id: subordinateComposer
+                                    anchors.fill: parent; anchors.margins: 8; spacing: 6
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 6
+                                        TextField {
+                                            id: subordinateMessageInput
+                                            Layout.fillWidth: true
+                                            text: root.subordinateMessageDraft
+                                            onTextEdited: root.subordinateMessageDraft = text
+                                            placeholderText: root.subordinateCanSend() ? "发送给本方指挥官" : "当前无法发送"
+                                            maximumLength: 500; selectByMouse: true
+                                            enabled: root.subordinateCanSend()
+                                            color: root.ink
+                                            Accessible.name: "发送给本方指挥官的消息"
+                                            background: Rectangle { color: root.page; border.color: subordinateMessageInput.activeFocus ? root.cyan : root.line; radius: 4 }
+                                            onAccepted: sendCommanderMessageButton.clicked()
+                                        }
+                                        Button {
+                                            id: sendCommanderMessageButton
+                                            text: "发送"
+                                            enabled: root.subordinateCanSend() && root.subordinateMessageDraft.trim().length > 0
+                                            Accessible.name: "发送给本方指挥官"
+                                            onClicked: {
+                                                root.controller.sendChat(root.subordinateMessageDraft.trim(), [root.commanderSeatId()])
+                                                root.subordinateMessageDraft = ""
+                                            }
+                                            contentItem: Text { text: sendCommanderMessageButton.text; color: sendCommanderMessageButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
+                                            background: Rectangle { color: sendCommanderMessageButton.enabled ? root.cyan : root.line; radius: 4 }
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.controller.matchPhase === "preparing" ? "准备阶段可直接联系指挥官"
+                                            : root.subordinateCanSend() ? "双向通信可用"
+                                            : "运行阶段仅在双向通信时可发送"
+                                        color: root.subordinateCanSend() ? root.dim : root.orange
+                                        font.pixelSize: 9; elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                visible: root.isCommander && root.controller.matchPhase === "preparing"
+                                         && (root.controller.pendingSeatTransfers.length > 0
+                                             || root.pendingRedeploySeats().length > 0)
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? transferColumn.implicitHeight + 18 : 0
+                                color: root.panelAlt; border.color: root.orange; radius: 5
+                                ColumnLayout {
+                                    id: transferColumn
+                                    anchors.fill: parent; anchors.margins: 9; spacing: 8
+                                    Text { text: "待处理申请"; color: root.ink; font.pixelSize: 12; font.bold: true }
+                                    Repeater {
+                                        model: root.controller.pendingSeatTransfers
+                                        delegate: ColumnLayout {
+                                            id: transferDelegate
+                                            required property var modelData
+                                            Layout.fillWidth: true; spacing: 6
+                                            property var sourceSeat: root.seatById(modelData.sourceSeatId) || ({})
+                                            Text { Layout.fillWidth: true; text: (parent.sourceSeat.displayName || "用户 " + parent.modelData.userId) + " 申请切换"; color: root.ink; font.pixelSize: 10; elide: Text.ElideRight }
+                                            Text { Layout.fillWidth: true; text: parent.modelData.sourceSeatId + "  ->  " + parent.modelData.targetSeatId; color: root.dim; font.pixelSize: 9; elide: Text.ElideMiddle }
+                                            RowLayout {
+                                                Layout.fillWidth: true; spacing: 8
+                                                Button { id: rejectTransferButton; Layout.fillWidth: true; text: "拒绝"; onClicked: root.controller.rejectSeatTransfer(transferDelegate.modelData.userId, transferDelegate.modelData.revision)
+                                                    contentItem: Text { text: rejectTransferButton.text; color: root.danger; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                    background: Rectangle { color: rejectTransferButton.hovered ? root.panel : "transparent"; border.color: root.danger; radius: 4 }
+                                                }
+                                                Button { id: approveTransferButton; Layout.fillWidth: true; text: "批准"; onClicked: root.controller.approveSeatTransfer(transferDelegate.modelData.userId, transferDelegate.modelData.revision)
+                                                    contentItem: Text { text: approveTransferButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
+                                                    background: Rectangle { color: approveTransferButton.hovered ? Qt.lighter(root.cyan, 1.08) : root.cyan; radius: 4 }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Repeater {
+                                        model: root.pendingRedeploySeats()
+                                        delegate: RowLayout {
+                                            id: redeployRequestDelegate
+                                            required property var modelData
+                                            Layout.fillWidth: true; spacing: 8
+                                            Text { Layout.fillWidth: true; text: root.seatLabel(redeployRequestDelegate.modelData) + " 申请重新部署"; color: root.ink; font.pixelSize: 10; elide: Text.ElideRight }
+                                            Button { id: approveRedeployButton; text: "重新部署"; Accessible.name: "批准" + root.seatLabel(redeployRequestDelegate.modelData) + "重新部署"; onClicked: root.controller.redeployOnlineUnit(redeployRequestDelegate.modelData.seatId)
+                                                contentItem: Text { text: approveRedeployButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
+                                                background: Rectangle { color: approveRedeployButton.hovered ? Qt.lighter(root.cyan, 1.08) : root.cyan; radius: 4 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                visible: root.controller.matchPhase === "finished"
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? 58 : 0
+                                color: root.panelAlt; border.color: root.danger; radius: 5
+                                Column {
+                                    anchors.centerIn: parent; spacing: 4
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "推演已结束"; color: root.danger; font.pixelSize: 13; font.bold: true }
+                                }
+                            }
+                            CommandPanel {
+                                id: commanderCommandPanel
+                                visible: root.isCommander && root.controller.matchPhase === "running"
+                                Layout.fillWidth: true
+                                controller: root.controller
+                                selectedUnitId: root.selectedUnitId
+                                recipientSeatId: (root.seatForUnit(root.selectedUnitId) || {}).seatId || ""
+                                currentSide: root.controller.currentSeatSide
+                                page: root.page; ink: root.ink; dim: root.dim; panel: root.panel; panelAlt: root.panelAlt
+                                line: root.line; cyan: root.cyan; orange: root.orange; danger: root.danger
+                                onPointSelectionRequested: {
+                                    root.commanderPointSelectionActive = true
+                                    onlineCanvas.startGuideMode(root.selectedUnitId)
+                                    root.deploymentNotice = "地图选点中。按 Escape 或在右侧取消，不会发送命令。"
+                                }
+                                onPointSelectionCancelled: root.cancelCommanderPointSelection()
+                            }
+                            Rectangle {
+                                visible: !root.isCommander && root.controller.matchPhase === "running"
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? participantFeedColumn.implicitHeight + 18 : 0
+                                color: root.panelAlt; border.color: root.line; radius: 5
+                                ColumnLayout {
+                                    id: participantFeedColumn
+                                    anchors.fill: parent; anchors.margins: 9; spacing: 7
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text { Layout.fillWidth: true; text: "指挥命令"; color: root.ink; font.pixelSize: 12; font.bold: true }
+                                        Text { text: root.participantCommandFeed().length + " 条"; color: root.dim; font.pixelSize: 9 }
+                                    }
+                                    Text { visible: participantCommandList.count === 0; text: "暂无命令"; color: root.dim; font.pixelSize: 10 }
+                                    ListView {
+                                        id: participantCommandList
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Math.min(260, Math.max(0, contentHeight))
+                                        model: root.participantCommandFeed(); clip: true; spacing: 5
+                                        delegate: Rectangle {
+                                            id: participantCommandDelegate
+                                            required property var modelData
+                                            width: participantCommandList.width
+                                            height: commandDetails.implicitHeight + 14
+                                            color: root.page
+                                            border.color: participantCommandDelegate.modelData.status === "已拒绝" ? root.danger
+                                                : participantCommandDelegate.modelData.status === "待回执" ? root.orange : root.line
+                                            radius: 4
+                                            ColumnLayout {
+                                                id: commandDetails
+                                                anchors.fill: parent; anchors.margins: 7; spacing: 3
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    Text { text: root.commandKindLabel(participantCommandDelegate.modelData.kind); color: root.cyan; font.pixelSize: 10; font.bold: true }
+                                                    Text { Layout.fillWidth: true; text: participantCommandDelegate.modelData.source; color: root.dim; font.pixelSize: 9; elide: Text.ElideRight }
+                                                    Text { text: participantCommandDelegate.modelData.time ? new Date(participantCommandDelegate.modelData.time).toLocaleTimeString(Qt.locale(), "HH:mm:ss") : ""; color: root.dim; font.pixelSize: 9 }
+                                                }
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: participantCommandDelegate.modelData.kind === "text" ? participantCommandDelegate.modelData.text
+                                                        : participantCommandDelegate.modelData.kind === "attack" && !participantCommandDelegate.modelData.point ? ("目标 · " + root.targetLabel(participantCommandDelegate.modelData.targetId))
+                                                        : participantCommandDelegate.modelData.kind === "withdrawal" ? "已收到撤离通知"
+                                                        : participantCommandDelegate.modelData.point ? ("坐标 · X " + Math.round(participantCommandDelegate.modelData.point.x) + " / Y " + Math.round(participantCommandDelegate.modelData.point.y) + " m") : ""
+                                                    color: root.ink; font.pixelSize: 10; wrapMode: Text.WordWrap
+                                                }
+                                                Text { visible: participantCommandDelegate.modelData.status.length > 0; text: participantCommandDelegate.modelData.status; color: participantCommandDelegate.modelData.status === "已拒绝" ? root.danger : participantCommandDelegate.modelData.status === "待回执" ? root.orange : root.cyan; font.pixelSize: 9; font.bold: true }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                visible: root.controller.matchPhase === "preparing"
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? deploymentPanel.implicitHeight + 18 : 0
+                                color: "#111f2a"; border.color: root.deploymentState === "waiting" ? root.orange : root.line; radius: 5
+                                ColumnLayout { id: deploymentPanel; anchors.fill: parent; anchors.margins: 9; spacing: 7
+                                    RowLayout { Layout.fillWidth: true
+                                        Text { Layout.fillWidth: true; text: root.isCommander ? "部署队列" : "本战位部署"; color: root.ink; font.pixelSize: 11; font.bold: true }
+                                        Text { text: root.isCommander ? ("待处理 " + root.pendingDeploymentSeats().length) : root.seatStatusLabel(root.seatById(root.controller.currentSeatId) || ({})); color: root.isCommander ? root.orange : root.seatStatusColor(root.seatById(root.controller.currentSeatId) || ({})); font.pixelSize: 9; font.bold: true }
+                                    }
+                                    Text {
+                                        visible: !root.isCommander
+                                        Layout.fillWidth: true
+                                        text: root.deploymentState === "deployed" ? "部署位置已确认，可提交战位就绪。" : "等待本方指挥官在地图上分配位置。"
+                                        color: root.deploymentState === "deployed" ? root.cyan : root.orange
+                                        font.pixelSize: 10; wrapMode: Text.WordWrap
+                                    }
+                                    ListView {
+                                        id: deploymentQueue
+                                        visible: root.isCommander
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: visible ? Math.min(112, Math.max(34, contentHeight)) : 0
+                                        spacing: 5; clip: true
+                                        model: root.pendingDeploymentSeats()
+                                        delegate: Rectangle { id: deploymentDelegate
+                                            required property var modelData
+                                            width: deploymentQueue.width; height: 34; radius: 4
+                                            color: root.deploymentTargetSeatId === deploymentDelegate.modelData.seatId ? root.panelAlt : root.page
+                                            border.color: root.deploymentTargetSeatId === deploymentDelegate.modelData.seatId ? root.cyan : root.line
+                                            RowLayout { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 7
+                                                Text { Layout.fillWidth: true; text: root.seatLabel(deploymentDelegate.modelData); color: root.ink; font.pixelSize: 9; elide: Text.ElideRight }
+                                                Text { text: root.deploymentTargetSeatId === deploymentDelegate.modelData.seatId ? "选点中" : "选择"; color: root.deploymentTargetSeatId === deploymentDelegate.modelData.seatId ? root.cyan : root.dim; font.pixelSize: 9 }
+                                            }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectDeploymentSeat(deploymentDelegate.modelData) }
+                                            Behavior on color { ColorAnimation { duration: 150 } }
+                                        }
+                                    }
+                                    Text { visible: root.isCommander && root.pendingDeploymentSeats().length === 0; text: "本方已登录战位均已完成部署"; color: root.cyan; font.pixelSize: 10 }
+                                    Text { visible: root.isCommander; Layout.fillWidth: true; text: "红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + "  ·  蓝方 " + (root.controller.blueReady ? "已就绪" : "未就绪"); color: root.dim; font.pixelSize: 9 }
+                                    Button {
+                                        id: redeployButton
+                                        visible: root.isCommander
+                                        Layout.fillWidth: true
+                                        property var targetSeat: root.selectedFriendlySeat() || ({})
+                                        enabled: root.controller.matchPhase === "preparing"
+                                                 && targetSeat.deployed === true
+                                        text: enabled ? "重新部署选中单位" : "请选择已部署单位"
+                                        Accessible.name: enabled ? "重新部署" + root.seatLabel(targetSeat) : text
+                                        onClicked: root.controller.redeployOnlineUnit(targetSeat.seatId)
+                                        contentItem: Text { text: redeployButton.text; color: redeployButton.enabled ? root.orange : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                        background: Rectangle { color: root.panel; border.color: redeployButton.enabled ? root.orange : root.line; radius: 4 }
+                                    }
+                                }
+                                Behavior on border.color { ColorAnimation { duration: 180 } }
+                            }
+                            RowLayout {
+                                visible: root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander"
+                                Layout.fillWidth: true
+                                Text { Layout.fillWidth: true; text: root.isCommander ? "标点 / 情报接收战位" : "情报接收战位"; color: root.dim; font.pixelSize: 10 }
+                                Text { text: root.selectedRecipientIds.length + " 已选"; color: root.selectedRecipientIds.length > 0 ? root.cyan : root.orange; font.pixelSize: 9 }
+                            }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                CheckBox { id: communicationRangeToggle; text: "通信范围"; checked: root.showCommunicationRange; Accessible.name: "显示选中单位的通信范围"; onToggled: root.showCommunicationRange = checked
+                                    contentItem: Text { text: communicationRangeToggle.text; color: communicationRangeToggle.checked ? AppContext.rangeCommunication : root.dim; font.pixelSize: 10; leftPadding: 18; verticalAlignment: Text.AlignVCenter }
+                                    indicator: Rectangle { x: 1; anchors.verticalCenter: parent.verticalCenter; width: 13; height: 13; radius: 2; color: communicationRangeToggle.checked ? AppContext.rangeCommunication : root.page; border.color: root.line; Text { anchors.centerIn: parent; text: communicationRangeToggle.checked ? "✓" : ""; color: root.page; font.pixelSize: 9 } }
+                                }
+                                CheckBox { id: detectionRangeToggle; text: "探测范围"; checked: root.showDetectionRange; Accessible.name: "显示选中单位的探测范围"; onToggled: root.showDetectionRange = checked
+                                    contentItem: Text { text: detectionRangeToggle.text; color: detectionRangeToggle.checked ? AppContext.rangeDetection : root.dim; font.pixelSize: 10; leftPadding: 18; verticalAlignment: Text.AlignVCenter }
+                                    indicator: Rectangle { x: 1; anchors.verticalCenter: parent.verticalCenter; width: 13; height: 13; radius: 2; color: detectionRangeToggle.checked ? AppContext.rangeDetection : root.page; border.color: root.line; Text { anchors.centerIn: parent; text: detectionRangeToggle.checked ? "✓" : ""; color: root.page; font.pixelSize: 9 } }
+                                }
+                                CheckBox { id: attackRangeToggle; text: "攻击范围"; checked: root.showAttackRange; Accessible.name: "显示选中单位的攻击范围"; onToggled: root.showAttackRange = checked
+                                    contentItem: Text { text: attackRangeToggle.text; color: attackRangeToggle.checked ? AppContext.rangeAttack : root.dim; font.pixelSize: 10; leftPadding: 18; verticalAlignment: Text.AlignVCenter }
+                                    indicator: Rectangle { x: 1; anchors.verticalCenter: parent.verticalCenter; width: 13; height: 13; radius: 2; color: attackRangeToggle.checked ? AppContext.rangeAttack : root.page; border.color: root.line; Text { anchors.centerIn: parent; text: attackRangeToggle.checked ? "✓" : ""; color: root.page; font.pixelSize: 9 } }
+                                }
+                            }
+                            Flow {
+                                visible: root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander"
+                                Layout.fillWidth: true; spacing: 5
+                                Repeater {
+                                    model: root.controller.onlineSeats || []
+                                        delegate: CheckBox { id: recipientCheckBox
+                                            required property var modelData
+                                        visible: recipientCheckBox.modelData.occupied && recipientCheckBox.modelData.side === root.controller.currentSeatSide && recipientCheckBox.modelData.seatId !== root.controller.currentSeatId
+                                        text: root.seatLabel(recipientCheckBox.modelData)
+                                        checked: root.selectedRecipient(recipientCheckBox.modelData.seatId)
+                                        onToggled: root.toggleRecipient(recipientCheckBox.modelData.seatId, checked)
+                                        contentItem: Text { text: recipientCheckBox.text; color: recipientCheckBox.checked ? root.cyan : root.dim; font.pixelSize: 9; leftPadding: 18; verticalAlignment: Text.AlignVCenter }
+                                        indicator: Rectangle { x: 1; anchors.verticalCenter: parent.verticalCenter; width: 13; height: 13; radius: 2; color: recipientCheckBox.checked ? root.cyan : root.page; border.color: root.line; Text { anchors.centerIn: parent; text: recipientCheckBox.checked ? "✓" : ""; color: root.page; font.pixelSize: 9 } }
+                                    }
+                                }
+                            }
+                            Text { text: "已部署友方单位"; color: root.dim; font.pixelSize: 10 }
+                            Text { visible: root.deployedFriendlyUnits().length === 0; text: "当前没有已部署单位"; color: root.dim; font.pixelSize: 10 }
+                            ListView { id: friendlyUnitList; visible: count > 0; Layout.fillWidth: true; Layout.preferredHeight: visible ? Math.min(180, Math.max(38, contentHeight)) : 0; model: root.deployedFriendlyUnits(); clip: true; spacing: 4
+                                delegate: Rectangle { id: friendlyDelegate; required property var modelData; width: friendlyUnitList.width; height: 38; color: root.selectedUnitId === friendlyDelegate.modelData.id ? root.panelAlt : root.panel; border.color: root.selectedUnitId === friendlyDelegate.modelData.id ? root.cyan : "transparent"; radius: 4; visible: friendlyDelegate.modelData.alive
+                                    RowLayout { anchors.fill: parent; anchors.margins: 8
+                                        Text { Layout.fillWidth: true; text: friendlyDelegate.modelData.callsign || friendlyDelegate.modelData.id; color: root.ink; font.pixelSize: 10; elide: Text.ElideRight }
+                                        Text { text: friendlyDelegate.modelData.status || "在线"; color: root.selectedUnitId === friendlyDelegate.modelData.id ? root.cyan : root.dim; font.pixelSize: 9 }
+                                    }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectUnit(friendlyDelegate.modelData) }
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                }
+                            }
+                            UnitPanel {
+                                visible: root.selectedUnitId.length > 0
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? 300 : 0
+                                clip: true
+                                controller: root.controller
+                                editor: root.editor
+                                snap: root.selectedUnitSnapshot
+                                interactionEnabled: false
+                                Accessible.name: "选中友方单位详情"
+                            }
+                            ComboBox {
+                                id: intelTargetBox
+                                visible: (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander") && root.controller.matchPhase === "running"
+                                Layout.fillWidth: true
+                                model: root.controller.unitStateRevision >= 0
+                                    ? root.controller.detectedEnemyOptions(root.selectedUnitId, root.controller.currentSeatSide, root.controller.currentSeatSide === "red" ? "blue" : "red") : []
+                                textRole: "callsign"
+                                valueRole: "id"
+                                enabled: count > 0
+                                background: Rectangle { color: "#0b151c"; border.color: root.line; radius: 4 }
+                                contentItem: Text { text: intelTargetBox.currentText || "选择要共享的敌情"; color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; font.pixelSize: 10 }
+                            }
+                            Button { id: shareIntelButton; visible: root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander"; Layout.fillWidth: true; text: "共享选定敌情"; enabled: intelTargetBox.count > 0 && root.recipientSeats().length > 0
+                                onClicked: root.controller.shareOnlineIntel(intelTargetBox.currentValue, root.recipientSeats(), "手动共享敌情")
+                                contentItem: Text { text: shareIntelButton.text; color: root.cyan; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                background: Rectangle { color: shareIntelButton.enabled ? root.panelAlt : root.line; border.color: root.line; radius: 4 }
+                            }
+                            ComboBox {
+                                id: targetBox
+                                visible: root.controller.currentSeatType === "attack" && root.controller.matchPhase === "running"
+                                Layout.fillWidth: true
+                                model: root.controller.unitStateRevision >= 0
+                                    ? root.controller.detectedEnemyOptions(root.selectedUnitId, root.controller.currentSeatSide, root.controller.currentSeatSide === "red" ? "blue" : "red") : []
+                                textRole: "callsign"
+                                valueRole: "id"
+                                enabled: count > 0
+                                background: Rectangle { color: "#0b151c"; border.color: root.line; radius: 4 }
+                                contentItem: Text { text: root.controller.unitStateRevision >= 0 ? root.attackTargetLabel(targetBox.currentText) : (targetBox.currentText || "选择已掌握的敌方目标"); color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; font.pixelSize: 10 }
+                            }
+                            ColumnLayout {
+                                id: attackControl
+                                visible: root.controller.currentSeatType === "attack" && root.controller.matchPhase === "running"
+                                Layout.fillWidth: true; spacing: 5
+                                property var selectedAttackUnit: root.selectedUnitSnapshot
+                                property real cooldownRemaining: Number(selectedAttackUnit.cooldownRemaining || 0)
+                                property real cooldownSec: Math.max(0.001, Number(selectedAttackUnit.cooldownSec || 0.001))
+                                property bool servicing: Boolean(selectedAttackUnit.serviceRequested)
+                                property real serviceProgress: Math.max(0, Math.min(1,
+                                    Number(selectedAttackUnit.turnaroundProgress || selectedAttackUnit.serviceProgress || 0)))
+                                property int ammoRemaining: Number(selectedAttackUnit.ammoRemaining || 0)
+                                RowLayout {
+                                    visible: attackControl.servicing || attackControl.cooldownRemaining > 0
+                                    Layout.fillWidth: true
+                                    Text { text: attackControl.servicing ? "补给 / 再装填" : "射击冷却"; color: root.orange; font.pixelSize: 10; font.bold: true }
+                                    ProgressBar {
+                                        id: onlineCooldownProgress
+                                        Layout.fillWidth: true; from: 0; to: 1
+                                        value: attackControl.servicing ? attackControl.serviceProgress
+                                            : 1 - Math.max(0, Math.min(1, attackControl.cooldownRemaining / attackControl.cooldownSec))
+                                        Accessible.name: attackControl.servicing ? "攻击无人机补给再装填进度" : "攻击无人机射击冷却进度"
+                                        background: Rectangle { implicitHeight: 6; radius: 3; color: root.panelAlt }
+                                        contentItem: Item { implicitHeight: 6; Rectangle { width: onlineCooldownProgress.visualPosition * parent.width; height: parent.height; radius: 3; color: root.orange } }
+                                    }
+                                    Text { text: attackControl.servicing ? Math.round(attackControl.serviceProgress * 100) + "%" : attackControl.cooldownRemaining.toFixed(1) + " s"; color: root.dim; font.pixelSize: 9; font.family: "Consolas" }
+                                }
+                                Button { id: engageButton; Layout.fillWidth: true; enabled: root.selectedUnitId && attackControl.selectedAttackUnit.alive && (root.attackTargetId || targetBox.count > 0) && attackControl.ammoRemaining > 0 && !attackControl.servicing && attackControl.cooldownRemaining <= 0; text: attackControl.servicing ? "补给中" : attackControl.ammoRemaining <= 0 ? "弹药耗尽" : attackControl.cooldownRemaining > 0 ? "冷却中" : "执行攻击"; Accessible.name: enabled ? "执行攻击" : engageButton.text
+                                    onClicked: {
+                                        root.controller.command("engageTarget", {"attackerId": root.selectedUnitId, "targetId": root.attackTargetId || targetBox.currentValue})
+                                    }
+                                    contentItem: Text { text: engageButton.text; color: engageButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
+                                    background: Rectangle { color: engageButton.enabled ? root.orange : root.line; radius: 4 }
+                                }
+                            }
+                            ColumnLayout {
+                                visible: !root.isCommander && root.controller.matchPhase === "running"
+                                Layout.fillWidth: true
+                                spacing: 5
+                                Text { text: "本单位移动速度"; color: root.dim; font.pixelSize: 10 }
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 8
+                                    Slider {
+                                        id: unitSpeedSlider
+                                        Layout.fillWidth: true
+                                        from: 1; to: 1000; stepSize: 5
+                                        value: root.unitSpeedDraft
+                                        onMoved: {
+                                            root.unitSpeedDraft = Math.round(value)
+                                            root.unitSpeedDirty = true
+                                        }
+                                    }
+                                    Text { text: root.unitSpeedDraft + " m/s"; color: root.ink; font.family: "Consolas"; font.pixelSize: 10; Layout.preferredWidth: 70; horizontalAlignment: Text.AlignRight }
+                                }
+                                Button {
+                                    id: applyUnitSpeedButton
+                                    Layout.fillWidth: true
+                                    enabled: ((root.seatById(root.controller.currentSeatId) || {}).unitId || "").length > 0
+                                    text: "应用移动速度"
+                                    onClicked: {
+                                        var ownSeat = root.seatById(root.controller.currentSeatId) || ({})
+                                        root.unitSpeedDirty = true
+                                        root.controller.command("setSpeed", { unitId: ownSeat.unitId,
+                                                                           speed: root.unitSpeedDraft })
+                                        root.deploymentNotice = "移动速度已提交 · " + root.unitSpeedDraft + " m/s"
+                                    }
+                                    contentItem: Text { text: applyUnitSpeedButton.text; color: applyUnitSpeedButton.enabled ? root.cyan : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    background: Rectangle { color: root.panel; border.color: applyUnitSpeedButton.enabled ? root.cyan : root.line; radius: 4 }
+                                }
+                            }
+                            Button { id: commanderReadyButton; visible: root.controller.currentSeatType === "commander"; Layout.fillWidth: true; enabled: root.canDeploy ? onlineCanvas.pointerInside : (root.seatById(root.controller.currentSeatId) || ({})).deployed === true && (root.controller.seatReady || root.friendlySeatsReady()); text: root.canDeploy ? "确认当前位置部署指挥所" : root.controller.seatReady ? "取消指挥官就绪" : enabled ? "确认指挥官就绪" : root.friendlySeatsReady() ? "请先部署指挥所" : "等待本方单位部署并就绪"; onClicked: {
+                                    if (root.canDeploy) {
+                                        var point = onlineCanvas.pointerLogicalPos
+                                        root.controller.deployOnlineUnit(root.deployUnitId, point)
+                                        root.deploymentState = "submitting"
+                                        root.deploymentNotice = "部署位置已提交，等待服务器确认"
+                                        onlineCanvas.pulseActionAt(point, root.cyan)
+                                    } else {
+                                        root.controller.setSeatReady(!root.controller.seatReady)
+                                    }
+                                }
+                                onEnabledChanged: if (enabled && root.canDeploy) Qt.callLater(commanderReadyButton.forceActiveFocus)
+                                contentItem: Text { text: commanderReadyButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
+                                background: Rectangle { color: commanderReadyButton.enabled ? (root.controller.seatReady ? root.orange : root.cyan) : root.line; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
+                            }
+                            Button { id: participantReadyButton; visible: root.controller.currentSeatType !== "commander"; Layout.fillWidth: true; enabled: (root.seatById(root.controller.currentSeatId) || ({})).deployed === true; text: root.controller.seatReady ? "取消战位就绪" : enabled ? "确认部署并就绪" : "等待指挥官部署"; onClicked: root.controller.setSeatReady(!root.controller.seatReady)
+                                contentItem: Text { text: participantReadyButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
+                                background: Rectangle { color: participantReadyButton.enabled ? (root.controller.seatReady ? root.orange : root.cyan) : root.line; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
+                            }
+                            Button {
+                                id: redeployRequestButton
+                                visible: root.controller.currentSeatType !== "commander" && root.controller.matchPhase === "preparing"
+                                Layout.fillWidth: true
+                                property var ownSeat: root.seatById(root.controller.currentSeatId) || ({})
+                                enabled: ownSeat.deployed === true && !ownSeat.redeployRequested
+                                text: ownSeat.redeployRequested ? "已申请重新部署" : "申请重新部署"
+                                onClicked: root.controller.requestOnlineRedeploy()
+                                contentItem: Text { text: redeployRequestButton.text; color: redeployRequestButton.enabled ? root.orange : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                background: Rectangle { color: root.panel; border.color: redeployRequestButton.enabled ? root.orange : root.line; radius: 4 }
+                            }
+                            TextField {
+                                id: unitNameField
+                                visible: root.controller.matchPhase === "preparing" && root.controller.currentSeatId !== ""
+                                Layout.fillWidth: true
+                                placeholderText: "本单位画布显示名称"
+                                maximumLength: 128
+                                selectByMouse: true
+                                text: root.unitNameDraft
+                                onTextEdited: {
+                                    root.unitNameDraft = text
+                                    root.unitNameDirty = true
+                                }
+                                color: root.ink
+                                background: Rectangle { color: root.panelAlt; border.color: root.line; radius: 4 }
+                            }
+                            Button {
+                                id: unitNameButton
+                                visible: unitNameField.visible
+                                Layout.fillWidth: true
+                                enabled: unitNameField.text.trim().length > 0
+                                text: "更新画布名称"
+                                onClicked: {
+                                    root.unitNameDraft = unitNameField.text.trim()
+                                    root.unitNameDirty = true
+                                    root.controller.setOnlineUnitName(root.unitNameDraft)
+                                    root.deploymentNotice = "单位名称已提交 · " + root.unitNameDraft
+                                }
+                                contentItem: Text { text: unitNameButton.text; color: unitNameButton.enabled ? root.cyan : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                background: Rectangle { color: root.panel; border.color: root.line; radius: 4 }
+                            }
+                        }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

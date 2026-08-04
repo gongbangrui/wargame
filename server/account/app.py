@@ -1,23 +1,26 @@
 from __future__ import annotations
 
-import asyncio
 import errno
-import hashlib
-import json
-import os
 import fcntl
+import hashlib
+import ipaddress
+import json
+import math
+import os
 import pty
 import secrets
 import sqlite3
+import subprocess
+import termios
 import threading
 import time
-import termios
-import subprocess
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import AsyncIterator, Final, Iterator, Literal
+from urllib.parse import urlsplit
 
+import anyio
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
@@ -26,39 +29,129 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.websockets import WebSocketState
 
 
+class ConfigurationError(RuntimeError):
+    pass
+
+
+def parse_web_shell_allowed_origins(value: str) -> frozenset[str]:
+    origins = frozenset(part.strip() for part in value.split(",") if part.strip())
+    if not origins:
+        raise ConfigurationError("WEB_SHELL_ALLOWED_ORIGINS must contain at least one origin")
+    for origin in origins:
+        parsed = urlsplit(origin)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ConfigurationError("WEB_SHELL_ALLOWED_ORIGINS contains an invalid port") from exc
+        host = (
+            f"[{parsed.hostname}]"
+            if parsed.hostname is not None and ":" in parsed.hostname
+            else parsed.hostname
+        )
+        normalized = (
+            f"{parsed.scheme}://{host}{f':{port}' if port is not None else ''}"
+            if host is not None
+            else ""
+        )
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or "*" in origin
+            or origin != normalized
+        ):
+            raise ConfigurationError(
+                "WEB_SHELL_ALLOWED_ORIGINS must use exact scheme://host[:port] origins"
+            )
+    return origins
+
+
+def parse_trusted_proxy_networks(
+    value: str,
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    return tuple(
+        ipaddress.ip_network(part.strip(), strict=False)
+        for part in value.split(",")
+        if part.strip()
+    )
+
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DB_PATH = DATA_DIR / "wargame.db"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+SHELL_WORKING_DIR = Path("/app") if Path("/app").is_dir() else Path(__file__).resolve().parent
 SESSION_HOURS = int(os.getenv("SESSION_HOURS", "12"))
+WARGAME_VERSION = os.getenv("WARGAME_VERSION", "dev").strip() or "dev"
+WARGAME_SOURCE_DIGEST = os.getenv("WARGAME_SOURCE_DIGEST", "dev").strip() or "dev"
 INTERNAL_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 PUBLIC_WS_URL = os.getenv("PUBLIC_GAME_WS_URL", "ws://localhost:8090")
 GAME_STATUS_PATH = Path(os.getenv("GAME_STATUS_PATH", "/data/game-status.json"))
 GAME_EVENTS_PATH = Path(os.getenv("GAME_EVENTS_PATH", "/data/game-events.jsonl"))
+MONITOR_READY_WAIT_SECONDS = 1.25
+ROOM_OPERATION_TIMEOUT_SECONDS = max(10, min(int(os.getenv("ROOM_OPERATION_TIMEOUT_SECONDS", "20")), 300))
 WEB_SHELL_ENABLED = os.getenv("WEB_SHELL_ENABLED", "false").strip().lower() == "true"
 WEB_SHELL_TICKET_SECONDS = max(30, min(int(os.getenv("WEB_SHELL_TICKET_SECONDS", "120")), 600))
 WEB_SHELL_SESSION_SECONDS = max(60, min(int(os.getenv("WEB_SHELL_SESSION_SECONDS", "900")), 3600))
 WEB_SHELL_MAX_SESSIONS = max(1, min(int(os.getenv("WEB_SHELL_MAX_SESSIONS", "2")), 8))
-ROLES = {"director", "editor", "red", "blue"}
+WEB_SHELL_ALLOWED_ORIGINS = parse_web_shell_allowed_origins(
+    os.getenv(
+        "WEB_SHELL_ALLOWED_ORIGINS",
+        "http://127.0.0.1:8080,http://localhost:8080",
+    )
+)
+LOGIN_TRUSTED_PROXY_NETWORKS = parse_trusted_proxy_networks(
+    os.getenv("LOGIN_TRUSTED_PROXIES", "")
+)
+LOGIN_WINDOW_SECONDS = max(1, min(int(os.getenv("LOGIN_WINDOW_SECONDS", "60")), 60))
+LOGIN_SUBJECT_IP_FAILURE_LIMIT = max(
+    1, min(int(os.getenv("LOGIN_SUBJECT_IP_FAILURE_LIMIT", "5")), 5)
+)
+LOGIN_IP_FAILURE_LIMIT = max(1, min(int(os.getenv("LOGIN_IP_FAILURE_LIMIT", "20")), 20))
+ACTIVE_GAME_ROOM_ID = os.getenv("GAME_ROOM_ID", "main").strip() or "main"
+MIN_PASSWORD_LENGTH: Final = 8
+# 联网账号不再绑定红方、蓝方或导演身份。旧数据库保留 role 列仅用于平滑迁移，
+# 服务端统一写入 player，战位由房间运行时分配。
+ROLES = {"player"}
+SEAT_TYPES = {"commander", "attack", "recon", "ground", "jammer"}
+SEAT_BASE_KEYS = {f"{side}_{seat_type}" for side in ("red", "blue") for seat_type in SEAT_TYPES}
+DEFAULT_SEAT_LIMITS = {
+    "red_commander": 1, "red_attack": 2, "red_recon": 1,
+    "red_ground": 2, "red_jammer": 1,
+    "blue_commander": 1, "blue_attack": 2, "blue_recon": 1,
+    "blue_ground": 2, "blue_jammer": 1,
+}
 
 password_hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
-login_attempts: dict[str, list[float]] = {}
-login_attempts_lock = threading.Lock()
 terminal_tickets: dict[str, tuple[int, str, float]] = {}
 terminal_tickets_lock = threading.Lock()
 active_terminal_sessions = 0
 active_terminal_sessions_lock = threading.Lock()
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    if len(INTERNAL_KEY) < 32 or INTERNAL_KEY == "change-this-internal-key":
+        raise RuntimeError("INTERNAL_API_KEY 必须是至少 32 位的随机密钥")
+    initialize_database()
+    yield
+
+
 app = FastAPI(
-    title="兵器推演账号中心",
+    title="兵棋推演控制台",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
+    lifespan=lifespan,
 )
 
 
 class LoginBody(BaseModel):
     username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=MIN_PASSWORD_LENGTH)
 
     @field_validator("username", mode="before")
     @classmethod
@@ -69,8 +162,7 @@ class LoginBody(BaseModel):
 class UserBody(BaseModel):
     username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     display_name: str = Field(min_length=1, max_length=64)
-    role: Literal["director", "editor", "red", "blue"]
-    password: str | None = Field(default=None, max_length=256)
+    password: str | None = Field(default=None)
     enabled: bool = True
 
     @field_validator("username", "display_name", mode="before")
@@ -78,10 +170,19 @@ class UserBody(BaseModel):
     def strip_text(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
 
+    @field_validator("password", mode="before")
+    @classmethod
+    def validate_optional_password(cls, value: object) -> object:
+        if value == "":
+            return None
+        if isinstance(value, str) and len(value) < MIN_PASSWORD_LENGTH:
+            raise ValueError(f"password must contain at least {MIN_PASSWORD_LENGTH} characters")
+        return value
+
 
 class PasswordBody(BaseModel):
-    current_password: str = Field(min_length=1, max_length=256)
-    new_password: str = Field(min_length=8, max_length=256)
+    current_password: str = Field(min_length=MIN_PASSWORD_LENGTH)
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH)
 
 
 class TokenBody(BaseModel):
@@ -89,7 +190,76 @@ class TokenBody(BaseModel):
 
 
 class TerminalLoginBody(BaseModel):
-    password: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=MIN_PASSWORD_LENGTH)
+
+
+class RoomBody(BaseModel):
+    room_id: str = Field(min_length=2, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    name: str = Field(min_length=1, max_length=96)
+    description: str = Field(default="", max_length=512)
+    scenario_id: str = Field(default="default", max_length=128)
+    seat_limits: dict[str, int] = Field(default_factory=dict)
+    seat_parameters: dict[str, dict[str, float | int | bool]] = Field(default_factory=dict)
+    enabled: bool = True
+
+    @field_validator("room_id", "name", "description", "scenario_id", mode="before")
+    @classmethod
+    def strip_room_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("seat_limits")
+    @classmethod
+    def validate_seat_limits(cls, value: dict[str, int]) -> dict[str, int]:
+        for key, count in value.items():
+            if key not in SEAT_BASE_KEYS:
+                raise ValueError("不支持的战位类型")
+            if count < 0 or count > 64:
+                raise ValueError("战位数量必须在 0 到 64 之间")
+            if key.endswith("_commander") and count != 1:
+                raise ValueError("红蓝双方指挥官数量必须固定为 1")
+        return value
+
+    @field_validator("seat_parameters")
+    @classmethod
+    def validate_seat_parameters(
+        cls, value: dict[str, dict[str, float | int | bool]]
+    ) -> dict[str, dict[str, float | int | bool]]:
+        allowed_fields = {"communicationRange", "detectRange"}
+        for key, parameters in value.items():
+            parts = key.split("_")
+            base_key = "_".join(parts[:2])
+            if base_key not in SEAT_BASE_KEYS or (len(parts) > 2 and not parts[2].isdigit()):
+                raise ValueError("战位参数包含未知战位")
+            unknown = set(parameters) - allowed_fields
+            if unknown:
+                raise ValueError(f"不支持的战位参数: {', '.join(sorted(unknown))}")
+            for name, parameter in parameters.items():
+                if isinstance(parameter, bool) or not isinstance(parameter, (int, float)):
+                    raise ValueError(f"{name} 必须是数值")
+                if parameter < 0 or parameter > 1_000_000:
+                    raise ValueError(f"{name} 必须在 0 到 1000000 米之间")
+        return value
+
+
+class InternalRoomStatusBody(BaseModel):
+    status: Literal["stopped", "preparing", "running", "paused", "finished"]
+    reason: str = Field(default="", max_length=256)
+    winner: Literal["", "red", "blue", "draw"] = ""
+    occupants: list[dict[str, object]] = Field(default_factory=list, max_length=128)
+
+
+class InternalOperationAckBody(BaseModel):
+    state: Literal["acknowledged", "failed"]
+    revision: int = Field(default=0, ge=0)
+    code: str = Field(default="", max_length=128)
+
+
+class InternalPresenceBody(BaseModel):
+    occupants: list[dict[str, object]] = Field(default_factory=list, max_length=128)
+
+
+class KickBody(BaseModel):
+    reason: str = Field(default="管理员移出房间", max_length=256)
 
 
 def utc_now() -> datetime:
@@ -102,6 +272,31 @@ def iso_time(value: datetime) -> str:
 
 def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def storage_user_role(db: sqlite3.Connection) -> str:
+    """Return a migration-safe value for legacy databases with a role CHECK."""
+    row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+    schema = (row[0] if row else "") or ""
+    return "player" if "'player'" in schema or '"player"' in schema else "red"
+
+
+def queue_user_invalidation(
+    db: sqlite3.Connection,
+    user_id: int,
+    reason: str,
+    requested_by: int,
+) -> None:
+    pending = db.execute(
+        "SELECT id FROM user_kick_requests WHERE user_id=? AND processed_at IS NULL LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    if pending is not None:
+        return
+    db.execute(
+        "INSERT INTO user_kick_requests(user_id,reason,requested_by,requested_at) VALUES(?,?,?,?)",
+        (user_id, reason, requested_by, iso_time(utc_now())),
+    )
 
 
 @contextmanager
@@ -132,7 +327,7 @@ def initialize_database() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 display_name TEXT NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('director', 'editor', 'red', 'blue')),
+                role TEXT NOT NULL DEFAULT 'player',
                 password_hash TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
@@ -147,6 +342,36 @@ def initialize_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_subject
                 ON sessions(subject_type, subject_id);
+            CREATE TABLE IF NOT EXISTS rooms (
+                room_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                scenario_id TEXT NOT NULL DEFAULT 'default',
+                seat_limits TEXT NOT NULL DEFAULT '{}',
+                seat_parameters TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'stopped',
+                winner TEXT NOT NULL DEFAULT '',
+                status_reason TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rooms_enabled ON rooms(enabled, updated_at);
+            CREATE TABLE IF NOT EXISTS room_operations (
+                operation_id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                expected_status TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('pending', 'acknowledged', 'failed')),
+                requested_revision INTEGER NOT NULL DEFAULT 0,
+                applied_revision INTEGER,
+                result_code TEXT NOT NULL DEFAULT '',
+                requested_at TEXT NOT NULL,
+                acknowledged_at TEXT,
+                FOREIGN KEY(room_id) REFERENCES rooms(room_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_room_operations_latest
+                ON room_operations(room_id, requested_at DESC);
             CREATE TABLE IF NOT EXISTS terminal_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 admin_id INTEGER NOT NULL,
@@ -156,25 +381,152 @@ def initialize_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_terminal_audit_admin_time
                 ON terminal_audit(admin_id, created_at);
+            CREATE TABLE IF NOT EXISTS login_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_type TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                ip_address TEXT NOT NULL,
+                failed_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_login_failures_subject_ip_time
+                ON login_failures(subject_type, subject, ip_address, failed_at);
+            CREATE INDEX IF NOT EXISTS idx_login_failures_ip_time
+                ON login_failures(ip_address, failed_at);
+            CREATE TABLE IF NOT EXISTS room_presence (
+                room_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                seat_id TEXT NOT NULL DEFAULT '',
+                seat_type TEXT NOT NULL DEFAULT '',
+                side TEXT NOT NULL DEFAULT '',
+                connected_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(room_id, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_room_presence_updated
+                ON room_presence(room_id, updated_at);
+            CREATE TABLE IF NOT EXISTS room_kick_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                requested_by INTEGER NOT NULL,
+                requested_at TEXT NOT NULL,
+                processed_at TEXT,
+                FOREIGN KEY(requested_by) REFERENCES admins(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_room_kick_pending
+                ON room_kick_requests(room_id, processed_at, requested_at);
+            CREATE TABLE IF NOT EXISTS room_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                admin_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(admin_id) REFERENCES admins(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_room_audit_time
+                ON room_audit(room_id, created_at);
+            CREATE TABLE IF NOT EXISTS user_kick_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                requested_by INTEGER NOT NULL,
+                requested_at TEXT NOT NULL,
+                processed_at TEXT,
+                FOREIGN KEY(requested_by) REFERENCES admins(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_kick_pending
+                ON user_kick_requests(processed_at, requested_at);
             """
         )
+        room_columns = {row["name"] for row in db.execute("PRAGMA table_info(rooms)")}
+        for name, declaration in (
+            ("winner", "TEXT NOT NULL DEFAULT ''"),
+            ("status_reason", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in room_columns:
+                db.execute(f"ALTER TABLE rooms ADD COLUMN {name} {declaration}")
+        operation_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(room_operations)")
+        }
+        for name, declaration in (
+            ("requested_revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("applied_revision", "INTEGER"),
+            ("result_code", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in operation_columns:
+                db.execute(f"ALTER TABLE room_operations ADD COLUMN {name} {declaration}")
+        terminal_audit_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(terminal_audit)")
+        }
+        for name, declaration in (
+            ("event", "TEXT NOT NULL DEFAULT ''"),
+            ("outcome", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in terminal_audit_columns:
+                db.execute(f"ALTER TABLE terminal_audit ADD COLUMN {name} {declaration}")
+        # Enforce the one-player/one-client invariant in the database as well
+        # as in the request handler. Remove stale/legacy duplicate player
+        # sessions before creating the partial unique index.
+        now = iso_time(utc_now())
+        db.execute("DELETE FROM sessions WHERE subject_type='player' AND expires_at <= ?", (now,))
+        db.execute(
+            "DELETE FROM sessions WHERE subject_type='player' AND rowid NOT IN ("
+            "SELECT MAX(rowid) FROM sessions WHERE subject_type='player' GROUP BY subject_id)"
+        )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_single_player_session "
+            "ON sessions(subject_type, subject_id) WHERE subject_type='player'"
+        )
+        db.execute(
+            "UPDATE room_operations SET state='failed', acknowledged_at=? "
+            "WHERE state='pending' AND rowid NOT IN ("
+            "SELECT MAX(rowid) FROM room_operations WHERE state='pending' GROUP BY room_id)",
+            (now,),
+        )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_single_pending_room_operation "
+            "ON room_operations(room_id) WHERE state='pending'"
+        )
+        # 旧安装的用户表可能带有席位 CHECK 约束。保留列但将所有账号视为普通用户，
+        # 避免升级时因为旧角色值阻断登录；新的 API 永远不返回 role。
+        try:
+            db.execute("UPDATE users SET role='player' WHERE role IS NULL OR role != 'player'")
+        except sqlite3.IntegrityError:
+            # The old CHECK constraint is left intact until a maintenance
+            # migration rewrites the table. The column is never exposed.
+            pass
         username = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
         password = os.getenv("ADMIN_PASSWORD", "")
         existing = db.execute("SELECT id FROM admins LIMIT 1").fetchone()
         if existing is None:
-            if len(password) < 8 or password in {"Admin123456!", "change-me"}:
-                raise RuntimeError("首次启动必须通过 ADMIN_PASSWORD 设置至少 8 位的管理员密码")
+            if len(password) < MIN_PASSWORD_LENGTH:
+                raise RuntimeError(
+                    f"首次管理员密码必须至少为 {MIN_PASSWORD_LENGTH} 个字符"
+                )
             db.execute(
                 "INSERT INTO admins(username, password_hash, updated_at) VALUES(?, ?, ?)",
                 (username, password_hasher.hash(password), iso_time(utc_now())),
             )
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    if len(INTERNAL_KEY) < 32 or INTERNAL_KEY == "change-this-internal-key":
-        raise RuntimeError("INTERNAL_API_KEY 必须是至少 32 位的随机密钥")
-    initialize_database()
+        if db.execute("SELECT 1 FROM rooms WHERE room_id=?", (ACTIVE_GAME_ROOM_ID,)).fetchone() is None:
+            now = iso_time(utc_now())
+            db.execute(
+                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (ACTIVE_GAME_ROOM_ID, "主推演室", "默认联网推演房间", "default",
+                 json.dumps(DEFAULT_SEAT_LIMITS, ensure_ascii=False),
+                 json.dumps({}, ensure_ascii=False), "stopped", 1, now, now),
+            )
+        db.execute(
+            "UPDATE room_operations SET state='failed', acknowledged_at=? "
+            "WHERE room_id!=? AND state='pending'",
+            (iso_time(utc_now()), ACTIVE_GAME_ROOM_ID),
+        )
 
 
 @app.middleware("http")
@@ -190,36 +542,77 @@ async def security_headers(request: Request, call_next):
     return response
 
 
-def enforce_login_limit(key: str) -> None:
-    now = time.monotonic()
-    with login_attempts_lock:
-        attempts = [value for value in login_attempts.get(key, []) if now - value < 60]
-        if attempts:
-            login_attempts[key] = attempts
-        else:
-            login_attempts.pop(key, None)
-        limited = len(attempts) >= 8
-    if limited:
-        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
+def login_client_ip(request: Request) -> str:
+    peer_text = request.client.host if request.client else "local"
+    try:
+        peer = ipaddress.ip_address(peer_text)
+    except ValueError:
+        return peer_text
+    if not any(peer in network for network in LOGIN_TRUSTED_PROXY_NETWORKS):
+        return peer.compressed
+    forwarded = request.headers.get("x-forwarded-for", "")
+    try:
+        chain = [ipaddress.ip_address(part.strip()) for part in forwarded.split(",") if part.strip()]
+    except ValueError:
+        return peer.compressed
+    for candidate in reversed(chain):
+        if not any(candidate in network for network in LOGIN_TRUSTED_PROXY_NETWORKS):
+            return candidate.compressed
+    return chain[0].compressed if chain else peer.compressed
 
 
-def record_login_failure(key: str) -> None:
-    now = time.monotonic()
-    with login_attempts_lock:
-        # Periodic pruning prevents attempts against random usernames from
-        # growing this process-local limiter without bound.
-        for candidate in list(login_attempts):
-            recent = [value for value in login_attempts[candidate] if now - value < 60]
-            if recent:
-                login_attempts[candidate] = recent
-            else:
-                del login_attempts[candidate]
-        login_attempts.setdefault(key, []).append(now)
+def enforce_login_limit(subject_type: str, subject: str, ip_address: str) -> None:
+    now = time.time()
+    cutoff = now - LOGIN_WINDOW_SECONDS
+    normalized_subject = subject.strip().casefold()
+    with database() as db:
+        db.execute("DELETE FROM login_failures WHERE failed_at <= ?", (cutoff,))
+        subject_row = db.execute(
+            "SELECT COUNT(*) AS count, MIN(failed_at) AS oldest FROM login_failures "
+            "WHERE subject_type=? AND subject=? AND ip_address=? AND failed_at>?",
+            (subject_type, normalized_subject, ip_address, cutoff),
+        ).fetchone()
+        ip_row = db.execute(
+            "SELECT COUNT(*) AS count, MIN(failed_at) AS oldest FROM login_failures "
+            "WHERE ip_address=? AND failed_at>?",
+            (ip_address, cutoff),
+        ).fetchone()
+    limited_rows = []
+    if subject_row["count"] >= LOGIN_SUBJECT_IP_FAILURE_LIMIT:
+        limited_rows.append(subject_row)
+    if ip_row["count"] >= LOGIN_IP_FAILURE_LIMIT:
+        limited_rows.append(ip_row)
+    if limited_rows:
+        oldest = min(float(row["oldest"]) for row in limited_rows)
+        retry_after = max(1, math.ceil(LOGIN_WINDOW_SECONDS - (now - oldest)))
+        raise HTTPException(
+            status_code=429,
+            detail="登录尝试过于频繁，请稍后再试",
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
-def clear_login_failures(key: str) -> None:
-    with login_attempts_lock:
-        login_attempts.pop(key, None)
+def record_login_failure(subject_type: str, subject: str, ip_address: str) -> None:
+    now = time.time()
+    with database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "DELETE FROM login_failures WHERE failed_at <= ?",
+            (now - LOGIN_WINDOW_SECONDS,),
+        )
+        db.execute(
+            "INSERT INTO login_failures(subject_type,subject,ip_address,failed_at) "
+            "VALUES(?,?,?,?)",
+            (subject_type, subject.strip().casefold(), ip_address, now),
+        )
+
+
+def clear_login_failures(subject_type: str, subject: str, ip_address: str) -> None:
+    with database() as db:
+        db.execute(
+            "DELETE FROM login_failures WHERE subject_type=? AND subject=? AND ip_address=?",
+            (subject_type, subject.strip().casefold(), ip_address),
+        )
 
 
 def verify_password(password_hash: str, password: str) -> bool:
@@ -247,6 +640,18 @@ def create_session(db: sqlite3.Connection, subject_type: str, subject_id: int) -
     return token
 
 
+def assert_player_session_available(db: sqlite3.Connection, subject_id: int) -> None:
+    """Enforce the one-account/one-client invariant atomically at login time."""
+    now = iso_time(utc_now())
+    db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    active = db.execute(
+        "SELECT 1 FROM sessions WHERE subject_type='player' AND subject_id=? AND expires_at>? LIMIT 1",
+        (subject_id, now),
+    ).fetchone()
+    if active is not None:
+        raise HTTPException(status_code=409, detail="USER_ALREADY_ONLINE")
+
+
 def bearer_token(authorization: str | None) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
@@ -267,6 +672,11 @@ def require_admin(authorization: str | None = Header(default=None)) -> sqlite3.R
     return row
 
 
+def require_internal_key(x_internal_key: str | None) -> None:
+    if not secrets.compare_digest(x_internal_key or "", INTERNAL_KEY):
+        raise HTTPException(status_code=403, detail="内部认证失败")
+
+
 def admin_session_is_valid(admin_id: int, session_digest: str) -> bool:
     with database() as db:
         row = db.execute(
@@ -277,11 +687,12 @@ def admin_session_is_valid(admin_id: int, session_digest: str) -> bool:
     return row is not None
 
 
-def record_terminal_audit(admin_id: int, action: str) -> None:
+def record_terminal_audit(admin_id: int, event: str, outcome: str) -> None:
     with database() as db:
         db.execute(
-            "INSERT INTO terminal_audit(admin_id, action, created_at) VALUES(?, ?, ?)",
-            (admin_id, action, iso_time(utc_now())),
+            "INSERT INTO terminal_audit(admin_id,action,event,outcome,created_at) "
+            "VALUES(?,?,?,?,?)",
+            (admin_id, f"shell.{event}:{outcome}", event, outcome, iso_time(utc_now())),
         )
 
 
@@ -305,6 +716,45 @@ def consume_terminal_ticket(ticket: str | None) -> tuple[int, str] | None:
     if value is None or value[2] <= now:
         return None
     return value[0], value[1]
+
+
+def terminal_origin_allowed(origin: str | None) -> bool:
+    if origin is None or origin == "null":
+        return False
+    try:
+        parsed = urlsplit(origin)
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or "*" in origin
+    ):
+        return False
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    normalized = f"{parsed.scheme}://{host}{f':{port}' if port is not None else ''}"
+    return origin == normalized and origin in WEB_SHELL_ALLOWED_ORIGINS
+
+
+def consume_terminal_identity(origin: str | None, ticket: str | None) -> tuple[int, str] | None:
+    if not terminal_origin_allowed(origin):
+        return None
+    return consume_terminal_ticket(ticket)
+
+
+def terminal_ticket_from_protocol(header: str | None) -> str | None:
+    if header is None:
+        return None
+    protocols = [part.strip() for part in header.split(",")]
+    if len(protocols) != 2 or protocols[0] != "wargame-terminal":
+        return None
+    return protocols[1] or None
 
 
 def invalidate_terminal_tickets(session_digest: str | None = None) -> None:
@@ -333,15 +783,132 @@ def release_terminal_session() -> None:
 
 
 def public_user(row: sqlite3.Row) -> dict:
-    return {
+    result = {
         "id": row["id"],
         "username": row["username"],
         "displayName": row["display_name"],
-        "role": row["role"],
         "enabled": bool(row["enabled"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+    if "online" in row.keys():
+        result["online"] = bool(row["online"])
+    return result
+
+
+def public_room(row: sqlite3.Row) -> dict:
+    def decode(value: str, fallback: object) -> object:
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, (dict, list)) else fallback
+        except (TypeError, json.JSONDecodeError):
+            return fallback
+
+    result = {
+        "roomId": row["room_id"],
+        "name": row["name"],
+        "description": row["description"],
+        "scenarioId": row["scenario_id"],
+        "seatLimits": decode(row["seat_limits"], {}),
+        "seatParameters": decode(row["seat_parameters"], {}),
+        "status": row["status"],
+        "winner": row["winner"],
+        "statusReason": row["status_reason"],
+        "enabled": bool(row["enabled"]),
+        "hostedByGameServer": row["room_id"] == ACTIVE_GAME_ROOM_ID,
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+    if "operation_id" in row.keys() and row["operation_id"]:
+        operation = {
+            "operationId": row["operation_id"],
+            "action": row["operation_action"],
+            "expectedStatus": row["operation_expected_status"],
+            "state": row["operation_state"],
+            "requestedRevision": row["operation_requested_revision"],
+            "appliedRevision": row["operation_applied_revision"],
+            "code": row["operation_result_code"],
+            "requestedAt": row["operation_requested_at"],
+            "acknowledgedAt": row["operation_acknowledged_at"],
+        }
+        result["operation"] = operation
+        if operation["state"] == "pending":
+            result["pendingOperation"] = operation
+    result.update(room_readiness(row["room_id"]))
+    return result
+
+
+def room_rows(db: sqlite3.Connection, enabled_only: bool) -> list[sqlite3.Row]:
+    query = """
+        SELECT r.*, o.operation_id, o.action AS operation_action,
+               o.expected_status AS operation_expected_status,
+               o.state AS operation_state, o.requested_at AS operation_requested_at,
+               o.acknowledged_at AS operation_acknowledged_at,
+               o.requested_revision AS operation_requested_revision,
+               o.applied_revision AS operation_applied_revision,
+               o.result_code AS operation_result_code
+        FROM rooms r
+        LEFT JOIN room_operations o ON o.operation_id = (
+            SELECT latest.operation_id FROM room_operations latest
+            WHERE latest.room_id = r.room_id
+            ORDER BY latest.requested_at DESC, latest.operation_id DESC LIMIT 1
+        )
+    """
+    if enabled_only:
+        query += " WHERE r.enabled=1"
+    query += " ORDER BY r.name COLLATE NOCASE"
+    return db.execute(query).fetchall()
+
+
+def public_presence(row: sqlite3.Row) -> dict:
+    return {
+        "userId": row["user_id"],
+        "username": row["username"],
+        "displayName": row["display_name"],
+        "seatId": row["seat_id"],
+        "seatType": row["seat_type"],
+        "side": row["side"],
+        "connectedAt": row["connected_at"],
+        "lastSeenAt": row["last_seen_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def sync_presence(db: sqlite3.Connection, room_id: str, occupants: list[dict[str, object]]) -> None:
+    """Replace the authoritative game-server presence snapshot for one room."""
+    now = iso_time(utc_now())
+    seen: set[int] = set()
+    for occupant in occupants:
+        try:
+            user_id = int(occupant.get("userId", 0))
+        except (TypeError, ValueError):
+            continue
+        if user_id <= 0 or user_id in seen:
+            continue
+        username = str(occupant.get("username", ""))[:64]
+        display_name = str(occupant.get("displayName", ""))[:64]
+        if not username:
+            continue
+        seen.add(user_id)
+        db.execute(
+            "INSERT INTO room_presence(room_id,user_id,username,display_name,seat_id,seat_type,side,connected_at,last_seen_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(room_id,user_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,"
+            "seat_id=excluded.seat_id,seat_type=excluded.seat_type,side=excluded.side,connected_at=excluded.connected_at,"
+            "last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at",
+            (room_id, user_id, username, display_name,
+             str(occupant.get("seatId", ""))[:96], str(occupant.get("seatType", ""))[:32],
+             str(occupant.get("side", ""))[:16], str(occupant.get("connectedAt", now))[:64],
+             str(occupant.get("lastSeenAt", now))[:64], now),
+        )
+    if seen:
+        placeholders = ",".join("?" for _ in seen)
+        db.execute(
+            f"DELETE FROM room_presence WHERE room_id=? AND user_id NOT IN ({placeholders})",
+            (room_id, *seen),
+        )
+    else:
+        db.execute("DELETE FROM room_presence WHERE room_id=?", (room_id,))
 
 
 def read_game_status() -> dict:
@@ -357,6 +924,56 @@ def read_game_status() -> dict:
         return value
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
+
+
+def room_ready_for_start(room_id: str) -> bool:
+    """Wait for the next monitor snapshot when seat readiness just changed."""
+    deadline = time.monotonic() + MONITOR_READY_WAIT_SECONDS
+    while True:
+        game_room = read_game_status().get("roomState")
+        if isinstance(game_room, dict) and game_room.get("roomId") == room_id:
+            if bool(game_room.get("readyForStart")):
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def room_readiness(room_id: str) -> dict[str, bool]:
+    game_room = read_game_status().get("roomState")
+    if not isinstance(game_room, dict) or game_room.get("roomId") != room_id:
+        return {"redCommanderReady": False, "blueCommanderReady": False, "readyForStart": False}
+    readiness = {"redCommanderReady": False, "blueCommanderReady": False,
+                 "readyForStart": bool(game_room.get("readyForStart"))}
+    seats = game_room.get("seats")
+    if not isinstance(seats, list):
+        return readiness
+    for seat in seats:
+        if not isinstance(seat, dict) or seat.get("seatType") != "commander":
+            continue
+        if seat.get("side") == "red":
+            readiness["redCommanderReady"] = bool(seat.get("ready"))
+        elif seat.get("side") == "blue":
+            readiness["blueCommanderReady"] = bool(seat.get("ready"))
+    return readiness
+
+
+def pending_operation_timed_out(operation: sqlite3.Row, now: datetime) -> bool:
+    try:
+        requested_at = datetime.fromisoformat(operation["requested_at"].replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return True
+    if requested_at.tzinfo is None:
+        requested_at = requested_at.replace(tzinfo=timezone.utc)
+    return now - requested_at >= timedelta(seconds=ROOM_OPERATION_TIMEOUT_SECONDS)
+
+
+def room_lifecycle_revision(room_id: str) -> int:
+    game_room = read_game_status().get("roomState")
+    if not isinstance(game_room, dict) or game_room.get("roomId") != room_id:
+        return 0
+    revision = game_room.get("lifecycleRevision")
+    return revision if isinstance(revision, int) and not isinstance(revision, bool) and revision > 0 else 0
 
 
 def read_monitor_events(category: str, limit: int) -> list[dict]:
@@ -407,46 +1024,60 @@ def app_js() -> FileResponse:
 def health() -> dict:
     with database() as db:
         db.execute("SELECT 1").fetchone()
-    return {"status": "ok", "service": "account-web"}
+    return {
+        "status": "ok",
+        "service": "account-web",
+        "version": WARGAME_VERSION,
+        "sourceDigest": WARGAME_SOURCE_DIGEST,
+    }
 
 
 @app.post("/api/admin/login")
 def admin_login(body: LoginBody, request: Request) -> dict:
-    limit_key = f"admin:{request.client.host if request.client else 'local'}:{body.username}"
-    enforce_login_limit(limit_key)
+    ip_address = login_client_ip(request)
+    subject = body.username.strip().casefold()
+    enforce_login_limit("admin", subject, ip_address)
     with database() as db:
         row = db.execute(
             "SELECT id, username, password_hash FROM admins WHERE username = ?",
             (body.username.strip(),),
         ).fetchone()
         if row is None or not verify_password(row["password_hash"], body.password):
-            record_login_failure(limit_key)
+            record_login_failure("admin", subject, ip_address)
             raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
         token = create_session(db, "admin", row["id"])
-    clear_login_failures(limit_key)
+    clear_login_failures("admin", subject, ip_address)
     return {"token": token, "username": row["username"], "expiresInHours": SESSION_HOURS}
 
 
 @app.post("/api/client/login")
 def client_login(body: LoginBody, request: Request) -> dict:
-    limit_key = f"player:{request.client.host if request.client else 'local'}:{body.username.casefold()}"
-    enforce_login_limit(limit_key)
+    ip_address = login_client_ip(request)
+    subject = body.username.strip().casefold()
+    enforce_login_limit("player", subject, ip_address)
     with database() as db:
         row = db.execute(
             "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
             (body.username.strip(),),
         ).fetchone()
         if row is None or not bool(row["enabled"]) or not verify_password(row["password_hash"], body.password):
-            record_login_failure(limit_key)
+            record_login_failure("player", subject, ip_address)
             raise HTTPException(status_code=401, detail="用户名或密码错误，或账号已停用")
-        token = create_session(db, "player", row["id"])
-    clear_login_failures(limit_key)
+        assert_player_session_available(db, row["id"])
+        try:
+            token = create_session(db, "player", row["id"])
+        except sqlite3.IntegrityError as exc:
+            # A concurrent login may win the unique-index race after the
+            # explicit availability check.
+            raise HTTPException(status_code=409, detail="USER_ALREADY_ONLINE") from exc
+    clear_login_failures("player", subject, ip_address)
     return {
         "token": token,
         "username": row["username"],
         "displayName": row["display_name"],
-        "role": row["role"],
         "gameWebSocketUrl": PUBLIC_WS_URL,
+        "gameDataPlane": "websocket-authoritative",
+        "sessionPolicy": "single-client",
         "expiresInHours": SESSION_HOURS,
     }
 
@@ -459,8 +1090,49 @@ def admin_me(admin: sqlite3.Row = Depends(require_admin)) -> dict:
 @app.get("/api/admin/users")
 def list_users(_: sqlite3.Row = Depends(require_admin)) -> dict:
     with database() as db:
-        rows = db.execute("SELECT * FROM users ORDER BY role, username COLLATE NOCASE").fetchall()
+        rows = db.execute(
+            "SELECT u.*, EXISTS(SELECT 1 FROM sessions s WHERE s.subject_type='player' "
+            "AND s.subject_id=u.id AND s.expires_at>?) AS online "
+            "FROM users u ORDER BY u.username COLLATE NOCASE",
+            (iso_time(utc_now()),),
+        ).fetchall()
     return {"users": [public_user(row) for row in rows]}
+
+
+@app.post("/api/admin/users/{user_id}/kick", status_code=202)
+def kick_user_offline(
+    user_id: int,
+    body: KickBody,
+    admin: sqlite3.Row = Depends(require_admin),
+) -> dict:
+    now = iso_time(utc_now())
+    reason = body.reason.strip() or "管理员强制下线"
+    with database() as db:
+        user = db.execute("SELECT id, username FROM users WHERE id=?", (user_id,)).fetchone()
+        if user is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        active = db.execute(
+            "SELECT 1 FROM sessions WHERE subject_type='player' AND subject_id=? AND expires_at>? LIMIT 1",
+            (user_id, now),
+        ).fetchone()
+        if active is None:
+            raise HTTPException(status_code=409, detail="该账号当前没有在线会话")
+        pending = db.execute(
+            "SELECT id FROM user_kick_requests WHERE user_id=? AND processed_at IS NULL LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if pending is not None:
+            return {"accepted": True, "requestId": pending["id"], "message": "下线请求已在处理中"}
+        db.execute("DELETE FROM sessions WHERE subject_type='player' AND subject_id=?", (user_id,))
+        cursor = db.execute(
+            "INSERT INTO user_kick_requests(user_id,reason,requested_by,requested_at) VALUES(?,?,?,?)",
+            (user_id, reason, admin["id"], now),
+        )
+        db.execute(
+            "INSERT INTO terminal_audit(admin_id,action,created_at) VALUES(?,?,?)",
+            (admin["id"], f"user_kick:{user_id}:{reason}", now),
+        )
+    return {"accepted": True, "requestId": cursor.lastrowid, "message": "已发送强制下线请求"}
 
 
 @app.get("/api/admin/monitor/overview")
@@ -494,16 +1166,23 @@ def monitor_events(
 @app.post("/api/admin/monitor/terminal/login")
 def terminal_login(
     body: TerminalLoginBody,
+    request: Request,
     authorization: str | None = Header(default=None),
     admin: sqlite3.Row = Depends(require_admin),
 ) -> dict:
     if not WEB_SHELL_ENABLED:
         raise HTTPException(status_code=503, detail="网页 Shell 未在此服务实例启用")
+    ip_address = login_client_ip(request)
+    subject = admin["username"].strip().casefold()
+    enforce_login_limit("admin-terminal", subject, ip_address)
     if not verify_password(admin["password_hash"], body.password):
+        record_login_failure("admin-terminal", subject, ip_address)
+        record_terminal_audit(admin["id"], "authorize", "failure")
         raise HTTPException(status_code=403, detail="管理员密码错误")
+    clear_login_failures("admin-terminal", subject, ip_address)
     session_digest = token_digest(bearer_token(authorization))
     ticket = issue_terminal_ticket(admin["id"], session_digest)
-    record_terminal_audit(admin["id"], "authorized")
+    record_terminal_audit(admin["id"], "authorize", "success")
     return {
         "authenticated": True,
         "terminalTicket": ticket,
@@ -520,18 +1199,28 @@ def configure_pty() -> None:
 @app.websocket("/api/admin/monitor/terminal/ws")
 async def terminal_websocket(websocket: WebSocket) -> None:
     if not WEB_SHELL_ENABLED:
+        await websocket.accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    identity = consume_terminal_ticket(websocket.query_params.get("ticket"))
+    if not terminal_origin_allowed(websocket.headers.get("origin")):
+        await websocket.accept()
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    identity = consume_terminal_ticket(
+        terminal_ticket_from_protocol(websocket.headers.get("sec-websocket-protocol"))
+    )
     if identity is None:
+        await websocket.accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     admin_id, session_digest = identity
     if not admin_session_is_valid(admin_id, session_digest):
+        await websocket.accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     if not reserve_terminal_session():
+        await websocket.accept()
         await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
         return
 
@@ -539,7 +1228,8 @@ async def terminal_websocket(websocket: WebSocket) -> None:
     slave_fd: int | None = None
     process: subprocess.Popen[bytes] | None = None
     try:
-        await websocket.accept()
+        await websocket.accept(subprotocol="wargame-terminal")
+        record_terminal_audit(admin_id, "open", "success")
         master_fd, slave_fd = pty.openpty()
         flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
         fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
@@ -548,7 +1238,7 @@ async def terminal_websocket(websocket: WebSocket) -> None:
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
-            cwd="/app",
+            cwd=SHELL_WORKING_DIR,
             env={
                 "HOME": "/app",
                 "PATH": "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin",
@@ -567,10 +1257,10 @@ async def terminal_websocket(websocket: WebSocket) -> None:
         )
 
         while time.monotonic() < deadline:
+            message = None
             try:
-                message = await asyncio.wait_for(websocket.receive_text(), timeout=0.05)
-            except TimeoutError:
-                message = None
+                with anyio.move_on_after(0.05):
+                    message = await websocket.receive_text()
             except WebSocketDisconnect:
                 break
 
@@ -581,6 +1271,7 @@ async def terminal_websocket(websocket: WebSocket) -> None:
                 if not admin_session_is_valid(admin_id, session_digest):
                     await websocket.send_text("\r\n管理员会话已失效，终端已关闭。\r\n")
                     break
+                record_terminal_audit(admin_id, "command", "accepted")
                 os.write(master_fd, message.encode("utf-8"))
 
             pty_closed = False
@@ -605,7 +1296,10 @@ async def terminal_websocket(websocket: WebSocket) -> None:
         else:
             await websocket.send_text("\r\n终端会话已达到时限，请重新验证管理员密码。\r\n")
     except WebSocketDisconnect:
-        pass
+        record_terminal_audit(admin_id, "disconnect", "success")
+    except Exception:  # noqa: BROAD_EXCEPT_OK, BLE001 - boundary audits then re-raises.
+        record_terminal_audit(admin_id, "error", "failure")
+        raise
     finally:
         if websocket.application_state == WebSocketState.CONNECTED:
             try:
@@ -623,14 +1317,14 @@ async def terminal_websocket(websocket: WebSocket) -> None:
             os.close(slave_fd)
         if master_fd is not None:
             os.close(master_fd)
-        record_terminal_audit(admin_id, "closed")
+        record_terminal_audit(admin_id, "close", "success")
         release_terminal_session()
 
 
 @app.post("/api/admin/users", status_code=201)
 def create_user(body: UserBody, _: sqlite3.Row = Depends(require_admin)) -> dict:
-    if not body.password or len(body.password) < 8:
-        raise HTTPException(status_code=422, detail="新账号密码至少需要 8 个字符")
+    if body.password is None:
+        raise HTTPException(status_code=422, detail="新账号必须提供密码")
     now = iso_time(utc_now())
     try:
         with database() as db:
@@ -640,7 +1334,7 @@ def create_user(body: UserBody, _: sqlite3.Row = Depends(require_admin)) -> dict
                 (
                     body.username,
                     body.display_name,
-                    body.role,
+                    storage_user_role(db),
                     password_hasher.hash(body.password),
                     int(body.enabled),
                     now,
@@ -654,16 +1348,14 @@ def create_user(body: UserBody, _: sqlite3.Row = Depends(require_admin)) -> dict
 
 
 @app.put("/api/admin/users/{user_id}")
-def update_user(user_id: int, body: UserBody, _: sqlite3.Row = Depends(require_admin)) -> dict:
+def update_user(user_id: int, body: UserBody, admin: sqlite3.Row = Depends(require_admin)) -> dict:
     try:
         with database() as db:
             existing = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if existing is None:
                 raise HTTPException(status_code=404, detail="账号不存在")
             password_hash = existing["password_hash"]
-            if body.password:
-                if len(body.password) < 8:
-                    raise HTTPException(status_code=422, detail="密码至少需要 8 个字符")
+            if body.password is not None:
                 password_hash = password_hasher.hash(body.password)
             db.execute(
                 "UPDATE users SET username=?, display_name=?, role=?, password_hash=?, enabled=?, updated_at=? "
@@ -671,21 +1363,27 @@ def update_user(user_id: int, body: UserBody, _: sqlite3.Row = Depends(require_a
                 (
                     body.username,
                     body.display_name,
-                    body.role,
+                    storage_user_role(db),
                     password_hash,
                     int(body.enabled),
                     iso_time(utc_now()),
                     user_id,
                 ),
             )
-            if (
-                body.password
+            invalidates_session = (
+                body.password is not None
                 or not body.enabled
-                or body.role != existing["role"]
                 or body.username.casefold() != existing["username"].casefold()
                 or body.display_name != existing["display_name"]
-            ):
+            )
+            if invalidates_session:
+                active = db.execute(
+                    "SELECT 1 FROM sessions WHERE subject_type='player' AND subject_id=? LIMIT 1",
+                    (user_id,),
+                ).fetchone()
                 db.execute("DELETE FROM sessions WHERE subject_type='player' AND subject_id=?", (user_id,))
+                if active is not None:
+                    queue_user_invalidation(db, user_id, "账号资料已更新", admin["id"])
             row = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="用户名已存在") from exc
@@ -693,14 +1391,233 @@ def update_user(user_id: int, body: UserBody, _: sqlite3.Row = Depends(require_a
 
 
 @app.delete("/api/admin/users/{user_id}")
-def delete_user(user_id: int, _: sqlite3.Row = Depends(require_admin)) -> dict:
+def delete_user(user_id: int, admin: sqlite3.Row = Depends(require_admin)) -> dict:
     with database() as db:
         existing = db.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
         if existing is None:
             raise HTTPException(status_code=404, detail="账号不存在")
+        active = db.execute(
+            "SELECT 1 FROM sessions WHERE subject_type='player' AND subject_id=? LIMIT 1",
+            (user_id,),
+        ).fetchone()
         db.execute("DELETE FROM sessions WHERE subject_type='player' AND subject_id=?", (user_id,))
+        if active is not None:
+            queue_user_invalidation(db, user_id, "账号已删除", admin["id"])
         db.execute("DELETE FROM users WHERE id=?", (user_id,))
     return {"deleted": True}
+
+
+@app.get("/api/rooms")
+def list_public_rooms(x_internal_key: str | None = Header(default=None, alias="X-Internal-Key")) -> dict:
+    require_internal_key(x_internal_key)
+    with database() as db:
+        rows = room_rows(db, enabled_only=True)
+    return {"rooms": [public_room(row) for row in rows]}
+
+
+@app.get("/api/admin/rooms")
+def list_rooms(_: sqlite3.Row = Depends(require_admin)) -> dict:
+    with database() as db:
+        rows = room_rows(db, enabled_only=False)
+    game_room = read_game_status().get("roomState")
+    rooms = []
+    for row in rows:
+        room = public_room(row)
+        if isinstance(game_room, dict) and game_room.get("roomId") == room["roomId"]:
+            room["redReady"] = bool(game_room.get("redReady"))
+            room["blueReady"] = bool(game_room.get("blueReady"))
+            room["readyForSim"] = bool(game_room.get("readyForSim"))
+            room["readyForStart"] = bool(game_room.get("readyForStart"))
+        else:
+            room["redReady"] = False
+            room["blueReady"] = False
+            room["readyForSim"] = False
+            room["readyForStart"] = False
+        rooms.append(room)
+    return {"rooms": rooms}
+
+
+@app.get("/api/admin/rooms/{room_id}/occupants")
+def list_room_occupants(room_id: str, _: sqlite3.Row = Depends(require_admin)) -> dict:
+    fresh_after = iso_time(utc_now() - timedelta(seconds=8))
+    with database() as db:
+        room = db.execute("SELECT room_id FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        if room is None:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        rows = db.execute(
+            "SELECT * FROM room_presence WHERE room_id=? AND updated_at>? "
+            "ORDER BY seat_id='', side, seat_id, username COLLATE NOCASE",
+            (room_id, fresh_after),
+        ).fetchall()
+    return {"roomId": room_id, "occupants": [public_presence(row) for row in rows]}
+
+
+@app.post("/api/admin/rooms/{room_id}/occupants/{user_id}/kick", status_code=202)
+def kick_room_occupant(
+    room_id: str,
+    user_id: int,
+    body: KickBody,
+    admin: sqlite3.Row = Depends(require_admin),
+) -> dict:
+    now = iso_time(utc_now())
+    with database() as db:
+        room = db.execute("SELECT room_id FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        if room is None:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        user = db.execute("SELECT id, username, display_name FROM users WHERE id=?", (user_id,)).fetchone()
+        if user is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        presence = db.execute(
+            "SELECT 1 FROM room_presence WHERE room_id=? AND user_id=? AND updated_at>?",
+            (room_id, user_id, iso_time(utc_now() - timedelta(seconds=8))),
+        ).fetchone()
+        if presence is None:
+            raise HTTPException(status_code=409, detail="该用户当前不在房间内")
+        pending = db.execute(
+            "SELECT id FROM room_kick_requests WHERE room_id=? AND user_id=? AND processed_at IS NULL LIMIT 1",
+            (room_id, user_id),
+        ).fetchone()
+        if pending is not None:
+            return {"accepted": True, "requestId": pending["id"], "message": "移出请求已在处理中"}
+        cursor = db.execute(
+            "INSERT INTO room_kick_requests(room_id,user_id,reason,requested_by,requested_at) VALUES(?,?,?,?,?)",
+            (room_id, user_id, body.reason.strip() or "管理员移出房间", admin["id"], now),
+        )
+        db.execute(
+            "INSERT INTO room_audit(room_id,user_id,admin_id,action,detail,created_at) VALUES(?,?,?,?,?,?)",
+            (room_id, user_id, admin["id"], "kick_requested", body.reason.strip() or "管理员移出房间", now),
+        )
+    return {"accepted": True, "requestId": cursor.lastrowid, "message": "已发送移出请求"}
+
+
+@app.post("/api/admin/rooms", status_code=201)
+def create_room(body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict:
+    now = iso_time(utc_now())
+    try:
+        with database() as db:
+            db.execute(
+                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (body.room_id, body.name, body.description, body.scenario_id,
+                 json.dumps(body.seat_limits, ensure_ascii=False),
+                 json.dumps(body.seat_parameters, ensure_ascii=False), "stopped", int(body.enabled), now, now),
+            )
+            row = db.execute("SELECT * FROM rooms WHERE room_id=?", (body.room_id,)).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="房间 ID 已存在") from exc
+    return {"room": public_room(row)}
+
+
+@app.put("/api/admin/rooms/{room_id}")
+def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict:
+    if room_id != body.room_id:
+        raise HTTPException(status_code=422, detail="房间 ID 不允许修改")
+    with database() as db:
+        existing = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        if existing["status"] == "running":
+            raise HTTPException(status_code=409, detail="推演进行中不能修改房间配置")
+        now = iso_time(utc_now())
+        db.execute(
+            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,enabled=?,updated_at=? WHERE room_id=?",
+            (body.name, body.description, body.scenario_id,
+             json.dumps(body.seat_limits, ensure_ascii=False),
+             json.dumps(body.seat_parameters, ensure_ascii=False), int(body.enabled), now, room_id),
+        )
+        row = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+    return {"room": public_room(row)}
+
+
+@app.delete("/api/admin/rooms/{room_id}")
+def delete_room(room_id: str, _: sqlite3.Row = Depends(require_admin)) -> dict:
+    if room_id == ACTIVE_GAME_ROOM_ID:
+        raise HTTPException(status_code=409, detail="当前受托管房间不能删除")
+    with database() as db:
+        existing = db.execute("SELECT status FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        if existing["status"] == "running":
+            raise HTTPException(status_code=409, detail="推演进行中不能删除房间")
+        for table in ("room_operations", "room_presence", "room_kick_requests", "room_audit"):
+            db.execute(f"DELETE FROM {table} WHERE room_id=?", (room_id,))
+        db.execute("DELETE FROM rooms WHERE room_id=?", (room_id,))
+    return {"deleted": True}
+
+
+@app.post("/api/admin/rooms/{room_id}/{action}")
+def room_action(room_id: str, action: str, _: sqlite3.Row = Depends(require_admin)) -> dict:
+    actions = {"open": "preparing", "start": "running", "resume": "running", "finish": "finished",
+               "stop": "stopped", "pause": "paused", "reset": "preparing",
+               "redeploy": "preparing", "force-stop": "stopped"}
+    if action not in actions:
+        raise HTTPException(status_code=422, detail="不支持的房间操作")
+    if room_id != ACTIVE_GAME_ROOM_ID:
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前游戏服务仅托管 {ACTIVE_GAME_ROOM_ID} 房间，不能执行生命周期操作",
+        )
+    with database() as db:
+        row = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        pending = db.execute(
+            "SELECT operation_id, requested_at FROM room_operations WHERE room_id=? AND state='pending' "
+            "ORDER BY requested_at DESC, operation_id DESC LIMIT 1",
+            (room_id,),
+        ).fetchone()
+        now_value = utc_now()
+        now = iso_time(now_value)
+        if pending is not None:
+            if action == "force-stop" or (action == "pause" and pending_operation_timed_out(pending, now_value)):
+                db.execute(
+                    "UPDATE room_operations SET state='failed', acknowledged_at=? WHERE operation_id=?",
+                    (now, pending["operation_id"]),
+                )
+            else:
+                raise HTTPException(status_code=409, detail="上一项房间操作尚未得到兵棋服务确认")
+        if action == "start" and row["status"] not in {"preparing", "paused"}:
+            raise HTTPException(status_code=409, detail="房间尚未进入准备阶段")
+        if action == "start":
+            if not room_ready_for_start(room_id):
+                raise HTTPException(status_code=409, detail="所有已占用战位必须完成部署并就绪，不能开始推演")
+        if action == "resume" and row["status"] != "paused":
+            raise HTTPException(status_code=409, detail="当前房间未暂停，不能继续推演")
+        if action == "finish" and row["status"] not in {"running", "preparing", "paused"}:
+            raise HTTPException(status_code=409, detail="当前房间状态不能结束推演")
+        if action == "pause" and row["status"] not in {"preparing", "running", "paused"}:
+            raise HTTPException(status_code=409, detail="当前房间状态不能暂停")
+        operation_id = secrets.token_urlsafe(18)
+        operation_state = "acknowledged" if action == "force-stop" else "pending"
+        requested_revision = room_lifecycle_revision(room_id)
+        if action in {"reset", "redeploy"} and requested_revision <= 0:
+            raise HTTPException(status_code=409, detail="兵棋服务尚未发布可操作的房间版本")
+        try:
+            db.execute(
+                "INSERT INTO room_operations(operation_id,room_id,action,expected_status,state,requested_revision,requested_at,acknowledged_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (operation_id, room_id, action, actions[action], operation_state, requested_revision, now,
+                 now if operation_state == "acknowledged" else None),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="上一项房间操作尚未得到兵棋服务确认") from exc
+        if action not in {"reset", "redeploy"}:
+            db.execute("UPDATE rooms SET status=?,updated_at=? WHERE room_id=?", (actions[action], now, room_id))
+        updated = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+    return {
+        "room": public_room(updated),
+        "operation": {
+            "operationId": operation_id,
+            "action": action,
+            "expectedStatus": actions[action],
+            "state": operation_state,
+            "requestedRevision": requested_revision,
+            "appliedRevision": None,
+            "code": "",
+            "requestedAt": now,
+            "acknowledgedAt": now if operation_state == "acknowledged" else None,
+        },
+    }
 
 
 @app.put("/api/admin/password")
@@ -731,10 +1648,18 @@ def admin_logout(authorization: str | None = Header(default=None)) -> dict:
 def client_logout(authorization: str | None = Header(default=None)) -> dict:
     token = bearer_token(authorization)
     with database() as db:
+        session = db.execute(
+            "SELECT subject_id FROM sessions WHERE token_hash=? AND subject_type='player'",
+            (token_digest(token),),
+        ).fetchone()
         db.execute(
             "DELETE FROM sessions WHERE token_hash=? AND subject_type='player'",
             (token_digest(token),),
         )
+        if session is not None:
+            admin = db.execute("SELECT id FROM admins ORDER BY id LIMIT 1").fetchone()
+            if admin is not None:
+                queue_user_invalidation(db, session["subject_id"], "用户已退出登录", admin["id"])
     return {"loggedOut": True}
 
 
@@ -747,7 +1672,7 @@ def internal_session(
         raise HTTPException(status_code=403, detail="内部认证失败")
     with database() as db:
         row = db.execute(
-            "SELECT u.id, u.username, u.display_name, u.role, u.enabled, s.expires_at "
+            "SELECT u.id, u.username, u.display_name, u.enabled, s.expires_at "
             "FROM sessions s JOIN users u ON u.id=s.subject_id "
             "WHERE s.token_hash=? AND s.subject_type='player' AND s.expires_at>?",
             (token_digest(body.token), iso_time(utc_now())),
@@ -759,6 +1684,192 @@ def internal_session(
         "userId": row["id"],
         "username": row["username"],
         "displayName": row["display_name"],
-        "role": row["role"],
         "expiresAt": row["expires_at"],
     }
+
+
+@app.get("/api/internal/rooms")
+def internal_rooms(x_internal_key: str | None = Header(default=None)) -> dict:
+    if not secrets.compare_digest(x_internal_key or "", INTERNAL_KEY):
+        raise HTTPException(status_code=403, detail="内部认证失败")
+    with database() as db:
+        rows = room_rows(db, True)
+        kicks = db.execute(
+            "SELECT id, room_id, user_id, reason, requested_at FROM room_kick_requests "
+            "WHERE processed_at IS NULL ORDER BY requested_at LIMIT 128"
+        ).fetchall()
+        logout_requests = db.execute(
+            "SELECT id, user_id, reason, requested_at FROM user_kick_requests "
+            "WHERE processed_at IS NULL ORDER BY requested_at LIMIT 128"
+        ).fetchall()
+    return {
+        "rooms": [public_room(row) for row in rows],
+        "kickRequests": [{"id": row["id"], "roomId": row["room_id"], "userId": row["user_id"],
+                          "reason": row["reason"], "requestedAt": row["requested_at"]} for row in kicks],
+        "logoutRequests": [{"id": row["id"], "userId": row["user_id"], "reason": row["reason"],
+                            "requestedAt": row["requested_at"]} for row in logout_requests],
+    }
+
+
+class InternalKickAckBody(BaseModel):
+    request_id: int = Field(gt=0)
+    result: Literal["kicked", "not_found", "ignored"] = "ignored"
+
+
+@app.post("/api/internal/rooms/{room_id}/kick-requests/{request_id}/ack")
+def acknowledge_kick_request(
+    room_id: str,
+    request_id: int,
+    body: InternalKickAckBody,
+    x_internal_key: str | None = Header(default=None),
+) -> dict:
+    if not secrets.compare_digest(x_internal_key or "", INTERNAL_KEY):
+        raise HTTPException(status_code=403, detail="内部认证失败")
+    with database() as db:
+        row = db.execute(
+            "SELECT id FROM room_kick_requests WHERE id=? AND room_id=? AND processed_at IS NULL",
+            (request_id, room_id),
+        ).fetchone()
+        if row is None:
+            return {"accepted": True, "alreadyProcessed": True}
+        db.execute(
+            "UPDATE room_kick_requests SET processed_at=? WHERE id=?",
+            (iso_time(utc_now()), request_id),
+        )
+        db.execute(
+            "INSERT INTO room_audit(room_id,user_id,admin_id,action,detail,created_at) "
+            "SELECT room_id,user_id,requested_by,?,reason,? FROM room_kick_requests WHERE id=?",
+            (f"kick_{body.result}", iso_time(utc_now()), request_id),
+        )
+    return {"accepted": True}
+
+
+class InternalLogoutAckBody(BaseModel):
+    request_id: int = Field(gt=0)
+    result: Literal["kicked", "not_found", "ignored"] = "ignored"
+
+
+@app.post("/api/internal/logout-requests/{request_id}/ack")
+def acknowledge_logout_request(
+    request_id: int,
+    body: InternalLogoutAckBody,
+    x_internal_key: str | None = Header(default=None),
+) -> dict:
+    if not secrets.compare_digest(x_internal_key or "", INTERNAL_KEY):
+        raise HTTPException(status_code=403, detail="内部认证失败")
+    with database() as db:
+        row = db.execute(
+            "SELECT id FROM user_kick_requests WHERE id=? AND processed_at IS NULL", (request_id,)
+        ).fetchone()
+        if row is None:
+            return {"accepted": True, "alreadyProcessed": True}
+        db.execute(
+            "UPDATE user_kick_requests SET processed_at=? WHERE id=?",
+            (iso_time(utc_now()), request_id),
+        )
+        db.execute(
+            "INSERT INTO terminal_audit(admin_id,action,created_at) "
+            "SELECT requested_by,?,? FROM user_kick_requests WHERE id=?",
+            (f"user_kick_{body.result}:{request_id}", iso_time(utc_now()), request_id),
+        )
+    return {"accepted": True}
+
+
+@app.post("/api/internal/rooms/{room_id}/status")
+def internal_room_status(
+    room_id: str,
+    body: InternalRoomStatusBody,
+    x_internal_key: str | None = Header(default=None),
+) -> dict:
+    """Allow game-server readiness checks to roll back an invalid admin start.
+
+    This is deliberately narrower than the admin room action API: it cannot
+    change room configuration, only reconcile the lifecycle status observed by
+    the authoritative game process.
+    """
+    if not secrets.compare_digest(x_internal_key or "", INTERNAL_KEY):
+        raise HTTPException(status_code=403, detail="内部认证失败")
+    with database() as db:
+        existing = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        now = iso_time(utc_now())
+        winner = body.winner if body.status == "finished" else ""
+        db.execute(
+            "UPDATE rooms SET status=?,winner=?,status_reason=?,updated_at=? WHERE room_id=?",
+            (body.status, winner, body.reason, now, room_id),
+        )
+        pending = db.execute(
+            "SELECT operation_id, action, expected_status FROM room_operations "
+            "WHERE room_id=? AND state='pending' ORDER BY requested_at DESC, operation_id DESC LIMIT 1",
+            (room_id,),
+        ).fetchone()
+        if pending is not None and pending["action"] not in {"reset", "redeploy"}:
+            state = "acknowledged" if pending["expected_status"] == body.status else "failed"
+            db.execute(
+                "UPDATE room_operations SET state=?, acknowledged_at=? WHERE operation_id=?",
+                (state, now, pending["operation_id"]),
+            )
+        sync_presence(db, room_id, body.occupants)
+        updated = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+    return {"room": public_room(updated), "reason": body.reason}
+
+
+@app.post("/api/internal/rooms/{room_id}/operations/{operation_id}/ack")
+def internal_room_operation_ack(
+    room_id: str,
+    operation_id: str,
+    body: InternalOperationAckBody,
+    x_internal_key: str | None = Header(default=None),
+) -> dict:
+    if not secrets.compare_digest(x_internal_key or "", INTERNAL_KEY):
+        raise HTTPException(status_code=403, detail="内部认证失败")
+    with database() as db:
+        row = db.execute(
+            "SELECT operation_id,expected_status,state,requested_revision,applied_revision,result_code "
+            "FROM room_operations WHERE operation_id=? AND room_id=?",
+            (operation_id, room_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="房间操作不存在")
+        if row["state"] != "pending":
+            if (row["state"] == body.state
+                    and (row["applied_revision"] or 0) == body.revision
+                    and row["result_code"] == body.code):
+                updated = next(item for item in room_rows(db, False) if item["room_id"] == room_id)
+                return {"accepted": True, "alreadyProcessed": True,
+                        "room": public_room(updated), "revision": body.revision,
+                        "code": body.code}
+            raise HTTPException(status_code=409, detail="房间操作已以不同结果完成")
+        if body.state == "acknowledged" and body.revision <= row["requested_revision"]:
+            raise HTTPException(status_code=409, detail="房间操作确认版本与请求版本不连续")
+        now = iso_time(utc_now())
+        db.execute(
+            "UPDATE room_operations SET state=?,applied_revision=?,result_code=?,acknowledged_at=? "
+            "WHERE operation_id=? AND state='pending'",
+            (body.state, body.revision, body.code, now, operation_id),
+        )
+        if body.state == "acknowledged":
+            db.execute(
+                "UPDATE rooms SET status=?,winner='',status_reason='',updated_at=? WHERE room_id=?",
+                (row["expected_status"], now, room_id),
+            )
+        updated = next(item for item in room_rows(db, False) if item["room_id"] == room_id)
+    return {"accepted": True, "room": public_room(updated), "revision": body.revision,
+            "code": body.code}
+
+
+@app.post("/api/internal/rooms/{room_id}/presence")
+def internal_room_presence(
+    room_id: str,
+    body: InternalPresenceBody,
+    x_internal_key: str | None = Header(default=None),
+) -> dict:
+    if not secrets.compare_digest(x_internal_key or "", INTERNAL_KEY):
+        raise HTTPException(status_code=403, detail="内部认证失败")
+    with database() as db:
+        existing = db.execute("SELECT room_id FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        sync_presence(db, room_id, body.occupants)
+    return {"accepted": True, "occupantCount": len(body.occupants)}

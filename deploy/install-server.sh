@@ -1,37 +1,70 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# 兵器推演联网服务一键安装器
+# 兵棋推演联网服务一键安装器
 # Copyright (c) 2026 Gbr
 
-INSTALLER_VERSION="2026.07-shell-settings"
+INSTALLER_VERSION="2026.08"
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="$ROOT_DIR/deploy/compose.yml"
-ENV_FILE="$ROOT_DIR/.env"
+SOURCE_ROOT="$ROOT_DIR"
+SOURCE_INPUT=""
+SOURCE_ARCHIVE=""
+SOURCE_INPUT_TOP=""
+SOURCE_IS_MANAGED_CURRENT=0
+INSTALL_ROOT=""
+CURRENT_DIR=""
+RUNTIME_MARKER=""
+COMPOSE_FILE=""
+ENV_FILE=""
+WARGAME_COMPOSE_PROJECT="wargame"
+WARGAME_RUNTIME_ENV_FILE=""
+INSTALL_DIR_SET=0
+COMPOSE_PROJECT_SET=0
+PROJECT_VERSION="$(sed -nE 's/^project\([^)]* VERSION ([0-9][0-9A-Za-z._-]*).*/\1/p' "$ROOT_DIR/CMakeLists.txt" | head -n1)"
+INTERNAL_API_KEY=""
 BACKUP_FILE=""
 BIND_ADDRESS="127.0.0.1"
 PUBLIC_HOST=""
 HTTP_PORT="8080"
 WS_PORT="8090"
 ADMIN_USERNAME="admin"
-ADMIN_PASSWORD=""
+ADMIN_PASSWORD_SET="${ADMIN_PASSWORD+x}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD-}"
 SESSION_HOURS="12"
-WEB_SHELL_ENABLED="true"
+WEB_SHELL_ENABLED="false"
 WEB_SHELL_TICKET_SECONDS="120"
 WEB_SHELL_SESSION_SECONDS="900"
 WEB_SHELL_MAX_SESSIONS="2"
+WEB_SHELL_ALLOWED_ORIGINS=""
 STARTUP_TIMEOUT_SECONDS="90"
-WARGAME_VERSION="0.1.0"
+WARGAME_VERSION="${PROJECT_VERSION:-1.0.0}"
+WARGAME_SOURCE_DIGEST="dev"
+WARGAME_RELEASE_ID="${WARGAME_VERSION}-dev"
 WARGAME_DATA_VOLUME="wargame-data"
+PUBLIC_GAME_WS_URL=""
+LOGIN_TRUSTED_PROXIES=""
+LOGIN_WINDOW_SECONDS="60"
+LOGIN_SUBJECT_IP_FAILURE_LIMIT="5"
+LOGIN_IP_FAILURE_LIMIT="20"
+GAME_ROOM_ID="main"
+ROOM_OPERATION_TIMEOUT_SECONDS="20"
+WARGAME_ALLOW_RECOVERY_RESET="0"
+WARGAME_ENABLE_FASTDDS="OFF"
+WARGAME_FASTDDS_MODE="disabled"
+FASTDDS_DOMAIN_ID="0"
+FASTDDS_DISCOVERY_TIMEOUT_MS="5000"
+FASTDDS_STATIC_PEERS=""
 REUSE_PASSWORD=0
 RESET_ADMIN=1
 NO_BUILD=0
+NO_PULL=0
 ASSUME_YES=0
 SKIP_ENVIRONMENT_CHECK=0
 ADMIN_TOKEN=""
 BIND_ADDRESS_SET=0
 PUBLIC_HOST_SET=0
+PUBLIC_GAME_WS_URL_SET=0
 HTTP_PORT_SET=0
 WS_PORT_SET=0
 ADMIN_USERNAME_SET=0
@@ -41,6 +74,10 @@ WEB_SHELL_TICKET_SECONDS_SET=0
 WEB_SHELL_SESSION_SECONDS_SET=0
 WEB_SHELL_MAX_SESSIONS_SET=0
 STARTUP_TIMEOUT_SECONDS_SET=0
+SOURCE_SET=0
+ENV_EXISTED=0
+DATA_VOLUME_SET=0
+ADMIN_PASSWORD_STDIN=0
 
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'
@@ -52,26 +89,36 @@ fi
 log() { printf '%b\n' "${C_CYAN}  [Gbr]${C_RESET} $*"; }
 ok() { printf '%b\n' "${C_GREEN}  [  OK ]${C_RESET} $*"; }
 warn() { printf '%b\n' "${C_YELLOW}  [WARN ]${C_RESET} $*" >&2; }
-die() { printf '%b\n' "${C_RED}  [FAIL ]${C_RESET} $*" >&2; exit 1; }
+die() {
+  printf '%b\n' "${C_RED}  [FAIL ]${C_RESET} $*" >&2
+  rollback_source_activation 2>/dev/null || true
+  exit 1
+}
 step() { printf '%b\n' "\n${C_WHITE}  >>> $*${C_RESET}"; }
 
 usage() {
   cat <<'EOF'
-Gbr 兵器推演联网服务器安装器
+Gbr 兵棋推演联网服务器安装器
 
 用法:
   sudo ./deploy/install-server.sh [选项]
 
 选项:
-  --bind-address IP       Docker 监听 IP；可指定 VPN/FRP 所用网卡，默认自动绑定本机公网 IPv4
+  --bind-address IP       Docker 监听 IP；默认 127.0.0.1
   --public-host HOST      客户端连接用 IP 或域名；FRP 场景请填写 FRP 公网入口
+  --public-game-ws-url URL 对外 WebSocket 地址；非回环绑定必须使用 wss://
   --http-port PORT        管理网页端口，默认 8080
   --ws-port PORT          推演 WebSocket 端口，默认 8090
   --admin-username NAME   管理员用户名，默认 admin
-  --admin-password PASS   管理员密码；省略时安全地交互输入
+  --admin-password-stdin  从标准输入读取管理员密码；省略时安全地交互输入
+  --wargame-version VER   固定部署版本；默认读取当前源码的项目版本
+  --source PATH            完整源码目录或 wargame-server-*.tar.gz 发布包
+  --install-dir DIR       受管运行时根目录，默认当前用户主目录下的 wargame
+  --compose-project NAME  稳定的 Docker Compose 项目名，默认 wargame
+  --data-volume NAME      持久 Docker 数据卷名，默认 wargame-data
   --reuse-admin-password  复用现有 .env 中的管理员密码
   --session-hours HOURS   管理员网页会话时长，1-168，默认 12
-  --shell                 启用网页容器 Shell（默认启用）
+  --shell                 显式启用高风险网页容器 Shell（默认禁用）
   --no-shell              禁用网页容器 Shell
   --shell-ticket-seconds N  Shell 一次性凭证时效，30-600，默认 120
   --shell-session-seconds N Shell 会话时长，60-3600，默认 900
@@ -80,24 +127,28 @@ Gbr 兵器推演联网服务器安装器
   --reset-admin           启动后强制重置现有管理员密码（默认开启）
   --no-reset-admin        启动后保留现有管理员密码
   --no-build              不重新构建镜像，仅启动已有镜像
+  --no-pull               构建时不拉取最新基础镜像
   --skip-environment-check 跳过平台、依赖和端口环境检查
   --yes                   跳过确认提示
   -h, --help              显示帮助
 
+默认会拉取基础镜像，并重建当前源码中的账号网页和权威服务器。
+
 示例:
-  sudo ./deploy/install-server.sh --admin-password '设置一个强管理员密码'
-  sudo ./deploy/install-server.sh --public-host 192.168.1.20 --admin-password 'strong-pass' \
+  sudo ./deploy/install-server.sh
+  sudo ./deploy/install-server.sh --public-host 192.168.1.20 \
     --session-hours 24 --shell-session-seconds 1800 --shell-max-sessions 3
-  sudo ./deploy/install-server.sh --bind-address 10.8.0.2 --admin-password 'strong-pass'
+  sudo ./deploy/install-server.sh --bind-address 10.8.0.2
   sudo ./deploy/install-server.sh --bind-address 127.0.0.1 --public-host game.example.com \
-    --admin-password 'strong-pass'
+    --admin-password-stdin < /root/wargame-admin-password
 EOF
 }
 
 on_error() {
   local code=$?
+  rollback_source_activation
   printf '%b\n' "${C_RED}  [FAIL ] 安装在第 ${BASH_LINENO[0]} 行中止（退出码 ${code}）${C_RESET}" >&2
-  printf '%b\n' "${C_DIM}          可查看日志：docker compose --env-file .env -f deploy/compose.yml logs --tail=120${C_RESET}" >&2
+  printf '%b\n' "${C_DIM}          保留失败暂存目录并保留运行配置、备份和数据卷${C_RESET}" >&2
   exit "$code"
 }
 trap on_error ERR
@@ -118,13 +169,341 @@ docker_cmd() {
 }
 
 compose_cmd() {
-  docker_cmd compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  docker_cmd compose --project-name "$WARGAME_COMPOSE_PROJECT" \
+    --env-file "$WARGAME_RUNTIME_ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+default_install_root() {
+  local home_dir
+  if [[ $EUID -eq 0 ]]; then
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+      home_dir="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    else
+      home_dir="/root"
+    fi
+  else
+    home_dir="${HOME:-}"
+  fi
+  [[ -n "$home_dir" && "$home_dir" == /* ]] || die "无法解析安装用户主目录"
+  printf '%s/wargame' "${home_dir%/}"
+}
+
+path_is_source_or_nested() {
+  local candidate="$1" source="$2"
+  [[ "$candidate" == "$source" || "$candidate" == "$source"/* \
+    || "$source" == "$candidate" || "$source" == "$candidate"/* ]]
+}
+
+validate_compose_project() {
+  [[ "$WARGAME_COMPOSE_PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$ ]] \
+    || die "Compose 项目名无效：$WARGAME_COMPOSE_PROJECT"
+}
+
+parse_bootstrap_args() {
+  local arg
+  while (($#)); do
+    arg="$1"
+    case "$arg" in
+      --source)
+        [[ $# -ge 2 ]] || die "缺少 --source 的值"
+        SOURCE_INPUT="$2"
+        SOURCE_SET=1
+        shift 2
+        ;;
+      --install-dir|--compose-project)
+        [[ $# -ge 2 ]] || die "缺少 $arg 的值"
+        shift 2
+        ;;
+      *) shift ;;
+    esac
+  done
+}
+
+required_source_paths=(
+  CMakeLists.txt
+  cmake
+  src
+  server
+  deploy/compose.yml
+  deploy/install-server.sh
+  deploy/account.Dockerfile
+  deploy/game-server.Dockerfile
+  map/metadata.json
+)
+
+validate_source_tree() {
+  local source="$1" path
+  for path in "${required_source_paths[@]}"; do
+    [[ -e "$source/$path" ]] || die "源码缺少必要构建输入：$path"
+    [[ ! -L "$source/$path" ]] || die "源码包含不受支持的特殊文件或链接：$path"
+    if [[ -d "$source/$path" ]]; then
+      while IFS= read -r -d '' node; do
+        [[ ! -L "$node" ]] || die "源码包含不受支持的特殊文件或链接：${node#"$source/"}"
+        [[ -f "$node" || -d "$node" ]] || die "源码包含不受支持的特殊文件：${node#"$source/"}"
+      done < <(find "$source/$path" -xdev -print0)
+    else
+      [[ -f "$source/$path" ]] || die "源码包含不受支持的特殊文件：$path"
+    fi
+  done
+}
+
+validate_archive() {
+  local archive="$1" listing entry normalized top="" first type
+  [[ -f "$archive" ]] || die "发布包不存在：$archive"
+  listing="$(tar -tzf "$archive" 2>/dev/null)" || die "无法读取发布包：$archive"
+  [[ -n "$listing" ]] || die "发布包为空：$archive"
+  while IFS= read -r entry; do
+    normalized="${entry%/}"
+    [[ -n "$normalized" ]] || continue
+    case "$normalized" in
+      /*|.|..|./*|../*|*/../*|*/..|*"$'\n'"*|*"$'\r'"*)
+        die "发布包包含不安全路径：$entry"
+        ;;
+    esac
+    first="${normalized%%/*}"
+    if [[ -z "$top" ]]; then
+      top="$first"
+    elif [[ "$first" != "$top" ]]; then
+      die "发布包必须只有一个顶层目录"
+    fi
+    [[ "$normalized" == "$top" || "$normalized" == "$top"/* ]] || die "发布包顶层目录无效"
+  done <<<"$listing"
+  [[ -n "$top" ]] || die "发布包缺少顶层目录"
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    type="${entry:0:1}"
+    case "$type" in
+      -|d) ;;
+      *) die "发布包包含链接或特殊文件：${entry:0:80}" ;;
+    esac
+  done < <(tar -tvzf "$archive" 2>/dev/null || die "无法检查发布包文件类型：$archive")
+  printf '%s' "$top"
+}
+
+resolve_source_input() {
+  local source_path top
+  if (( SOURCE_SET == 0 )); then
+    SOURCE_ROOT="$ROOT_DIR"
+    return 0
+  fi
+  [[ -n "$SOURCE_INPUT" ]] || die "--source 不能为空"
+  source_path="$(realpath -- "$SOURCE_INPUT" 2>/dev/null || true)"
+  [[ -n "$source_path" ]] || die "无法解析 --source：$SOURCE_INPUT"
+  if [[ -d "$source_path" ]]; then
+    SOURCE_ROOT="$source_path"
+    SOURCE_ARCHIVE=""
+    return 0
+  fi
+  [[ -f "$source_path" ]] || die "--source 必须是源码目录或发布包：$SOURCE_INPUT"
+  top="$(validate_archive "$source_path")"
+  SOURCE_ROOT="$source_path"
+  SOURCE_ARCHIVE="$source_path"
+  SOURCE_INPUT_TOP="$top"
+}
+
+resolve_runtime_layout() {
+  local requested_root="" requested_project="" requested_root_set=0 canonical_root canonical_source
+  while (($#)); do
+    case "$1" in
+      --install-dir)
+        [[ $# -ge 2 ]] || die "缺少 --install-dir 的值"
+        requested_root="$2"; requested_root_set=1; shift 2 ;;
+      --compose-project)
+        [[ $# -ge 2 ]] || die "缺少 --compose-project 的值"
+        requested_project="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if (( requested_root_set == 1 )); then
+    INSTALL_ROOT="$requested_root"
+    INSTALL_DIR_SET=1
+  else
+    INSTALL_ROOT="$(default_install_root)"
+  fi
+  [[ -n "$INSTALL_ROOT" && "$INSTALL_ROOT" == /* ]] \
+    || die "安装目录必须是非空绝对路径"
+  [[ "$INSTALL_ROOT" != "/" && "$INSTALL_ROOT" != *$'\n'* && "$INSTALL_ROOT" != *$'\r'* ]] \
+    || die "安装目录无效"
+  [[ "$INSTALL_ROOT" != */../* && "$INSTALL_ROOT" != */.. && "$INSTALL_ROOT" != ../* && "$INSTALL_ROOT" != ".." ]] \
+    || die "安装目录不能包含路径遍历"
+  [[ ! -L "$INSTALL_ROOT" ]] || die "安装目录不能是符号链接"
+  canonical_root="$(realpath -m -- "$INSTALL_ROOT")"
+  canonical_source="$(realpath -m -- "$SOURCE_ROOT")"
+  [[ "$canonical_root" != "/" ]] || die "安装目录不能是根目录"
+  if [[ "$canonical_source" == "$canonical_root/current" ]]; then
+    SOURCE_IS_MANAGED_CURRENT=1
+  elif path_is_source_or_nested "$canonical_root" "$canonical_source"; then
+    die "安装目录不能与源码目录重叠"
+  fi
+  INSTALL_ROOT="$canonical_root"
+  CURRENT_DIR="$INSTALL_ROOT/current"
+  RUNTIME_MARKER="$INSTALL_ROOT/.wargame-install"
+  ENV_FILE="$INSTALL_ROOT/.env"
+  WARGAME_RUNTIME_ENV_FILE="$ENV_FILE"
+  COMPOSE_FILE="$CURRENT_DIR/deploy/compose.yml"
+  [[ -n "$requested_project" ]] && WARGAME_COMPOSE_PROJECT="$requested_project" && COMPOSE_PROJECT_SET=1
+  validate_compose_project
+  if (( DATA_VOLUME_SET == 0 )); then WARGAME_DATA_VOLUME="${WARGAME_COMPOSE_PROJECT}-data"; fi
+  if [[ -e "$INSTALL_ROOT" ]]; then
+    [[ -f "$RUNTIME_MARKER" ]] || die "安装目录已存在且不是受管运行时：$INSTALL_ROOT"
+  else
+    mkdir -p -- "$INSTALL_ROOT"
+  fi
+  mkdir -p -- "$INSTALL_ROOT/backups" "$INSTALL_ROOT/.staging"
+  [[ -f "$COMPOSE_FILE" ]] || COMPOSE_FILE="$SOURCE_ROOT/deploy/compose.yml"
+  if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+    local owner_uid owner_gid
+    owner_uid="$(id -u "$SUDO_USER")"; owner_gid="$(id -g "$SUDO_USER")"
+    chown -R "$owner_uid:$owner_gid" "$INSTALL_ROOT"
+  fi
+}
+
+ensure_runtime_marker() {
+  if [[ ! -f "$RUNTIME_MARKER" ]]; then
+    umask 077
+    printf 'version=1\nsource=%s\nproject=%s\n' "$SOURCE_ROOT" "$WARGAME_COMPOSE_PROJECT" >"$RUNTIME_MARKER"
+  fi
+  chmod 600 "$RUNTIME_MARKER"
+}
+
+STAGING_DIR=""
+PREVIOUS_CURRENT=""
+ACTIVE_NEW=0
+ROLLBACK_IN_PROGRESS=0
+
+is_prohibited_source_path() {
+  local path="$1"
+  local base="${path##*/}"
+  [[ "$path" == "deploy/.env.example" ]] && return 1
+
+  case "$path" in
+    .env*|*/.env*|build|build/*|*/build|*/build/*|cache|cache/*|*/cache|*/cache/*|.cache|.cache/*|*/.cache|*/.cache/*|logs|logs/*|*/logs|*/logs/*|backups|backups/*|*/backups|*/backups/*|__pycache__|__pycache__/*|*/__pycache__|*/__pycache__/*|.pytest_cache|.pytest_cache/*|*/.pytest_cache|*/.pytest_cache/*)
+      return 0
+      ;;
+  esac
+
+  case "$base" in
+    *.db|*.db-*|*.sqlite|*.sqlite-*|*.sqlite3|*.sqlite3-*|*.jsonl|*.log|*.cache|*.pyc|*.pyo|*.pyd|*checkpoint*|*status*|*events*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+prune_runtime_artifacts() {
+  local root="$1" candidate relative
+  while IFS= read -r -d '' candidate; do
+    relative="${candidate#"$root/"}"
+    if is_prohibited_source_path "$relative"; then
+      rm -rf -- "$candidate"
+    fi
+  done < <(find "$root" -mindepth 1 -print0)
+}
+
+copy_source_inputs() {
+  local source="$1" destination="$2" input
+  validate_source_tree "$source"
+  mkdir -p -- "$destination"
+  for input in CMakeLists.txt Main.qml main.cpp qml cmake src server deploy map/metadata.json \
+      .dockerignore README.md docs; do
+    [[ -e "$source/$input" ]] || continue
+    [[ "$input" != */* ]] || mkdir -p -- "$destination/${input%/*}"
+    cp -a --no-preserve=ownership "$source/$input" "$destination/$input"
+  done
+  prune_runtime_artifacts "$destination"
+}
+
+stage_source_tree() {
+  local source="$SOURCE_ROOT" extracted top input
+  STAGING_DIR="$(mktemp -d "$INSTALL_ROOT/.staging/source.XXXXXX")"
+  if [[ -n "$SOURCE_ARCHIVE" ]]; then
+    extracted="$(mktemp -d "$INSTALL_ROOT/.staging/archive.XXXXXX")"
+    tar -xzf "$SOURCE_ARCHIVE" --no-same-owner --no-same-permissions -C "$extracted"
+    top="$SOURCE_INPUT_TOP"
+    source="$extracted/$top"
+    copy_source_inputs "$source" "$STAGING_DIR"
+    rm -rf -- "$extracted"
+  else
+    copy_source_inputs "$source" "$STAGING_DIR"
+  fi
+  for input in "${required_source_paths[@]}"; do
+    [[ -e "$STAGING_DIR/$input" ]] || die "暂存源码缺少必要输入：$input"
+  done
+}
+
+compute_source_digest() {
+  local source="$1"
+  (
+    cd -- "$source"
+    local input
+    local -a digest_inputs=()
+    for input in CMakeLists.txt Main.qml main.cpp qml cmake src server deploy \
+        map/metadata.json .dockerignore README.md docs; do
+      [[ -e "$input" ]] && digest_inputs+=("$input")
+    done
+    find "${digest_inputs[@]}" \
+      -type d \( -name __pycache__ -o -name .pytest_cache \) -prune -o \
+      -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \) -prune -o \
+      -type f -print0 \
+      | LC_ALL=C sort -z \
+      | xargs -0 sha256sum \
+      | sha256sum \
+      | cut -c1-64
+  )
+}
+
+activate_staged_source() {
+  local previous_name
+  [[ -d "$STAGING_DIR" ]] || die "源码暂存目录不存在"
+  previous_name="$INSTALL_ROOT/.staging/previous.$(date +%Y%m%d-%H%M%S).$$"
+  if [[ -e "$CURRENT_DIR" ]]; then
+    mv -- "$CURRENT_DIR" "$previous_name"
+    PREVIOUS_CURRENT="$previous_name"
+  fi
+  mv -- "$STAGING_DIR" "$CURRENT_DIR"
+  STAGING_DIR=""
+  ACTIVE_NEW=1
+  COMPOSE_FILE="$CURRENT_DIR/deploy/compose.yml"
+  ensure_runtime_marker
+}
+
+rollback_source_activation() {
+  local failed_name
+  (( ROLLBACK_IN_PROGRESS == 0 )) || return 0
+  ROLLBACK_IN_PROGRESS=1
+  if (( ENV_EXISTED == 1 )) && [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
+    cp -p -- "$BACKUP_FILE" "$ENV_FILE" 2>/dev/null || true
+  fi
+  if (( ACTIVE_NEW != 1 )); then
+    ROLLBACK_IN_PROGRESS=0
+    return 0
+  fi
+  compose_cmd down --remove-orphans >/dev/null 2>&1 || true
+  failed_name="$INSTALL_ROOT/backups/failed-staging-$(date -u +%Y%m%d-%H%M%S)-$$"
+  if [[ -d "$CURRENT_DIR" ]]; then
+    mv -- "$CURRENT_DIR" "$failed_name" 2>/dev/null || true
+  fi
+  if [[ -n "$PREVIOUS_CURRENT" && -d "$PREVIOUS_CURRENT" ]]; then
+    mv -- "$PREVIOUS_CURRENT" "$CURRENT_DIR" 2>/dev/null || true
+    COMPOSE_FILE="$CURRENT_DIR/deploy/compose.yml"
+    compose_cmd up -d --no-build >/dev/null 2>&1 || true
+  fi
+  ACTIVE_NEW=0
 }
 
 read_existing_env() {
   [[ -f "$ENV_FILE" ]] || return 0
   local value load_value
-  load_value() { sed -n "s/^$1=//p" "$ENV_FILE" | head -n1 || true; }
+  load_value() {
+    local loaded
+    loaded="$(sed -n "s/^$1=//p" "$ENV_FILE" | head -n1 || true)"
+    if [[ "$loaded" == \'*\' ]]; then
+      loaded="${loaded:1:${#loaded}-2}"
+      loaded="${loaded//\\\'/\'}"
+    fi
+    printf '%s' "$loaded"
+  }
   value="$(load_value ADMIN_USERNAME)"; [[ $ADMIN_USERNAME_SET -eq 0 && -n "$value" ]] && ADMIN_USERNAME="$value"
   value="$(load_value HOST_BIND_ADDRESS)"
   if [[ $BIND_ADDRESS_SET -eq 0 && -n "$value" ]]; then
@@ -138,8 +517,13 @@ read_existing_env() {
   value="$(load_value WEB_SHELL_TICKET_SECONDS)"; [[ $WEB_SHELL_TICKET_SECONDS_SET -eq 0 && -n "$value" ]] && WEB_SHELL_TICKET_SECONDS="$value"
   value="$(load_value WEB_SHELL_SESSION_SECONDS)"; [[ $WEB_SHELL_SESSION_SECONDS_SET -eq 0 && -n "$value" ]] && WEB_SHELL_SESSION_SECONDS="$value"
   value="$(load_value WEB_SHELL_MAX_SESSIONS)"; [[ $WEB_SHELL_MAX_SESSIONS_SET -eq 0 && -n "$value" ]] && WEB_SHELL_MAX_SESSIONS="$value"
-  value="$(load_value WARGAME_VERSION)"; [[ -n "$value" ]] && WARGAME_VERSION="$value"
+  value="$(load_value WEB_SHELL_ALLOWED_ORIGINS)"; [[ -n "$value" ]] && WEB_SHELL_ALLOWED_ORIGINS="$value"
   value="$(load_value WARGAME_DATA_VOLUME)"; [[ -n "$value" ]] && WARGAME_DATA_VOLUME="$value"
+  value="$(load_value INTERNAL_API_KEY)"; [[ -n "$value" ]] && INTERNAL_API_KEY="$value"
+  value="$(load_value WARGAME_COMPOSE_PROJECT)"
+  if [[ $COMPOSE_PROJECT_SET -eq 0 && -n "$value" ]]; then WARGAME_COMPOSE_PROJECT="$value"; fi
+  value="$(load_value WARGAME_RUNTIME_ENV_FILE)"
+  [[ -z "$value" || "$value" == "$ENV_FILE" ]] || die "WARGAME_RUNTIME_ENV_FILE 必须指向绝对运行时配置：$ENV_FILE"
   value="$(load_value PUBLIC_HOST)"
   if [[ $PUBLIC_HOST_SET -eq 0 && -n "$value" ]]; then
     PUBLIC_HOST="$value"
@@ -153,16 +537,47 @@ read_existing_env() {
       [[ -n "$PUBLIC_HOST" ]] && PUBLIC_HOST_SET=1
     fi
   fi
-  if [[ -z "$ADMIN_PASSWORD" && $REUSE_PASSWORD -eq 1 ]]; then
+  value="$(load_value PUBLIC_GAME_WS_URL)"; [[ $PUBLIC_GAME_WS_URL_SET -eq 0 && -n "$value" ]] && PUBLIC_GAME_WS_URL="$value"
+  value="$(load_value LOGIN_TRUSTED_PROXIES)"; [[ -n "$value" ]] && LOGIN_TRUSTED_PROXIES="$value"
+  value="$(load_value LOGIN_WINDOW_SECONDS)"; [[ -n "$value" ]] && LOGIN_WINDOW_SECONDS="$value"
+  value="$(load_value LOGIN_SUBJECT_IP_FAILURE_LIMIT)"; [[ -n "$value" ]] && LOGIN_SUBJECT_IP_FAILURE_LIMIT="$value"
+  value="$(load_value LOGIN_IP_FAILURE_LIMIT)"; [[ -n "$value" ]] && LOGIN_IP_FAILURE_LIMIT="$value"
+  value="$(load_value GAME_ROOM_ID)"; [[ -n "$value" ]] && GAME_ROOM_ID="$value"
+  value="$(load_value ROOM_OPERATION_TIMEOUT_SECONDS)"; [[ -n "$value" ]] && ROOM_OPERATION_TIMEOUT_SECONDS="$value"
+  value="$(load_value WARGAME_ALLOW_RECOVERY_RESET)"; [[ -n "$value" ]] && WARGAME_ALLOW_RECOVERY_RESET="$value"
+  value="$(load_value WARGAME_ENABLE_FASTDDS)"; [[ -n "$value" ]] && WARGAME_ENABLE_FASTDDS="$value"
+  value="$(load_value WARGAME_FASTDDS_MODE)"; [[ -n "$value" ]] && WARGAME_FASTDDS_MODE="$value"
+  value="$(load_value FASTDDS_DOMAIN_ID)"; [[ -n "$value" ]] && FASTDDS_DOMAIN_ID="$value"
+  value="$(load_value FASTDDS_DISCOVERY_TIMEOUT_MS)"; [[ -n "$value" ]] && FASTDDS_DISCOVERY_TIMEOUT_MS="$value"
+  value="$(load_value FASTDDS_STATIC_PEERS)" && FASTDDS_STATIC_PEERS="$value"
+  if [[ $REUSE_PASSWORD -eq 1 ]]; then
     ADMIN_PASSWORD="$(load_value ADMIN_PASSWORD)"
+    ADMIN_PASSWORD_SET=1
   fi
 }
 
-is_public_ipv4() {
+migrate_legacy_env() {
+  [[ -f "$ENV_FILE" ]] && return 0
+  [[ "$SOURCE_ROOT" != "$INSTALL_ROOT" ]] || return 0
+  if [[ -f "$SOURCE_ROOT/.env" ]]; then
+    umask 077
+    cp -p -- "$SOURCE_ROOT/.env" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    log "已将旧源码根目录的 .env 迁移到 $ENV_FILE"
+  fi
+}
+
+is_ipv4() {
   local ip="$1" a b c d
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
   IFS=. read -r a b c d <<<"$ip"
   (( 10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255 )) || return 1
+}
+
+is_public_ipv4() {
+  local ip="$1" a b c d
+  is_ipv4 "$ip" || return 1
+  IFS=. read -r a b c d <<<"$ip"
   (( 10#$a != 0 && 10#$a != 10 && 10#$a != 127 && 10#$a < 224 )) || return 1
   (( !(10#$a == 100 && 10#$b >= 64 && 10#$b <= 127) )) || return 1
   (( !(10#$a == 169 && 10#$b == 254) )) || return 1
@@ -208,15 +623,6 @@ detect_public_host() {
 }
 
 select_bind_address() {
-  local public_ip
-  public_ip="$(detect_local_public_ipv4 || true)"
-  if [[ $BIND_ADDRESS_SET -eq 0 \
-    && ( "$BIND_ADDRESS" == "127.0.0.1" || "$BIND_ADDRESS" == "localhost" ) \
-    && -n "$public_ip" ]]; then
-    BIND_ADDRESS="$public_ip"
-    # prepare_env 会再次读取旧 .env；标记为已选择以保留新的自动公网绑定。
-    BIND_ADDRESS_SET=1
-  fi
   detect_public_host
 }
 
@@ -250,15 +656,30 @@ json_escape() {
   printf '%s' "$value"
 }
 
+dotenv_quote() {
+  local value="$1"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "配置值不能包含换行符"
+  value="${value//\'/\\\'}"
+  printf "'%s'" "$value"
+}
+
 parse_args() {
   while (($#)); do
     case "$1" in
       --bind-address) BIND_ADDRESS="${2:?缺少 --bind-address 的值}"; BIND_ADDRESS_SET=1; shift 2 ;;
       --public-host) PUBLIC_HOST="${2:?缺少 --public-host 的值}"; PUBLIC_HOST_SET=1; shift 2 ;;
+      --public-game-ws-url) PUBLIC_GAME_WS_URL="${2:?缺少 --public-game-ws-url 的值}"; PUBLIC_GAME_WS_URL_SET=1; shift 2 ;;
       --http-port) HTTP_PORT="${2:?缺少 --http-port 的值}"; HTTP_PORT_SET=1; shift 2 ;;
       --ws-port) WS_PORT="${2:?缺少 --ws-port 的值}"; WS_PORT_SET=1; shift 2 ;;
       --admin-username) ADMIN_USERNAME="${2:?缺少 --admin-username 的值}"; ADMIN_USERNAME_SET=1; shift 2 ;;
-      --admin-password) ADMIN_PASSWORD="${2:?缺少 --admin-password 的值}"; shift 2 ;;
+      --admin-password)
+        die "--admin-password 会泄露凭据；请改用交互输入或 --admin-password-stdin" ;;
+      --admin-password-stdin) ADMIN_PASSWORD_STDIN=1; shift ;;
+      --source) SOURCE_INPUT="${2:?缺少 --source 的值}"; SOURCE_SET=1; shift 2 ;;
+      --install-dir) INSTALL_ROOT="${2:?缺少 --install-dir 的值}"; INSTALL_DIR_SET=1; shift 2 ;;
+      --compose-project) WARGAME_COMPOSE_PROJECT="${2:?缺少 --compose-project 的值}"; COMPOSE_PROJECT_SET=1; shift 2 ;;
+      --data-volume) WARGAME_DATA_VOLUME="${2:?缺少 --data-volume 的值}"; DATA_VOLUME_SET=1; shift 2 ;;
+      --wargame-version) WARGAME_VERSION="${2:?缺少 --wargame-version 的值}"; shift 2 ;;
       --reuse-admin-password) REUSE_PASSWORD=1; shift ;;
       --session-hours) SESSION_HOURS="${2:?缺少 --session-hours 的值}"; SESSION_HOURS_SET=1; shift 2 ;;
       --shell) WEB_SHELL_ENABLED="true"; WEB_SHELL_ENABLED_SET=1; shift ;;
@@ -270,6 +691,7 @@ parse_args() {
       --reset-admin) RESET_ADMIN=1; shift ;;
       --no-reset-admin) RESET_ADMIN=0; shift ;;
       --no-build) NO_BUILD=1; shift ;;
+      --no-pull) NO_PULL=1; shift ;;
       --skip-environment-check) SKIP_ENVIRONMENT_CHECK=1; shift ;;
       --yes) ASSUME_YES=1; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -288,17 +710,43 @@ validate_configuration() {
   validate_number "Shell 并发数" "$WEB_SHELL_MAX_SESSIONS" 1 8
   validate_number "服务启动超时" "$STARTUP_TIMEOUT_SECONDS" 30 600
   [[ "$HTTP_PORT" != "$WS_PORT" ]] || die "管理网页端口和 WebSocket 端口不能相同"
-  [[ "$BIND_ADDRESS" != *:* ]] || die "暂不支持带冒号的 IPv6 绑定地址，请使用 IPv4"
+  [[ "$BIND_ADDRESS" == "localhost" ]] || is_ipv4 "$BIND_ADDRESS" \
+    || die "绑定地址必须是 IPv4 地址或 localhost"
+  [[ -z "$PUBLIC_HOST" || "$PUBLIC_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]] \
+    || die "客户端主机必须是有效的 IPv4 地址或域名"
+  [[ -z "$PUBLIC_GAME_WS_URL" || "$PUBLIC_GAME_WS_URL" == ws://* || "$PUBLIC_GAME_WS_URL" == wss://* ]] \
+    || die "PUBLIC_GAME_WS_URL 必须使用 ws:// 或 wss://"
+  [[ "$BIND_ADDRESS" == "127.0.0.1" || "$BIND_ADDRESS" == "localhost" ]] \
+    || die "为避免明文 HTTP 暴露，安装器只允许回环绑定；远程访问请在反向代理后转发到回环端口"
   [[ "$ADMIN_USERNAME" =~ ^[A-Za-z0-9_.-]{3,64}$ ]] || die "管理员用户名格式无效"
   [[ "$WARGAME_VERSION" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || die "WARGAME_VERSION 格式无效"
   [[ "$WARGAME_DATA_VOLUME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die "WARGAME_DATA_VOLUME 格式无效"
+  validate_number "登录限流窗口" "$LOGIN_WINDOW_SECONDS" 10 3600
+  validate_number "账号/IP 登录失败上限" "$LOGIN_SUBJECT_IP_FAILURE_LIMIT" 1 100
+  validate_number "IP 登录失败上限" "$LOGIN_IP_FAILURE_LIMIT" 1 1000
+  validate_number "房间操作超时" "$ROOM_OPERATION_TIMEOUT_SECONDS" 10 300
+  [[ "$WARGAME_ALLOW_RECOVERY_RESET" == "0" || "$WARGAME_ALLOW_RECOVERY_RESET" == "1" ]] \
+    || die "WARGAME_ALLOW_RECOVERY_RESET 只能是 0 或 1"
+  [[ "$WARGAME_ENABLE_FASTDDS" == "ON" || "$WARGAME_ENABLE_FASTDDS" == "OFF" ]] \
+    || die "WARGAME_ENABLE_FASTDDS 只能是 ON 或 OFF"
+  case "$WARGAME_FASTDDS_MODE" in
+    compatibility|dds|disabled|off|none) ;;
+    *) die "WARGAME_FASTDDS_MODE 必须是 compatibility、dds 或 disabled" ;;
+  esac
+  validate_number "Fast DDS Domain ID" "$FASTDDS_DOMAIN_ID" 0 232
+  validate_number "Fast DDS 发现超时" "$FASTDDS_DISCOVERY_TIMEOUT_MS" 0 3600000
+  [[ "$FASTDDS_STATIC_PEERS" != *$'\n'* && "$FASTDDS_STATIC_PEERS" != *$'\r'* ]] \
+    || die "FASTDDS_STATIC_PEERS 不能包含换行符"
+  validate_compose_project
+  [[ "$WARGAME_RUNTIME_ENV_FILE" == /* && "$WARGAME_RUNTIME_ENV_FILE" == "$ENV_FILE" ]] \
+    || die "WARGAME_RUNTIME_ENV_FILE 必须是运行时 .env 的绝对路径"
 }
 
 print_banner() {
   printf '%b\n' "${C_CYAN}"
   printf '%s\n' '  ╔══════════════════════════════════════════════════════════════╗'
-  printf '%s\n' '  ║              兵 器 推 演 · 联 网 服 务 器                   ║'
-  printf '%s\n' '  ║            一键部署与监控校验 · Gbr                         ║'
+  printf '%s\n' '  ║              兵 棋 推 演 · 联 网 服 务 器                   ║'
+  printf '%s\n' '  ║              网页与权威服务一键部署 · Gbr                   ║'
   printf '%s\n' '  ╚══════════════════════════════════════════════════════════════╝'
   printf '%b\n' "${C_DIM}  安装器版本：$INSTALLER_VERSION${C_RESET}"
   printf '%b\n' "${C_RESET}"
@@ -378,43 +826,81 @@ prepare_env() {
   step "生成服务配置"
   read_existing_env
   validate_configuration
-  if [[ -z "$ADMIN_PASSWORD" ]]; then
-    if [[ ! -t 0 ]]; then die "非交互安装必须提供 --admin-password 或 ADMIN_PASSWORD"; fi
-    while :; do
-      read -r -s -p "  管理员密码（至少 8 个字符）：" ADMIN_PASSWORD; printf '\n'
-      [[ ${#ADMIN_PASSWORD} -ge 8 ]] && break
-      warn "密码长度不足 8 个字符"
-    done
+  if (( ADMIN_PASSWORD_STDIN == 1 )); then
+    [[ -z "$ADMIN_PASSWORD_SET" ]] || die "不能同时使用 ADMIN_PASSWORD 和 --admin-password-stdin"
+    IFS= read -r ADMIN_PASSWORD || die "无法从 stdin 读取管理员密码"
+    ADMIN_PASSWORD_SET=1
+  elif [[ -z "$ADMIN_PASSWORD_SET" ]]; then
+    if [[ ! -t 0 ]]; then die "非交互安装必须使用 --admin-password-stdin 或 ADMIN_PASSWORD"; fi
+    read -r -s -p "  管理员密码：" ADMIN_PASSWORD; printf '\n'
+    ADMIN_PASSWORD_SET=1
   fi
-  [[ ${#ADMIN_PASSWORD} -ge 8 ]] || die "管理员密码至少需要 8 个字符"
+  (( ${#ADMIN_PASSWORD} >= 8 )) || die "管理员密码必须至少为 8 个字符"
   local internal_key
-  internal_key="$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  internal_key="$INTERNAL_API_KEY"
+  if [[ -z "$internal_key" ]]; then
+    internal_key="$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  fi
   [[ -n "$internal_key" ]] || die "无法生成内部 API 密钥"
   if [[ -f "$ENV_FILE" ]]; then
-    BACKUP_FILE="$ENV_FILE.backup.$(date +%Y%m%d-%H%M%S)"
+    ENV_EXISTED=1
+    BACKUP_FILE="$INSTALL_ROOT/backups/.env.backup.$(date +%Y%m%d-%H%M%S)"
     cp -p "$ENV_FILE" "$BACKUP_FILE"
     log "已有 .env 已备份为 $(basename "$BACKUP_FILE")"
   fi
   local ws_host="$PUBLIC_HOST"
   [[ "$BIND_ADDRESS" == "127.0.0.1" || "$BIND_ADDRESS" == "localhost" ]] && ws_host="localhost"
+  [[ -n "$PUBLIC_GAME_WS_URL" ]] || PUBLIC_GAME_WS_URL="ws://$ws_host:$WS_PORT"
+  if [[ -z "$WEB_SHELL_ALLOWED_ORIGINS" ]]; then
+    if [[ "$PUBLIC_GAME_WS_URL" == wss://* ]]; then
+      WEB_SHELL_ALLOWED_ORIGINS="https://$PUBLIC_HOST"
+    else
+      WEB_SHELL_ALLOWED_ORIGINS="http://$PUBLIC_HOST:$HTTP_PORT"
+    fi
+  fi
   umask 077
-  cat > "$ENV_FILE" <<EOF
+  local env_tmp
+  env_tmp="$(mktemp "$INSTALL_ROOT/.env.new.XXXXXX")"
+  cat > "$env_tmp" <<EOF
 ADMIN_USERNAME=$ADMIN_USERNAME
-ADMIN_PASSWORD=$ADMIN_PASSWORD
+ADMIN_PASSWORD=$(dotenv_quote "$ADMIN_PASSWORD")
 INTERNAL_API_KEY=$internal_key
 WARGAME_VERSION=$WARGAME_VERSION
+WARGAME_SOURCE_DIGEST=$WARGAME_SOURCE_DIGEST
+WARGAME_RELEASE_ID=$WARGAME_RELEASE_ID
 WARGAME_DATA_VOLUME=$WARGAME_DATA_VOLUME
+WARGAME_COMPOSE_PROJECT=$WARGAME_COMPOSE_PROJECT
+WARGAME_RUNTIME_ENV_FILE=$WARGAME_RUNTIME_ENV_FILE
 HOST_BIND_ADDRESS=$BIND_ADDRESS
 PUBLIC_HOST=$PUBLIC_HOST
 HTTP_PORT=$HTTP_PORT
 WS_PORT=$WS_PORT
-PUBLIC_GAME_WS_URL=ws://$ws_host:$WS_PORT
+PUBLIC_GAME_WS_URL=$PUBLIC_GAME_WS_URL
 SESSION_HOURS=$SESSION_HOURS
 WEB_SHELL_ENABLED=$WEB_SHELL_ENABLED
 WEB_SHELL_TICKET_SECONDS=$WEB_SHELL_TICKET_SECONDS
 WEB_SHELL_SESSION_SECONDS=$WEB_SHELL_SESSION_SECONDS
 WEB_SHELL_MAX_SESSIONS=$WEB_SHELL_MAX_SESSIONS
+WEB_SHELL_ALLOWED_ORIGINS=$WEB_SHELL_ALLOWED_ORIGINS
+LOGIN_TRUSTED_PROXIES=$LOGIN_TRUSTED_PROXIES
+LOGIN_WINDOW_SECONDS=$LOGIN_WINDOW_SECONDS
+LOGIN_SUBJECT_IP_FAILURE_LIMIT=$LOGIN_SUBJECT_IP_FAILURE_LIMIT
+LOGIN_IP_FAILURE_LIMIT=$LOGIN_IP_FAILURE_LIMIT
+GAME_ROOM_ID=$GAME_ROOM_ID
+ROOM_OPERATION_TIMEOUT_SECONDS=$ROOM_OPERATION_TIMEOUT_SECONDS
+WARGAME_ALLOW_RECOVERY_RESET=$WARGAME_ALLOW_RECOVERY_RESET
+WARGAME_ENABLE_FASTDDS=$WARGAME_ENABLE_FASTDDS
+WARGAME_FASTDDS_MODE=$WARGAME_FASTDDS_MODE
+FASTDDS_DOMAIN_ID=$FASTDDS_DOMAIN_ID
+FASTDDS_DISCOVERY_TIMEOUT_MS=$FASTDDS_DISCOVERY_TIMEOUT_MS
+FASTDDS_STATIC_PEERS=$FASTDDS_STATIC_PEERS
 EOF
+  if [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
+    awk -F= '
+      $1 !~ /^(ADMIN_USERNAME|ADMIN_PASSWORD|INTERNAL_API_KEY|WARGAME_VERSION|WARGAME_SOURCE_DIGEST|WARGAME_RELEASE_ID|WARGAME_DATA_VOLUME|WARGAME_COMPOSE_PROJECT|WARGAME_RUNTIME_ENV_FILE|HOST_BIND_ADDRESS|PUBLIC_HOST|HTTP_PORT|WS_PORT|PUBLIC_GAME_WS_URL|SESSION_HOURS|WEB_SHELL_ENABLED|WEB_SHELL_TICKET_SECONDS|WEB_SHELL_SESSION_SECONDS|WEB_SHELL_MAX_SESSIONS|WEB_SHELL_ALLOWED_ORIGINS|LOGIN_TRUSTED_PROXIES|LOGIN_WINDOW_SECONDS|LOGIN_SUBJECT_IP_FAILURE_LIMIT|LOGIN_IP_FAILURE_LIMIT|GAME_ROOM_ID|ROOM_OPERATION_TIMEOUT_SECONDS|WARGAME_ALLOW_RECOVERY_RESET|WARGAME_ENABLE_FASTDDS|WARGAME_FASTDDS_MODE|FASTDDS_DOMAIN_ID|FASTDDS_DISCOVERY_TIMEOUT_MS|FASTDDS_STATIC_PEERS)$/ { print }
+    ' "$BACKUP_FILE" >> "$env_tmp"
+  fi
+  mv -- "$env_tmp" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   ok "配置已写入 .env（密钥文件权限 600；网页 Shell：$WEB_SHELL_ENABLED）"
 }
@@ -426,23 +912,41 @@ confirm_install() {
   [[ "$answer" =~ ^[Yy]$ ]] || die "用户取消安装"
 }
 
+verify_release_images() {
+  local image
+  for image in \
+    "wargame-account-web:$WARGAME_RELEASE_ID" \
+    "wargame-game-server:$WARGAME_RELEASE_ID"; do
+    if ! docker_cmd image inspect "$image" >/dev/null 2>&1; then
+      die "--no-build 要求已有发布镜像：$image；请去掉 --no-build 重新构建"
+    fi
+  done
+}
+
 deploy_services() {
-  step "构建并启动兵棋推演服务"
+  step "更新并启动兵棋推演服务"
   compose_cmd config --quiet || die "Compose 配置校验失败，请检查 .env 和端口配置"
   if (( NO_BUILD == 1 )); then
-    compose_cmd up -d
+    verify_release_images
+    compose_cmd up -d --force-recreate --remove-orphans
   else
-    compose_cmd up -d --build
+    if (( NO_PULL == 1 )); then
+      compose_cmd build
+    else
+      compose_cmd build --pull
+    fi
+    compose_cmd up -d --force-recreate --remove-orphans
   fi
-  ok "Docker 服务已启动"
+  ok "当前源码的账号网页和权威服务器已更新并启动"
 }
 
 wait_healthy() {
   step "等待服务健康检查"
-  local i status http_base
+  local i status http_base health
   http_base="$(local_http_base_url)"
   for ((i=1; i<=STARTUP_TIMEOUT_SECONDS; i++)); do
-    if curl -fsS --max-time 2 "$http_base/api/health" >/dev/null 2>&1 \
+    health="$(curl -fsS --max-time 2 "$http_base/api/health" 2>/dev/null || true)"
+    if [[ "$health" == *"\"sourceDigest\":\"$WARGAME_SOURCE_DIGEST\""* ]] \
       && (compose_cmd ps --status running | grep -q 'game-server.*healthy'); then
       ok "账号网页和推演服务器已就绪（${i}s）"
       return 0
@@ -457,8 +961,8 @@ wait_healthy() {
 reset_admin_if_requested() {
   (( RESET_ADMIN == 1 )) || return 0
   step "重置现有管理员密码"
-  compose_cmd exec -T account-web \
-    /usr/bin/python3 /app/reset_admin.py "$ADMIN_PASSWORD" >/dev/null
+  printf '%s\n' "$ADMIN_PASSWORD" | compose_cmd exec -T account-web \
+    python /app/reset_admin.py >/dev/null
   ok "管理员密码已重置，旧管理会话已失效"
 }
 
@@ -467,9 +971,9 @@ verify_admin_login() {
   local response payload http_base
   http_base="$(local_http_base_url)"
   payload="{\"username\":\"$(json_escape "$ADMIN_USERNAME")\",\"password\":\"$(json_escape "$ADMIN_PASSWORD")\"}"
-  response="$(curl -fsS --max-time 5 \
+  response="$(printf '%s' "$payload" | curl -fsS --max-time 5 \
     -H 'Content-Type: application/json' \
-    -d "$payload" \
+    --data-binary @- \
     "$http_base/api/admin/login")" \
     || die "管理员登录验证失败，请检查账号服务日志"
   ADMIN_TOKEN="$(printf '%s' "$response" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
@@ -490,12 +994,14 @@ verify_monitoring() {
     || die "账号服务监控状态异常"
   printf '%s' "$overview" | grep -q '"status":"healthy"' \
     || die "兵棋服务监控状态异常"
+  printf '%s' "$overview" | grep -q "\"sourceDigest\":\"$WARGAME_SOURCE_DIGEST\"" \
+    || die "账号网页与游戏服务源码摘要不一致"
   if [[ "$WEB_SHELL_ENABLED" == "true" ]]; then
     terminal_payload="{\"password\":\"$(json_escape "$ADMIN_PASSWORD")\"}"
-    terminal_response="$(curl -fsS --max-time 5 -X POST \
+    terminal_response="$(printf '%s' "$terminal_payload" | curl -fsS --max-time 5 -X POST \
       -H 'Content-Type: application/json' \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
-      -d "$terminal_payload" \
+      --data-binary @- \
       "$http_base/api/admin/monitor/terminal/login")" \
       || die "容器运维终端认证验证失败"
     printf '%s' "$terminal_response" | grep -q '"authenticated":true' \
@@ -519,28 +1025,48 @@ logout_verification_session() {
 }
 
 print_result() {
-  local web_host="$PUBLIC_HOST" ws_host="$PUBLIC_HOST"
+  local web_host="$PUBLIC_HOST" ws_host="$PUBLIC_HOST" web_url
   if [[ "$BIND_ADDRESS" == "127.0.0.1" || "$BIND_ADDRESS" == "localhost" ]]; then web_host="localhost"; ws_host="localhost"; fi
+  web_url="http://$web_host:$HTTP_PORT"
+  [[ "$PUBLIC_GAME_WS_URL" == wss://* ]] && web_url="https://$web_host"
   printf '\n%b\n' "${C_GREEN}  ╔══════════════════════════════════════════════════════════════╗${C_RESET}"
   printf '%b\n' "${C_GREEN}  ║                 Gbr 部署完成 · 服务正常                     ║${C_RESET}"
   printf '%b\n' "${C_GREEN}  ╚══════════════════════════════════════════════════════════════╝${C_RESET}"
-  printf '%b\n' "\n  管理网页：${C_WHITE}http://$web_host:$HTTP_PORT${C_RESET}"
-  printf '%b\n' "  服务器监控：${C_WHITE}http://$web_host:$HTTP_PORT（管理员登录后）${C_RESET}"
-  printf '%b\n' "  客户端账号服务器：${C_WHITE}http://$web_host:$HTTP_PORT${C_RESET}"
-  printf '%b\n' "  客户端 WebSocket：${C_WHITE}ws://$ws_host:$WS_PORT${C_RESET}"
+  printf '%b\n' "\n  管理网页：${C_WHITE}$web_url${C_RESET}"
+  printf '%b\n' "  服务器监控：${C_WHITE}$web_url（管理员登录后）${C_RESET}"
+  printf '%b\n' "  客户端账号服务器：${C_WHITE}$web_url${C_RESET}"
+  printf '%b\n' "  客户端 WebSocket：${C_WHITE}$PUBLIC_GAME_WS_URL${C_RESET}"
+  printf '%b\n' "  源码摘要：${C_WHITE}$WARGAME_SOURCE_DIGEST${C_RESET}"
   printf '%b\n' "  管理员用户名：${C_WHITE}$ADMIN_USERNAME${C_RESET}"
   printf '%b\n' "  管理员会话：${C_WHITE}${SESSION_HOURS} 小时${C_RESET}"
   printf '%b\n' "  网页 Shell：${C_WHITE}${WEB_SHELL_ENABLED}（凭证 ${WEB_SHELL_TICKET_SECONDS}s，会话 ${WEB_SHELL_SESSION_SECONDS}s，并发 ${WEB_SHELL_MAX_SESSIONS}）${C_RESET}"
   printf '%b\n' "  配置文件：${C_WHITE}$ENV_FILE${C_RESET}"
-  printf '%b\n' "\n  下一步：打开管理网页创建账号，并在“服务器监控”查看服务状态与审计信息。"
-  printf '%b\n' "  查看日志：docker compose --env-file .env -f deploy/compose.yml logs --tail=100"
-  printf '%b\n' "\n${C_DIM}  Copyright (c) 2026 Gbr · 兵器推演联网服务器${C_RESET}\n"
+  printf '%b\n' "  查看日志：docker compose --project-name $WARGAME_COMPOSE_PROJECT --env-file $WARGAME_RUNTIME_ENV_FILE -f $COMPOSE_FILE logs --tail=100"
 }
 
 main() {
   print_banner
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help) usage; exit 0 ;;
+    esac
+  done
+  parse_bootstrap_args "$@"
+  resolve_source_input
+  if [[ -f "$SOURCE_ROOT/CMakeLists.txt" ]]; then
+    source_version="$(sed -nE 's/^project\([^)]* VERSION ([0-9][0-9A-Za-z._-]*).*/\1/p' "$SOURCE_ROOT/CMakeLists.txt" | head -n1)"
+    [[ -z "$source_version" ]] || WARGAME_VERSION="$source_version"
+  fi
+  resolve_runtime_layout "$@"
   read_existing_env
   parse_args "$@"
+  stage_source_tree
+  command -v sha256sum >/dev/null 2>&1 || die "缺少命令：sha256sum"
+  WARGAME_SOURCE_DIGEST="$(compute_source_digest "$STAGING_DIR")"
+  [[ "$WARGAME_SOURCE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die "无法计算源码摘要"
+  WARGAME_RELEASE_ID="${WARGAME_VERSION}-${WARGAME_SOURCE_DIGEST:0:12}"
+  migrate_legacy_env
+  read_existing_env
   select_bind_address
   if (( SKIP_ENVIRONMENT_CHECK == 1 )); then
     step "跳过服务器环境、依赖和端口检查"
@@ -552,6 +1078,7 @@ main() {
   fi
   prepare_env
   confirm_install
+  activate_staged_source
   deploy_services
   wait_healthy
   reset_admin_if_requested

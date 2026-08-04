@@ -29,6 +29,11 @@ public:
     void setOrigin(const GeoCoord& c);
     GeoCoord origin() const { return m_origin; }
 
+    bool loadMetadataFile(const QString& path, QString* error = nullptr);
+    bool applyMetadata(const QJsonObject& metadata, QString* error = nullptr);
+    bool contains(const GeoPos& logical) const;
+    GeoPos clampToExtent(const GeoPos& logical) const;
+
     QPointF toPixel(double viewportW, double viewportH, const GeoPos& logical) const;
     GeoPos fromPixel(double viewportW, double viewportH, const QPointF& px) const;
     double radiusToPixels(double viewportW, double viewportH, double radiusMeters) const;
@@ -39,17 +44,19 @@ public:
     /// @brief Tile zoom level for current map view.
     int tileZoomForView() const { return m_tileZoom; }
     void setTileZoom(int z) { m_tileZoom = z; }
+    int metadataRevision() const { return m_metadataRevision; }
 
     QJsonObject describe() const;
 
 private:
-    double m_widthM = 40000;
-    double m_heightM = 30000;
+    double m_widthM = 20000;
+    double m_heightM = 15000;
     double m_zoom = 1.0;
     QString m_name;
     GeoPos m_center;
     GeoCoord m_origin;
     int m_tileZoom = 12;
+    int m_metadataRevision = 0;
     QPointF m_mercatorOrigin;
 };
 

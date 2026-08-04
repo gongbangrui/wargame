@@ -119,18 +119,18 @@ Dialog {
 
     QtObject {
         id: t
-        property color bg:          "#091423"
-        property color card:        "#122239"
-        property color border:      "#355675"
-        property color borderSoft:  "#294664"
-        property color text:        "#f3f7fc"
-        property color textStrong:  "#ffffff"
-        property color textDim:     "#d0dced"
-        property color textMuted:   "#aebfd4"
-        property color accent:      "#4090ff"
-        property color accentSoft:  "#1e4080"
-        property color green:       "#36c98a"
-        property color red:         "#f04760"
+        property color bg:          AppContext.page
+        property color card:        AppContext.raised
+        property color border:      AppContext.line
+        property color borderSoft:  AppContext.softLine
+        property color text:        AppContext.text
+        property color textStrong:  AppContext.textStrong
+        property color textDim:     AppContext.textDim
+        property color textMuted:   AppContext.muted
+        property color accent:      AppContext.signal
+        property color accentSoft:  "#1d675e"
+        property color green:       AppContext.success
+        property color red:         AppContext.danger
     }
 
     background: Rectangle { color: t.bg; radius: 12; border.color: t.border; border.width: 1 }
@@ -499,7 +499,7 @@ Dialog {
                 Layout.fillWidth: true; Layout.preferredHeight: 36
                 spacing: 8
                 Rectangle { Layout.preferredWidth: 4; Layout.preferredHeight: 16; radius: 2; color: t.textMuted; Layout.alignment: Qt.AlignVCenter }
-                Text { text: "⚔  兵器推演"; color: t.textStrong; font.pixelSize: 14; font.bold: true; renderType: Text.NativeRendering }
+                Text { text: "兵棋推演"; color: t.textStrong; font.pixelSize: 14; font.bold: true; renderType: Text.NativeRendering }
                 Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 14; color: t.borderSoft; Layout.alignment: Qt.AlignVCenter }
                 Text { text: "v0.2"; color: t.accent; font.pixelSize: 12; font.bold: true; renderType: Text.NativeRendering }
                 Item { Layout.fillWidth: true }

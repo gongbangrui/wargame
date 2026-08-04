@@ -14,17 +14,17 @@ Rectangle {
 
     QtObject {
         id: t
-        property color text: "#f3f6fb"
-        property color textStrong: "#ffffff"
-        property color textDim: "#d4dbe6"
-        property color muted: "#9099a8"
-        property color accent: "#4f9dff"
-        property color accentSoft: "#2a4f86"
-        property color red: "#ff5566"
-        property color blue: "#4d9bff"
-        property color danger: "#ff4d6d"
-        property color success: "#46d29a"
-        property color warning: "#ffb24d"
+        property color text: AppContext.text
+        property color textStrong: AppContext.textStrong
+        property color textDim: AppContext.textDim
+        property color muted: AppContext.muted
+        property color accent: AppContext.signal
+        property color accentSoft: "#1d675e"
+        property color red: AppContext.red
+        property color blue: AppContext.blue
+        property color danger: AppContext.danger
+        property color success: AppContext.success
+        property color warning: AppContext.warning
     }
 
     Flickable {
@@ -49,7 +49,7 @@ Rectangle {
                 Text {
                     text: root.snap.callsign || "\u2014"
                     color: root.snap.alive ? (root.snap.side === "red" ? t.red : (root.snap.side === "blue" ? t.blue : t.textStrong)) : t.muted
-                    font.pixelSize: 20
+                    font.pixelSize: 17
                     font.bold: true
                     elide: Text.ElideRight
                     Layout.maximumWidth: 180
@@ -118,6 +118,75 @@ Rectangle {
                 font.pixelSize: 11
                 font.family: "Consolas"
                 renderType: Text.NativeRendering
+            }
+        }
+
+        Rectangle {
+            id: weaponStateCard
+            visible: root.snap.kind === "attackuav"
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? 52 : 0
+            radius: 4
+            property bool servicing: Boolean(root.snap.serviceRequested)
+            property real cooldown: Number(root.snap.cooldownRemaining || 0)
+            property real serviceProgress: Math.max(0, Math.min(1,
+                Number(root.snap.turnaroundProgress || root.snap.serviceProgress || 0)))
+            color: servicing || cooldown > 0 ? "#2b251b" : "#142923"
+            border.color: servicing || cooldown > 0 ? t.warning : t.success
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 5
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Text {
+                        text: "弹药 " + (root.snap.ammoRemaining !== undefined ? root.snap.ammoRemaining : 0)
+                              + " / " + (root.snap.ammoCapacity !== undefined ? root.snap.ammoCapacity : 0)
+                        color: t.textStrong; font.pixelSize: 11; font.bold: true
+                    }
+                    Item { Layout.fillWidth: true }
+                    Text {
+                        text: weaponStateCard.servicing
+                            ? "补给 / 再装填  " + Math.round(weaponStateCard.serviceProgress * 100) + "%"
+                            : weaponStateCard.cooldown > 0
+                            ? "射击冷却  " + weaponStateCard.cooldown.toFixed(1) + " s"
+                            : "武器就绪"
+                        color: weaponStateCard.servicing || weaponStateCard.cooldown > 0
+                            ? t.warning : t.success
+                        font.pixelSize: 10; font.bold: true
+                    }
+                }
+                ProgressBar {
+                    id: cooldownProgress
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 1
+                    value: weaponStateCard.servicing ? weaponStateCard.serviceProgress
+                        : weaponStateCard.cooldown > 0
+                        ? 1 - Math.max(0, Math.min(1,
+                            weaponStateCard.cooldown
+                            / Math.max(0.001, Number(root.snap.cooldownSec || 0.001)))) : 1
+                    Accessible.name: weaponStateCard.servicing
+                        ? "攻击无人机补给再装填进度" : "攻击无人机射击冷却进度"
+                    Accessible.description: weaponStateCard.servicing
+                        ? Math.round(weaponStateCard.serviceProgress * 100) + "%"
+                        : weaponStateCard.cooldown > 0
+                        ? weaponStateCard.cooldown.toFixed(1) + " 秒后可再次攻击"
+                        : "武器已就绪"
+                    background: Rectangle { implicitHeight: 6; radius: 3; color: AppContext.raised }
+                    contentItem: Item {
+                        implicitHeight: 6
+                        Rectangle {
+                            width: cooldownProgress.visualPosition * parent.width
+                            height: parent.height
+                            radius: 3
+                            color: weaponStateCard.servicing || weaponStateCard.cooldown > 0
+                                ? t.warning : t.success
+                        }
+                    }
+                }
             }
         }
 
@@ -262,9 +331,45 @@ Rectangle {
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2a3142"; visible: root.snap.kind === "attackuav" }
 
         ColumnLayout {
+            id: commandBarLayout
             Layout.fillWidth: true
             spacing: 4
-            Text { text: "\u72b6\u6001"; color: t.muted; font.pixelSize: 11; renderType: Text.NativeRendering }
+            visible: root.snap.alive && root.controller !== null
+                     && root.controller.currentSeatType !== "commander"
+                     && root.controller.chatMessages !== undefined
+            property var latestCommandMessage: {
+                var msgs = root.controller ? root.controller.chatMessages : []
+                var currentSeatId = root.controller ? root.controller.currentSeatId : ""
+                for (var i = msgs.length - 1; i >= 0; i--) {
+                    var m = msgs[i]
+                    if (!m || !m.seatId) continue
+                    var parts = m.seatId.split("_")
+                    if (parts.length >= 2 && parts[1] === "commander") {
+                        var recipients = m.recipientSeatIds || []
+                        if (recipients.indexOf(currentSeatId) >= 0) return m
+                    }
+                }
+                return null
+            }
+            Text { text: "\u6307\u6325\u547d\u4ee4"; color: t.muted; font.pixelSize: 11; renderType: Text.NativeRendering; visible: commandBarLayout.latestCommandMessage !== null }
+            Rectangle {
+                visible: commandBarLayout.latestCommandMessage !== null
+                Layout.fillWidth: true
+                implicitHeight: cmdText.implicitHeight + 14
+                radius: 4
+                color: "#1a1e2c"
+                border.color: AppContext.signal
+                Text {
+                    id: cmdText
+                    anchors.fill: parent; anchors.margins: 7
+                    text: commandBarLayout.latestCommandMessage ? (commandBarLayout.latestCommandMessage.text || "") : ""
+                    color: AppContext.text; font.pixelSize: 11; wrapMode: Text.WordWrap
+                    renderType: Text.NativeRendering
+                }
+            }
+        }
+
+        ColumnLayout {
             Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: 32

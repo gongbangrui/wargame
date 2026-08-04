@@ -3,6 +3,7 @@
 #include "core/SimulationEngine.h"
 #include "core/UnitBase.h"
 #include "core/Geo.h"
+#include "units/AttackUAV.h"
 
 using namespace gbr;
 
@@ -38,7 +39,7 @@ TEST(SnapshotCodecTest, EncodeRuntimeContainsAllUnits) {
     }
 }
 
-TEST(SnapshotCodecTest, DecodeRuntimePreservesHpAndPosition) {
+TEST(SnapshotCodecTest, DecodeRuntimePreservesHpPositionAndSpeed) {
     SimulationEngine server;
     server.loadDefaultScenario();
 
@@ -47,6 +48,7 @@ TEST(SnapshotCodecTest, DecodeRuntimePreservesHpAndPosition) {
     ASSERT_NE(recon, nullptr);
     recon->setHp(60.0);
     recon->setPosition(GeoPos{12345, 6789, 100});
+    recon->setSpeed(321.0);
 
     const QJsonArray snap = SnapshotCodec::encodeRuntimeUnits(server);
 
@@ -59,6 +61,8 @@ TEST(SnapshotCodecTest, DecodeRuntimePreservesHpAndPosition) {
     EXPECT_DOUBLE_EQ(reconC->hp(), 60.0);
     EXPECT_DOUBLE_EQ(reconC->pos().x, 12345);
     EXPECT_DOUBLE_EQ(reconC->pos().y, 6789);
+    EXPECT_DOUBLE_EQ(reconC->baseSpeed(), 321.0);
+    EXPECT_DOUBLE_EQ(reconC->speed(), 321.0);
 }
 
 TEST(SnapshotCodecTest, DecodeRuntimeMarksDeadUnits) {
@@ -80,6 +84,25 @@ TEST(SnapshotCodecTest, DecodeRuntimeMarksDeadUnits) {
     ASSERT_NE(targetC, nullptr);
     EXPECT_FALSE(targetC->alive());
     EXPECT_DOUBLE_EQ(targetC->hp(), 0.0);
+}
+
+TEST(SnapshotCodecTest, DecodeRuntimeRestoresAttackTargetArmedStateAndRoe) {
+    SimulationEngine server;
+    server.loadDefaultScenario();
+    auto* source = dynamic_cast<AttackUAV*>(server.unit(QStringLiteral("red_a1")));
+    ASSERT_NE(source, nullptr);
+    ASSERT_TRUE(source->restoreRemoteAttackState(QStringLiteral("blue_r1"), true,
+                                                QStringLiteral("hold")));
+
+    SimulationEngine client;
+    client.loadDefaultScenario();
+    SnapshotCodec::decodeRuntimeUnits(client, SnapshotCodec::encodeRuntimeUnits(server));
+
+    auto* restored = dynamic_cast<AttackUAV*>(client.unit(QStringLiteral("red_a1")));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_EQ(restored->targetId(), QStringLiteral("blue_r1"));
+    EXPECT_TRUE(restored->armed());
+    EXPECT_EQ(restored->rulesOfEngagement(), QStringLiteral("hold"));
 }
 
 TEST(SnapshotCodecTest, DiffEmpty) {

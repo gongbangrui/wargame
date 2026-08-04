@@ -15,10 +15,14 @@ Item {
     anchors.fill: parent
     focus: true
     activeFocusOnTab: true
-    property bool simulationControlAllowed: !root.controller.networked || root.controller.userRole === "director"
-    property bool unitControlAllowed: !root.controller.networked || ((root.controller.userRole === "red" || root.controller.userRole === "blue") && root.controller.matchPhase === "running")
-    property bool directorCanStart: !root.controller.networked || root.controller.matchPhase === "running" || (root.controller.matchPhase === "preparing" && root.controller.redReady && root.controller.blueReady)
+    // 联网推演的开停、速率和单步由网页管理员控制；本地模式保持原有席位控制。
+    property bool simulationControlAllowed: !root.controller.networked
+    property bool unitControlAllowed: !root.controller.networked || (root.controller.currentSeatId !== "" && root.controller.matchPhase === "running")
+    property bool directorCanStart: !root.controller.networked
     property var activePage: pageLoader.item
+    property int chatLastSeenCount: 0
+    readonly property int chatUnreadCount: root.controller.networked
+        ? Math.max(0, root.controller.chatMessages.length - root.chatLastSeenCount) : 0
 
     function switchActiveUnit(direction) {
         if (root.activePage && root.activePage.switchUnit)
@@ -157,69 +161,34 @@ Item {
 
     QtObject {
         id: theme
-        property color bg:          "#080b14"
-        property color panel:       "#0e1322"
-        property color panelAlt:    "#131a2c"
-        property color border:      "#1e2d4a"
-        property color borderSoft:  "#17213a"
-        property color text:        "#e8edf5"
-        property color textStrong:  "#ffffff"
-        property color textDim:     "#bcc8de"
-        property color textMuted:   "#8896b8"
-        property color accent:      "#4090ff"
-        property color accentSoft:  "#1e4080"
-        property color red:         "#f04760"
-        property color blue:        "#4090ff"
-        property color success:     "#36c98a"
-        property color warning:     "#f0a040"
-        property color danger:      "#f04760"
+        property color bg:          AppContext.page
+        property color panel:       AppContext.panel
+        property color panelAlt:    AppContext.raised
+        property color border:      AppContext.line
+        property color borderSoft:  AppContext.softLine
+        property color text:        AppContext.text
+        property color textStrong:  AppContext.textStrong
+        property color textDim:     AppContext.textDim
+        property color textMuted:   AppContext.muted
+        property color accent:      AppContext.signal
+        property color accentSoft:  "#1d675e"
+        property color red:         AppContext.red
+        property color blue:        AppContext.blue
+        property color success:     AppContext.success
+        property color warning:     AppContext.warning
+        property color danger:      AppContext.danger
     }
 
-    // 低对比度的态势网格为不同视图提供连续的空间层次，避免遮挡地图内容。
     Rectangle {
         id: shellBackground
         anchors.fill: parent
         z: -10
         color: theme.bg
-        opacity: 0.96
-        Repeater {
-            model: 18
-            delegate: Rectangle {
-                required property int index
-                x: (root.width / 18) * index
-                y: 0
-                width: 1
-                height: root.height
-                color: theme.borderSoft
-                opacity: 0.22
-            }
-        }
-        Repeater {
-            model: 12
-            delegate: Rectangle {
-                required property int index
-                x: 0
-                y: (root.height / 12) * index
-                width: root.width
-                height: 1
-                color: theme.borderSoft
-                opacity: 0.18
-            }
-        }
-        Rectangle {
-            id: scanLine
-            x: 0
-            y: topBar.height
-            width: root.width
-            height: 1
-            color: theme.accent
-            opacity: 0.0
-            SequentialAnimation on opacity {
-                loops: Animation.Infinite
-                PauseAnimation { duration: 1800 }
-                NumberAnimation { to: 0.18; duration: 220 }
-                NumberAnimation { to: 0.0; duration: 900 }
-            }
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: AppContext.page }
+            GradientStop { position: 0.55; color: "#0d161d" }
+            GradientStop { position: 1.0; color: "#08131a" }
         }
     }
 
@@ -227,21 +196,32 @@ Item {
         id: topBar
         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
         height: 50
-        color: "#0a0f1c"
-        Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: "#1e3050" }
+        color: theme.panel
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#0c151b" }
+            GradientStop { position: 0.62; color: "#111d25" }
+            GradientStop { position: 1.0; color: "#0c1820" }
+        }
+        Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: theme.border }
         Rectangle {
             anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
             width: 3
-            color: root.controller && root.controller.userRole === "red" ? theme.red
-                 : root.controller && root.controller.userRole === "blue" ? theme.blue : theme.accent
+            color: root.controller && root.controller.currentSeatSide === "red" ? theme.red
+                 : root.controller && root.controller.currentSeatSide === "blue" ? theme.blue : theme.accent
             opacity: 0.9
             Behavior on color { ColorAnimation { duration: 220 } }
         }
         Rectangle {
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
             height: 2
-            color: theme.accent
             opacity: 0.28
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: theme.accent }
+                GradientStop { position: 0.45; color: theme.blue }
+                GradientStop { position: 1.0; color: "transparent" }
+            }
         }
 
         RowLayout {
@@ -281,15 +261,15 @@ Item {
             Rectangle {
                 visible: root.controller.networked
                 Layout.preferredHeight: 26; Layout.preferredWidth: Math.min(root.compactTopBar ? 104 : 220, onlineIdentity.implicitWidth + 22)
-                radius: 5; color: root.controller.userRole === "red" ? "#3c2028" : root.controller.userRole === "blue" ? "#173248" : root.controller.userRole === "director" ? "#3b311c" : "#183632"
-                border.color: root.controller.userRole === "red" ? theme.red : root.controller.userRole === "blue" ? theme.blue : theme.success
+                radius: 5; color: root.controller.currentSeatSide === "red" ? "#3c2028" : root.controller.currentSeatSide === "blue" ? "#173248" : "#183632"
+                border.color: root.controller.currentSeatSide === "red" ? theme.red : root.controller.currentSeatSide === "blue" ? theme.blue : theme.success
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: 180 } }
                 Text {
                     id: onlineIdentity; anchors.centerIn: parent
-                    text: root.compactTopBar
-                          ? (root.controller.userRole === "red" ? "红方" : root.controller.userRole === "blue" ? "蓝方" : root.controller.userRole === "director" ? "导演席" : "编辑席")
-                          : (root.controller.displayName || root.controller.username) + " · " + (root.controller.userRole === "red" ? "红方" : root.controller.userRole === "blue" ? "蓝方" : root.controller.userRole === "director" ? "导演席" : "编辑席")
+                text: root.compactTopBar
+                          ? (root.controller.currentSeatId || "未选择战位")
+                          : (root.controller.displayName || root.controller.username) + " · " + (root.controller.currentSeatId || "房间大厅")
                     elide: Text.ElideRight
                     color: theme.textStrong; font.pixelSize: 11; font.bold: true
                 }
@@ -382,7 +362,18 @@ Item {
             }
             GhostButton {
                 visible: root.controller.networked && !root.compactTopBar
-                text: "通信"; onClicked: chatPanel.open()
+                text: {
+                    var base = root.controller.currentSeatType === "commander"
+                        ? "收件箱 · " + root.controller.chatMessages.length : "通信"
+                    return (!chatPanel.visible && root.chatUnreadCount > 0)
+                        ? base + " [" + root.chatUnreadCount + "]" : base
+                }
+                Accessible.name: root.controller.currentSeatType === "commander"
+                                 ? "打开指挥官实时通信收件箱" : "打开指挥通信"
+                onClicked: {
+                    chatPanel.open()
+                    root.chatLastSeenCount = root.controller.chatMessages.length
+                }
             }
             Rectangle {
                 id: networkDot
@@ -394,13 +385,6 @@ Item {
                 HoverHandler { id: networkStatusHover }
                 ToolTip.visible: networkStatusHover.hovered
                 ToolTip.text: root.controller.networkStatus
-                SequentialAnimation on opacity {
-                    running: root.controller.networkState !== "connected"
-                    loops: Animation.Infinite
-                    NumberAnimation { to: 0.35; duration: 500 }
-                    NumberAnimation { to: 1.0; duration: 700 }
-                    onRunningChanged: if (!running) networkDot.opacity = 1.0
-                }
             }
             GhostButton {
                 text: "设置"; onClicked: settingsPanel.open()
@@ -424,6 +408,7 @@ Item {
             }
         }
         sourceComponent: {
+            if (root.controller.networked) return onlinePage
             switch (root.controller.viewMode) {
             case "editor": return editorPage
             case "commandpost-red":
@@ -447,6 +432,7 @@ Item {
     Component { id: editorPage; ScenarioEditorView { controller: root.controller; editor: root.editor } }
     Component { id: commandPostPage; CommandPostView { controller: root.controller; editor: root.editor } }
     Component { id: directorPage; DirectorView { controller: root.controller; editor: root.editor } }
+    Component { id: onlinePage; OnlineOperationsView { controller: root.controller; editor: root.editor; onOpenChatRequested: chatPanel.open() } }
 
     Minimap {
         id: miniMap
@@ -455,14 +441,20 @@ Item {
         anchors.leftMargin: 16
         anchors.bottomMargin: 16
         z: 100
-        visible: root.settShowMinimap && root.controller.viewMode !== "editor" && root.controller.viewMode !== "director"
+        visible: root.settShowMinimap
+                 && root.controller.viewMode !== "editor"
+                 && root.controller.viewMode !== "director"
+                 && ((!root.controller.networked && root.controller.sessionMode !== "unselected")
+                     || (root.controller.networked
+                         && (root.controller.onlineStage === "deployment"
+                             || root.controller.onlineStage === "battle")))
         sideFilter: {
             if (root.controller.viewMode === "commandpost-red") return "red"
             if (root.controller.viewMode === "commandpost-blue") return "blue"
             return ""
         }
-        mapCenter: root.activeCanvas() ? root.activeCanvas().center : ({x: 20000, y: 15000})
-        mapSize: root.controller.mapInfo ? {w: root.controller.mapInfo.widthMeters, h: root.controller.mapInfo.heightMeters} : {w: 40000, h: 30000}
+        mapCenter: root.activeCanvas() ? root.activeCanvas().center : ({x: 10000, y: 7500})
+        mapSize: root.controller.mapInfo ? {w: root.controller.mapInfo.widthMeters, h: root.controller.mapInfo.heightMeters} : {w: 20000, h: 15000}
         viewportRect: {
             var c = root.activeCanvas()
             return c ? { x: c.center.x - c.width / c.zoom / 2, y: c.center.y - c.height / c.zoom / 2,
@@ -549,9 +541,9 @@ Item {
 
     EventDialog {
         id: errorDialog
-        title: "错误"
+        title: "操作未完成"
         body: root.errorQueue.length > 0 ? root.errorQueue[0] : (root.controller.lastError || "未知错误")
-        level: "warn"
+        level: "error"
         onAckClicked: {
             if (root.errorQueue.length > 0) {
                 root.errorQueue.shift()

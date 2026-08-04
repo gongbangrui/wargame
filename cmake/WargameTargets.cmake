@@ -54,6 +54,8 @@ function(wargame_add_protocol_library target source_root)
         ${source_root}/src/protocol/Protocol.cpp
         ${source_root}/src/protocol/StateDelta.h
         ${source_root}/src/protocol/StateDelta.cpp
+        ${source_root}/src/protocol/dds/WargameEnvelope.h
+        ${source_root}/src/protocol/dds/WargameEnvelope.cpp
     )
     target_link_libraries(${target} PUBLIC Qt6::Core)
     target_include_directories(${target} PUBLIC ${source_root}/src)

@@ -8,6 +8,7 @@ namespace gbr {
 void ClientStateStore::reset() {
     m_lastSequence = 0;
     m_snapshot = {};
+    m_lifecycle = {};
     m_waitingForSnapshot = true;
     m_waitingForResync = false;
 }
@@ -38,7 +39,14 @@ ClientStateStore::Result ClientStateStore::applyEnvelope(const QJsonObject& enve
     if (sequence <= m_lastSequence) return {Disposition::Ignored, type, payload, {}, {}};
 
     if (type == QLatin1String("snapshot")) {
+        Protocol::SnapshotProjection projection;
+        const Protocol::ValidationResult projectionResult =
+            Protocol::projectSnapshot(payload, &projection);
+        if (!projectionResult.valid) {
+            return {Disposition::Fatal, {}, {}, projectionResult.code, projectionResult.message};
+        }
         m_snapshot = payload;
+        m_lifecycle = projection.lifecycle;
         m_lastSequence = sequence;
         m_waitingForSnapshot = false;
         m_waitingForResync = false;
@@ -64,12 +72,30 @@ ClientStateStore::Result ClientStateStore::applyEnvelope(const QJsonObject& enve
                     QStringLiteral("SNAPSHOT_REQUIRED"),
                     QStringLiteral("尚未建立完整状态基线")};
         }
+
+        const QJsonObject previousSnapshot = m_snapshot;
+        const Protocol::RoomLifecycleProjection previousLifecycle = m_lifecycle;
+        QJsonObject candidateSnapshot = m_snapshot;
         QString error;
-        if (!StateDelta::apply(m_snapshot, payload, &error)) {
+        if (!StateDelta::apply(candidateSnapshot, payload, &error)) {
+            m_snapshot = previousSnapshot;
+            m_lifecycle = previousLifecycle;
             m_waitingForResync = true;
             return {Disposition::ResyncRequired, type, payload,
                     QStringLiteral("DELTA_REJECTED"), error};
         }
+        Protocol::SnapshotProjection projection;
+        const Protocol::ValidationResult projectionResult =
+            Protocol::projectSnapshot(candidateSnapshot, &projection);
+        if (!projectionResult.valid) {
+            m_snapshot = previousSnapshot;
+            m_lifecycle = previousLifecycle;
+            m_waitingForResync = true;
+            return {Disposition::ResyncRequired, type, payload,
+                    QStringLiteral("STATE_PROJECTION_REJECTED"), projectionResult.message};
+        }
+        m_snapshot = candidateSnapshot;
+        m_lifecycle = projection.lifecycle;
         m_lastSequence = sequence;
         return {Disposition::DeltaApplied, type, payload, {}, {}};
     }

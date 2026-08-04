@@ -17,6 +17,8 @@ class MapTileRenderer : public QQuickPaintedItem {
     Q_PROPERTY(double zoom READ zoom WRITE setZoom NOTIFY centerChanged)
     Q_PROPERTY(double originLon READ originLon WRITE setOriginLon NOTIFY originChanged)
     Q_PROPERTY(double originLat READ originLat WRITE setOriginLat NOTIFY originChanged)
+    Q_PROPERTY(double logicalWidthMeters READ logicalWidthMeters WRITE setLogicalWidthMeters NOTIFY logicalExtentChanged)
+    Q_PROPERTY(double logicalHeightMeters READ logicalHeightMeters WRITE setLogicalHeightMeters NOTIFY logicalExtentChanged)
     Q_PROPERTY(int tileZoom READ tileZoom WRITE setTileZoom NOTIFY tileZoomChanged)
     Q_PROPERTY(QString tileCacheDir READ tileCacheDir WRITE setTileCacheDir NOTIFY tileCacheDirChanged)
 public:
@@ -32,6 +34,10 @@ public:
     void setOriginLon(double v);
     double originLat() const { return m_originLat; }
     void setOriginLat(double v);
+    double logicalWidthMeters() const { return m_logicalWidthMeters; }
+    void setLogicalWidthMeters(double v);
+    double logicalHeightMeters() const { return m_logicalHeightMeters; }
+    void setLogicalHeightMeters(double v);
     int tileZoom() const { return m_tileZoom; }
     void setTileZoom(int v);
     QString tileCacheDir() const;
@@ -46,6 +52,7 @@ public:
 signals:
     void centerChanged();
     void originChanged();
+    void logicalExtentChanged();
     void tileZoomChanged();
     void tileCacheDirChanged();
 
@@ -61,6 +68,8 @@ private:
     double m_zoom = 1.0;
     double m_originLon = 119.30;
     double m_originLat = 25.40;
+    double m_logicalWidthMeters = 20000;
+    double m_logicalHeightMeters = 15000;
     int m_tileZoom = 12;
     QString m_cacheDir;
     QPointF m_mercatorOrigin;

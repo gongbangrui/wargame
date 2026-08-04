@@ -32,11 +32,29 @@ MapTileRenderer::MapTileRenderer(QQuickItem* parent)
     m_tileCache.setMaxCost(64 * 1024);
 }
 
-void MapTileRenderer::setCenterX(double v) { if (m_centerX != v) { m_centerX = v; update(); emit centerChanged(); } }
-void MapTileRenderer::setCenterY(double v) { if (m_centerY != v) { m_centerY = v; update(); emit centerChanged(); } }
-void MapTileRenderer::setZoom(double v) { v = std::max(0.001, v); if (m_zoom != v) { m_zoom = v; update(); emit centerChanged(); } }
+void MapTileRenderer::setCenterX(double v) { if (std::isfinite(v) && m_centerX != v) { m_centerX = v; update(); emit centerChanged(); } }
+void MapTileRenderer::setCenterY(double v) { if (std::isfinite(v) && m_centerY != v) { m_centerY = v; update(); emit centerChanged(); } }
+void MapTileRenderer::setZoom(double v) {
+    if (!std::isfinite(v)) v = 1.0;
+    v = std::max(0.001, v);
+    if (m_zoom != v) { m_zoom = v; update(); emit centerChanged(); }
+}
 void MapTileRenderer::setOriginLon(double v) { m_originLon = v; updateOrigin(); }
 void MapTileRenderer::setOriginLat(double v) { m_originLat = v; updateOrigin(); }
+void MapTileRenderer::setLogicalWidthMeters(double v) {
+    if (std::isfinite(v) && v > 0.0 && m_logicalWidthMeters != v) {
+        m_logicalWidthMeters = v;
+        update();
+        emit logicalExtentChanged();
+    }
+}
+void MapTileRenderer::setLogicalHeightMeters(double v) {
+    if (std::isfinite(v) && v > 0.0 && m_logicalHeightMeters != v) {
+        m_logicalHeightMeters = v;
+        update();
+        emit logicalExtentChanged();
+    }
+}
 void MapTileRenderer::setTileZoom(int v) { v = std::clamp(v, Mercator::kMinZoom, Mercator::kMaxZoom); if (m_tileZoom != v) { m_tileZoom = v; update(); emit tileZoomChanged(); } }
 QString MapTileRenderer::tileCacheDir() const {
     QMutexLocker lock(&m_tileCacheMutex);
@@ -71,15 +89,16 @@ QPointF MapTileRenderer::simFromMercator(double mx, double my) const {
 }
 
 QPointF MapTileRenderer::simToScreen(double sx, double sy) const {
-    const double cx = width() * 0.5;
-    const double cy = height() * 0.5;
-    return { cx + (sx - m_centerX) * m_zoom, cy - (sy - m_centerY) * m_zoom };
+    return MapCoordinates::logicalToScreen(GeoPos{sx, sy, 0.0},
+                                           GeoPos{m_centerX, m_centerY, 0.0},
+                                           QSizeF(width(), height()), m_zoom);
 }
 
 QPointF MapTileRenderer::screenToSim(double px, double py) const {
-    const double cx = width() * 0.5;
-    const double cy = height() * 0.5;
-    return { m_centerX + (px - cx) / m_zoom, m_centerY - (py - cy) / m_zoom };
+    const GeoPos logical = MapCoordinates::screenToBoundedLogical(
+        QPointF(px, py), GeoPos{m_centerX, m_centerY, 0.0}, QSizeF(width(), height()), m_zoom,
+        QSizeF(m_logicalWidthMeters, m_logicalHeightMeters));
+    return logical.toPointF();
 }
 
 QImage MapTileRenderer::loadTile(int z, int x, int y, bool& found) const {

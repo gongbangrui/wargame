@@ -1,24 +1,84 @@
-﻿cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.25)
 
-project(index VERSION 0.1.0 LANGUAGES CXX)
+project(index VERSION 1.0.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 
 set(WARGAME_VERSION "${PROJECT_VERSION}" CACHE STRING
     "Version embedded in desktop and server release artifacts")
+set(WARGAME_SOURCE_DIGEST "dev" CACHE STRING
+    "Source digest embedded in desktop and server release artifacts")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(WARGAME_BUILD_SERVER "Build the authoritative game server" ON)
 option(WARGAME_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(WARGAME_ENABLE_FASTDDS "Enable Fast DDS data-plane integration when the SDK is installed" OFF)
 
 find_package(Qt6 6.10 REQUIRED COMPONENTS Quick QuickControls2 Network WebSockets)
+find_package(Qt6Keychain REQUIRED)
+
+if(WARGAME_ENABLE_FASTDDS)
+    set(WARGAME_FASTDDS_TARGET "")
+    set(WARGAME_FASTDDS_LEGACY_API OFF)
+    find_package(fastdds QUIET CONFIG)
+    if(fastdds_FOUND)
+        if(TARGET fastdds::fastdds)
+            set(WARGAME_FASTDDS_TARGET fastdds::fastdds)
+        elseif(TARGET fastdds)
+            set(WARGAME_FASTDDS_TARGET fastdds)
+        endif()
+    endif()
+    # Ubuntu 24.04 ships the same API under the legacy package/config name.
+    if(NOT WARGAME_FASTDDS_TARGET)
+        find_package(fastrtps QUIET CONFIG)
+        if(fastrtps_FOUND AND TARGET fastrtps)
+            set(WARGAME_FASTDDS_TARGET fastrtps)
+            set(WARGAME_FASTDDS_LEGACY_API ON)
+        endif()
+    endif()
+    find_program(WARGAME_FASTDDSGEN_EXECUTABLE NAMES fastddsgen)
+    if(WARGAME_FASTDDS_TARGET AND WARGAME_FASTDDSGEN_EXECUTABLE)
+        set(WARGAME_HAS_FASTDDS ON)
+    elseif(WARGAME_FASTDDS_TARGET)
+        message(WARNING "Fast DDS SDK found but fastddsgen is missing; DDS integration is disabled")
+    endif()
+endif()
 
 qt_standard_project_setup(REQUIRES 6.10)
 
 include(cmake/WargameTargets.cmake)
 wargame_add_domain_library(wargame_domain ${CMAKE_CURRENT_SOURCE_DIR})
 wargame_add_protocol_library(wargame_protocol ${CMAKE_CURRENT_SOURCE_DIR})
+if(WARGAME_HAS_FASTDDS)
+    set(WARGAME_DDS_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/dds")
+    set(WARGAME_DDS_GENERATED_SOURCES
+        "${WARGAME_DDS_GENERATED_DIR}/WargameEnvelope.cxx"
+        "${WARGAME_DDS_GENERATED_DIR}/WargameEnvelopePubSubTypes.cxx"
+        "${WARGAME_DDS_GENERATED_DIR}/WargameEnvelopeTypeObjectSupport.cxx")
+    add_custom_command(
+        OUTPUT ${WARGAME_DDS_GENERATED_SOURCES}
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WARGAME_DDS_GENERATED_DIR}"
+        COMMAND ${CMAKE_COMMAND}
+                "-DWARGAME_FASTDDSGEN_EXECUTABLE=${WARGAME_FASTDDSGEN_EXECUTABLE}"
+                "-DWARGAME_DDS_GENERATED_DIR=${WARGAME_DDS_GENERATED_DIR}"
+                "-DWARGAME_DDS_IDL=${CMAKE_CURRENT_SOURCE_DIR}/src/protocol/dds/WargameEnvelope.idl"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateFastDds.cmake"
+        DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/protocol/dds/WargameEnvelope.idl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateFastDds.cmake"
+        COMMENT "Generating Fast DDS WargameEnvelope type"
+        VERBATIM)
+    add_custom_target(wargame_fastdds_generated DEPENDS ${WARGAME_DDS_GENERATED_SOURCES})
+    add_dependencies(wargame_protocol wargame_fastdds_generated)
+    target_sources(wargame_protocol PRIVATE ${WARGAME_DDS_GENERATED_SOURCES})
+    target_include_directories(wargame_protocol PUBLIC "${WARGAME_DDS_GENERATED_DIR}")
+    target_compile_definitions(wargame_protocol PUBLIC WARGAME_HAS_FASTDDS=1)
+    if(WARGAME_FASTDDS_LEGACY_API)
+        target_compile_definitions(wargame_protocol PUBLIC WARGAME_FASTDDS_LEGACY_API=1)
+    endif()
+    target_link_libraries(wargame_protocol PUBLIC ${WARGAME_FASTDDS_TARGET})
+endif()
 wargame_enable_sanitizers(wargame_domain)
 wargame_enable_sanitizers(wargame_protocol)
 
@@ -39,9 +99,15 @@ add_library(wargame_client STATIC
     src/network/NetworkClient.cpp
     src/network/ClientStateStore.h
     src/network/ClientStateStore.cpp
+    src/network/FastDdsTransport.h
+    src/network/FastDdsTransport.cpp
 )
 target_link_libraries(wargame_client PUBLIC
-    wargame_domain wargame_protocol Qt6::Quick Qt6::Network Qt6::WebSockets)
+    wargame_domain wargame_protocol Qt6::Quick Qt6::Network Qt6::WebSockets Qt6Keychain::Qt6Keychain)
+if(WARGAME_HAS_FASTDDS)
+    target_compile_definitions(wargame_client PUBLIC WARGAME_HAS_FASTDDS=1)
+    target_link_libraries(wargame_client PUBLIC ${WARGAME_FASTDDS_TARGET})
+endif()
 target_include_directories(wargame_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set_target_properties(wargame_client PROPERTIES AUTOMOC ON)
 wargame_enable_sanitizers(wargame_client)
@@ -53,15 +119,24 @@ qt_add_executable(appindex
     main.cpp
 )
 target_link_libraries(appindex PRIVATE corelib Qt6::Quick Qt6::QuickControls2)
+target_compile_definitions(appindex PRIVATE
+    WARGAME_VERSION="${WARGAME_VERSION}"
+    WARGAME_SOURCE_DIGEST="${WARGAME_SOURCE_DIGEST}")
 wargame_enable_sanitizers(appindex)
+
+set_source_files_properties(qml/AppContext.qml PROPERTIES
+    QT_QML_SINGLETON_TYPE TRUE
+)
 
 qt_add_qml_module(appindex
     URI index
     QML_FILES
         Main.qml
+        qml/AppContext.qml
         qml/SimulationRoot.qml
         qml/views/CommandPostView.qml
         qml/views/DirectorView.qml
+        qml/views/OnlineOperationsView.qml
         qml/views/ScenarioEditorView.qml
         qml/views/RosterEditorDialog.qml
         qml/components/MapCanvas.qml
@@ -79,6 +154,7 @@ qt_add_qml_module(appindex
         qml/components/SessionDialog.qml
         qml/components/ChatPanel.qml
         qml/components/BattleReportDialog.qml
+        qml/components/CommandPanel.qml
 )
 
 set_target_properties(appindex PROPERTIES
@@ -158,6 +234,7 @@ FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
     GIT_TAG        v1.17.0
+    GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(googletest)
 
@@ -182,11 +259,23 @@ add_executable(wargame_tests
     tests/test_checkpoint.cpp
     tests/test_p3.cpp
     tests/test_client_state_store.cpp
+    tests/test_fastdds_transport.cpp
 )
 target_link_libraries(wargame_tests PRIVATE
     corelib wargame_protocol GTest::gtest GTest::gtest_main)
 target_include_directories(wargame_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 wargame_enable_sanitizers(wargame_tests)
+
+add_executable(fastdds_integration_tests tests/test_fastdds_integration.cpp)
+target_link_libraries(fastdds_integration_tests PRIVATE
+    wargame_client wargame_protocol GTest::gtest GTest::gtest_main)
+if(WARGAME_HAS_FASTDDS)
+    target_compile_definitions(fastdds_integration_tests PRIVATE WARGAME_HAS_FASTDDS=1)
+    target_link_libraries(fastdds_integration_tests PRIVATE ${WARGAME_FASTDDS_TARGET})
+endif()
+target_include_directories(fastdds_integration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+wargame_enable_sanitizers(fastdds_integration_tests)
+add_test(NAME FastDDS.Integration COMMAND fastdds_integration_tests)
 
 if(TARGET wargame_serverlib)
     target_sources(wargame_tests PRIVATE
@@ -194,6 +283,15 @@ if(TARGET wargame_serverlib)
         tests/test_state_projector.cpp
     )
     target_link_libraries(wargame_tests PRIVATE wargame_serverlib)
+
+    add_executable(authoritative_room_tests
+        tests/test_authoritative_room.cpp
+    )
+    target_link_libraries(authoritative_room_tests PRIVATE
+        wargame_serverlib GTest::gtest GTest::gtest_main)
+    target_include_directories(authoritative_room_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    wargame_enable_sanitizers(authoritative_room_tests)
+    add_test(NAME GameServer.AuthoritativeRoom COMMAND authoritative_room_tests)
 endif()
 
 include(GoogleTest)
