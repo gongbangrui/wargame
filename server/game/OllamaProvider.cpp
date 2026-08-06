@@ -91,8 +91,12 @@ OllamaConfig OllamaProvider::fromEnvironment(QString* error) {
         config.deployment = QStringLiteral("rules");
         return config;
     }
-    config.connectionTimeoutMs = boundedEnvironmentInt("OLLAMA_CONNECT_TIMEOUT_MS", 1500, 100, 1500);
-    config.totalTimeoutMs = boundedEnvironmentInt("OLLAMA_TIMEOUT_MS", 15000, 1000, 15000);
+    config.connectionTimeoutMs = boundedEnvironmentInt(
+        "OLLAMA_CONNECT_TIMEOUT_MS", DefaultOllamaConnectionTimeoutMs, 100,
+        DefaultOllamaConnectionTimeoutMs);
+    config.totalTimeoutMs = boundedEnvironmentInt(
+        "OLLAMA_TIMEOUT_MS", DefaultOllamaRequestTimeoutMs,
+        MinimumOllamaRequestTimeoutMs, MaximumOllamaRequestTimeoutMs);
     config.maxResponseBytes = boundedEnvironmentInt("OLLAMA_MAX_RESPONSE_BYTES", 64 * 1024,
                                                      1024, 64 * 1024);
     return config;
@@ -135,7 +139,10 @@ QJsonObject OllamaProvider::schemaFor(const OllamaPlanRequest& request) {
 void OllamaProvider::monitorReply(QNetworkReply* reply) {
     m_abortFailure.clear();
     m_connectionTimeout->start(m_config.connectionTimeoutMs);
-    m_totalTimeout->start(m_config.totalTimeoutMs);
+    // A plan may need a model-list probe before the chat request. Both legs
+    // consume the same configured planning budget rather than each receiving
+    // a full timeout window.
+    m_totalTimeout->start(qMax(1, remainingPlanTimeoutMs()));
     const auto connected = [this, reply]() {
         if (m_reply == reply) m_connectionTimeout->stop();
     };
@@ -153,6 +160,15 @@ void OllamaProvider::monitorReply(QNetworkReply* reply) {
 void OllamaProvider::stopTimers() {
     m_connectionTimeout->stop();
     m_totalTimeout->stop();
+}
+
+int OllamaProvider::remainingPlanTimeoutMs() const {
+    if (!m_planAttemptActive || m_planAttemptStartedAt <= 0) {
+        return m_config.totalTimeoutMs;
+    }
+    const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - m_planAttemptStartedAt;
+    if (elapsed >= m_config.totalTimeoutMs) return 0;
+    return m_config.totalTimeoutMs - static_cast<int>(elapsed);
 }
 
 bool OllamaProvider::appendBody(QNetworkReply* reply) {
@@ -230,7 +246,9 @@ void OllamaProvider::probe(quint64 matchGeneration, std::function<void(OllamaRes
         stopTimers();
         OllamaResult result;
         result.configuredModel = m_config.model;
-        result.latencyMs = QDateTime::currentMSecsSinceEpoch() - started;
+        result.latencyMs = m_planAttemptActive && m_planAttemptStartedAt > 0
+            ? QDateTime::currentMSecsSinceEpoch() - m_planAttemptStartedAt
+            : QDateTime::currentMSecsSinceEpoch() - started;
         if (!m_body.isEmpty()) result.rawResponse = QString::fromUtf8(m_body);
         if (!m_abortFailure.isEmpty()) {
             m_probeValid = false;
@@ -327,6 +345,10 @@ void OllamaProvider::requestPlan(const OllamaPlanRequest& request,
 
 void OllamaProvider::startPlanRequest(const OllamaPlanRequest& request,
                                       std::function<void(OllamaResult)> callback) {
+    if (m_planAttemptActive && remainingPlanTimeoutMs() <= 0) {
+        callback(attemptResult(QStringLiteral("timeout")));
+        return;
+    }
     m_body.clear();
     const QString resolvedModel = m_resolvedModel;
     const QJsonObject payload{{QStringLiteral("model"), resolvedModel},
@@ -356,7 +378,9 @@ void OllamaProvider::startPlanRequest(const OllamaPlanRequest& request,
         result.requestId = request.requestId;
         result.configuredModel = m_config.model;
         result.resolvedModel = resolvedModel;
-        result.latencyMs = QDateTime::currentMSecsSinceEpoch() - started;
+        result.latencyMs = m_planAttemptStartedAt > 0
+            ? QDateTime::currentMSecsSinceEpoch() - m_planAttemptStartedAt
+            : QDateTime::currentMSecsSinceEpoch() - started;
         if (!m_body.isEmpty()) result.rawResponse = QString::fromUtf8(m_body);
         if (!m_abortFailure.isEmpty()) {
             result.failureClass = m_abortFailure;

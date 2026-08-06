@@ -106,7 +106,7 @@ sed -i \
     -e 's#^OLLAMA_BASE_URL=.*#OLLAMA_BASE_URL=\x27http://127.0.0.1:11434\x27#' \
     -e 's/^OLLAMA_MODEL=.*/OLLAMA_MODEL=\x27explicit-model\x27/' \
     -e 's/^OLLAMA_CONNECT_TIMEOUT_MS=.*/OLLAMA_CONNECT_TIMEOUT_MS=1200/' \
-    -e 's/^OLLAMA_TIMEOUT_MS=.*/OLLAMA_TIMEOUT_MS=12000/' \
+    -e 's/^OLLAMA_TIMEOUT_MS=.*/OLLAMA_TIMEOUT_MS=45000/' \
     -e 's/^OLLAMA_MAX_RESPONSE_BYTES=.*/OLLAMA_MAX_RESPONSE_BYTES=32768/' \
     "$install_root/.env"
 run_installer --reuse-admin-password --no-reset-admin
@@ -122,7 +122,11 @@ grep -Fqx 'AI_PROVIDER=ollama' "$install_root/.env"
 grep -Fqx "OLLAMA_BASE_URL='http://127.0.0.1:11434'" "$install_root/.env"
 grep -Fqx "OLLAMA_MODEL='explicit-model'" "$install_root/.env"
 grep -Fqx 'OLLAMA_CONNECT_TIMEOUT_MS=1200' "$install_root/.env"
-grep -Fqx 'OLLAMA_TIMEOUT_MS=12000' "$install_root/.env"
+grep -Fqx 'OLLAMA_TIMEOUT_MS=45000' "$install_root/.env"
+
+sed -i 's/^OLLAMA_TIMEOUT_MS=.*/OLLAMA_TIMEOUT_MS=15000/' "$install_root/.env"
+run_installer --reuse-admin-password --no-reset-admin
+grep -Fqx 'OLLAMA_TIMEOUT_MS=60000' "$install_root/.env"
 grep -Fqx 'OLLAMA_MAX_RESPONSE_BYTES=32768' "$install_root/.env"
 
 if NO_BUILD_IMAGE_MISSING=1 run_installer --reuse-admin-password --no-reset-admin --no-build; then

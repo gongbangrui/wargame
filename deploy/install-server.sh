@@ -53,7 +53,7 @@ AI_PROVIDER="auto"
 OLLAMA_BASE_URL="http://host.docker.internal:11434"
 OLLAMA_MODEL="auto"
 OLLAMA_CONNECT_TIMEOUT_MS="1500"
-OLLAMA_TIMEOUT_MS="15000"
+OLLAMA_TIMEOUT_MS="60000"
 OLLAMA_MAX_RESPONSE_BYTES="65536"
 WARGAME_ALLOW_RECOVERY_RESET="0"
 WARGAME_ENABLE_FASTDDS="OFF"
@@ -555,6 +555,10 @@ read_existing_env() {
   value="$(load_value OLLAMA_MODEL)"; [[ -n "$value" ]] && OLLAMA_MODEL="$value"
   value="$(load_value OLLAMA_CONNECT_TIMEOUT_MS)"; [[ -n "$value" ]] && OLLAMA_CONNECT_TIMEOUT_MS="$value"
   value="$(load_value OLLAMA_TIMEOUT_MS)"; [[ -n "$value" ]] && OLLAMA_TIMEOUT_MS="$value"
+  # 15 seconds was the documented default before local structured planning
+  # support. Promote that exact legacy default during upgrades; explicit newer
+  # values continue through the normal validation path below.
+  [[ "$OLLAMA_TIMEOUT_MS" != "15000" ]] || OLLAMA_TIMEOUT_MS="60000"
   value="$(load_value OLLAMA_MAX_RESPONSE_BYTES)"; [[ -n "$value" ]] && OLLAMA_MAX_RESPONSE_BYTES="$value"
   value="$(load_value WARGAME_ALLOW_RECOVERY_RESET)"; [[ -n "$value" ]] && WARGAME_ALLOW_RECOVERY_RESET="$value"
   value="$(load_value WARGAME_ENABLE_FASTDDS)"; [[ -n "$value" ]] && WARGAME_ENABLE_FASTDDS="$value"
@@ -748,7 +752,7 @@ validate_configuration() {
   [[ -n "$OLLAMA_MODEL" && ${#OLLAMA_MODEL} -le 128 && "$OLLAMA_MODEL" != *$'\n'* && "$OLLAMA_MODEL" != *$'\r'* ]] \
     || die "OLLAMA_MODEL 无效"
   validate_number "Ollama 连接超时" "$OLLAMA_CONNECT_TIMEOUT_MS" 100 1500
-  validate_number "Ollama 总超时" "$OLLAMA_TIMEOUT_MS" 1000 15000
+  validate_number "Ollama 总超时" "$OLLAMA_TIMEOUT_MS" 30000 120000
   validate_number "Ollama 响应大小上限" "$OLLAMA_MAX_RESPONSE_BYTES" 1024 65536
   [[ "$WARGAME_ALLOW_RECOVERY_RESET" == "0" || "$WARGAME_ALLOW_RECOVERY_RESET" == "1" ]] \
     || die "WARGAME_ALLOW_RECOVERY_RESET 只能是 0 或 1"

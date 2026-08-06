@@ -3,6 +3,8 @@
 #include "protocol/Protocol.h"
 #include "protocol/StateDelta.h"
 
+#include <QJsonArray>
+
 namespace gbr {
 
 void ClientStateStore::reset() {
@@ -35,7 +37,16 @@ ClientStateStore::Result ClientStateStore::applyEnvelope(const QJsonObject& enve
     const quint64 sequence = static_cast<quint64>(
         envelope.value(QStringLiteral("sequence")).toInteger());
     const QString type = envelope.value(QStringLiteral("type")).toString();
-    const QJsonObject payload = envelope.value(QStringLiteral("payload")).toObject();
+    QJsonObject payload = envelope.value(QStringLiteral("payload")).toObject();
+    const QJsonObject roomState = payload.value(QStringLiteral("roomState")).toObject();
+    if ((type == QLatin1String("snapshot") || type == QLatin1String("delta"))
+        && roomState.value(QStringLiteral("observer")).toBool()
+        && payload.value(QStringLiteral("mapMarks")).isArray()
+        && payload.value(QStringLiteral("mapMarks")).toArray().isEmpty()) {
+        // Keep the internal observer state on the current strict shape after
+        // accepting the empty legacy compatibility field at the boundary.
+        payload.remove(QStringLiteral("mapMarks"));
+    }
     if (sequence <= m_lastSequence) return {Disposition::Ignored, type, payload, {}, {}};
 
     if (type == QLatin1String("snapshot")) {

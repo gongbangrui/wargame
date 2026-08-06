@@ -422,19 +422,30 @@ bool validObserverUnits(const QJsonValue& value) {
 bool validObserverSnapshot(const QJsonObject& payload, const QJsonObject& roomState) {
     static const QSet<QString> allowed{
         QStringLiteral("schemaVersion"), QStringLiteral("stateRevision"),
-        QStringLiteral("scenario"), QStringLiteral("units"), QStringLiteral("roomState")};
+        QStringLiteral("scenario"), QStringLiteral("units"), QStringLiteral("roomState"),
+        // Older servers included an empty participant map-mark collection in
+        // observer projections. Accept that inert legacy shape so a client
+        // upgrade does not turn an observer join into a fatal protocol error.
+        QStringLiteral("mapMarks")};
     return hasOnlyFields(payload, allowed) && validObserverRoomState(roomState)
         && validObserverScenario(payload.value(QStringLiteral("scenario")))
-        && validObserverUnits(payload.value(QStringLiteral("units")));
+        && validObserverUnits(payload.value(QStringLiteral("units")))
+        && (!payload.contains(QStringLiteral("mapMarks"))
+            || (payload.value(QStringLiteral("mapMarks")).isArray()
+                && payload.value(QStringLiteral("mapMarks")).toArray().isEmpty()));
 }
 
 bool validObserverDelta(const QJsonObject& payload, const QJsonObject& roomState) {
     static const QSet<QString> allowed{
         QStringLiteral("schemaVersion"), QStringLiteral("baseStateRevision"),
         QStringLiteral("stateRevision"), QStringLiteral("scenarioRevision"),
-        QStringLiteral("units"), QStringLiteral("roomState")};
+        QStringLiteral("units"), QStringLiteral("roomState"),
+        QStringLiteral("mapMarks")};
     return hasOnlyFields(payload, allowed) && validObserverRoomState(roomState)
-        && validObserverUnits(payload.value(QStringLiteral("units")));
+        && validObserverUnits(payload.value(QStringLiteral("units")))
+        && (!payload.contains(QStringLiteral("mapMarks"))
+            || (payload.value(QStringLiteral("mapMarks")).isArray()
+                && payload.value(QStringLiteral("mapMarks")).toArray().isEmpty()));
 }
 
 } // namespace

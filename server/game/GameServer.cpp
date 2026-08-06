@@ -36,6 +36,7 @@ constexpr int kMaxMessagesPerSecond = 60;
 constexpr int kMaxMapMarksPerSecond = 8;
 constexpr qint64 kMaxPendingBytes = 1024 * 1024;
 constexpr qint64 kDdsTicketLifetimeMs = 120000;
+constexpr int kAiProviderPlanGraceMs = 1000;
 
 QString env(const char* name, const QString& fallback) {
     const QString value = qEnvironmentVariable(name).trimmed();
@@ -4053,8 +4054,7 @@ void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
     const bool trackedRequest = m_aiPlanRequestInFlight
         && context.matchGeneration == m_aiPlanRequestGeneration
         && context.planningGeneration == m_aiPlanRequestPlanningGeneration;
-    if (!trackedRequest || context.matchGeneration != m_matchGeneration
-        || context.planningGeneration != m_aiPlanningGeneration) {
+    if (!trackedRequest) {
         audit(QStringLiteral("ai"),
               QJsonObject{{QStringLiteral("event"),
                            QStringLiteral("staleProviderResponseDiscarded")}});
@@ -4063,6 +4063,17 @@ void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
     m_aiPlanRequestInFlight = false;
     m_aiPlanRequestGeneration = 0;
     m_aiPlanRequestPlanningGeneration = 0;
+    if (context.matchGeneration != m_matchGeneration) {
+        result.ok = false;
+        result.failureClass = QStringLiteral("stale_response");
+        recordAiConversation(result, context.planningGeneration,
+                             QStringLiteral("rejected"), m_aiPlan,
+                             QStringLiteral("stale response discarded"));
+        audit(QStringLiteral("ai"),
+              QJsonObject{{QStringLiteral("event"),
+                           QStringLiteral("staleProviderResponseDiscarded")}});
+        return;
+    }
     m_aiLastLatencyMs = result.latencyMs;
     if (result.latencyMs > 0) {
         const quint64 samples = m_aiProviderSuccesses + m_aiProviderFailures;
@@ -4143,14 +4154,32 @@ void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
             }
         }
         if (valid) {
+            const bool rebasedAfterRulesReplan =
+                context.planningGeneration != m_aiPlanningGeneration;
             result.plan.sourceStateRevision = m_stateRevision;
             m_aiPlan = result.plan;
+            double earliestPlanExpiry = std::numeric_limits<double>::infinity();
+            for (const AiObjectiveV1& objective : m_aiPlan.objectives) {
+                earliestPlanExpiry = std::min(earliestPlanExpiry, objective.validUntil);
+            }
+            if (std::isfinite(earliestPlanExpiry)) {
+                m_aiNextReplanAt = std::min(m_aiNextReplanAt, earliestPlanExpiry);
+            }
             m_aiEffectiveEngine = QStringLiteral("ollama");
             m_aiLastFailureClass.clear();
             m_aiConsecutiveFailures = 0;
             ++m_aiProviderSuccesses;
             recordAiConversation(result, context.planningGeneration,
                                  QStringLiteral("completed"), m_aiPlan);
+            if (rebasedAfterRulesReplan) {
+                audit(QStringLiteral("ai"),
+                      QJsonObject{{QStringLiteral("event"),
+                                   QStringLiteral("providerPlanRebased")},
+                                  {QStringLiteral("requestPlanningGeneration"),
+                                   static_cast<qint64>(context.planningGeneration)},
+                                  {QStringLiteral("currentPlanningGeneration"),
+                                   static_cast<qint64>(m_aiPlanningGeneration)}});
+            }
             return;
         }
         result.ok = false;
@@ -4222,7 +4251,10 @@ void GameServer::runAiDecision() {
             request.matchGeneration = requestGeneration;
             request.sourceStateRevision = requestSourceRevision;
             request.planningGeneration = requestPlanningGeneration;
-            request.validUntil = m_aiNextReplanAt;
+            request.validUntil = std::max(
+                m_aiNextReplanAt,
+                now + static_cast<double>(m_ollamaProvider->config().totalTimeoutMs
+                                           + kAiProviderPlanGraceMs) / 1000.0);
             request.mapWidth = map.value(QStringLiteral("widthMeters")).toDouble();
             request.mapHeight = map.value(QStringLiteral("heightMeters")).toDouble();
             for (const AiSeatState& state : states) {

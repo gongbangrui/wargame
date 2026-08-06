@@ -680,7 +680,7 @@ TEST(ProtocolTest, AiEngineIsConstrainedToPublicRuntimeValues) {
                      &projection).valid);
 }
 
-TEST(ProtocolTest, ObserverSnapshotUsesStrictPositiveWhitelists) {
+TEST(ProtocolTest, ObserverSnapshotUsesStrictPositiveWhitelistsWithEmptyLegacyMapMarks) {
     const QJsonObject validPayload = observerProtocolSnapshot();
     const auto validate = [](const QJsonObject& payload) {
         return Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
@@ -688,7 +688,16 @@ TEST(ProtocolTest, ObserverSnapshotUsesStrictPositiveWhitelists) {
     };
     ASSERT_TRUE(validate(validPayload));
 
-    for (const QString& field : {QStringLiteral("messages"), QStringLiteral("mapMarks"),
+    QJsonObject legacyEmptyMapMarks = validPayload;
+    legacyEmptyMapMarks[QStringLiteral("mapMarks")] = QJsonArray{};
+    EXPECT_TRUE(validate(legacyEmptyMapMarks));
+
+    QJsonObject visibleMapMark = validPayload;
+    visibleMapMark[QStringLiteral("mapMarks")] = QJsonArray{
+        QJsonObject{{QStringLiteral("label"), QStringLiteral("private mark")}}};
+    EXPECT_FALSE(validate(visibleMapMark));
+
+    for (const QString& field : {QStringLiteral("messages"),
                                  QStringLiteral("serverMetrics")}) {
         QJsonObject sensitive = validPayload;
         sensitive[field] = field == QLatin1String("serverMetrics")
@@ -755,6 +764,16 @@ TEST(ProtocolTest, ObserverSnapshotAndDeltaRejectMalformedNestedFields) {
     EXPECT_TRUE(Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
                     QStringLiteral("delta"), 2, delta)).valid);
 
+    delta[QStringLiteral("mapMarks")] = QJsonArray{};
+    EXPECT_TRUE(Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+                    QStringLiteral("delta"), 2, delta)).valid);
+
+    delta[QStringLiteral("mapMarks")] = QJsonArray{
+        QJsonObject{{QStringLiteral("label"), QStringLiteral("private mark")}}};
+    EXPECT_FALSE(Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+                    QStringLiteral("delta"), 2, delta)).valid);
+
+    delta.remove(QStringLiteral("mapMarks"));
     delta[QStringLiteral("serverMetrics")] = QJsonObject{};
     EXPECT_FALSE(Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
                      QStringLiteral("delta"), 2, delta)).valid);

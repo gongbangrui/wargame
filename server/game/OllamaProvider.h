@@ -16,12 +16,17 @@
 
 namespace gbr {
 
+inline constexpr int DefaultOllamaConnectionTimeoutMs = 1500;
+inline constexpr int DefaultOllamaRequestTimeoutMs = 60000;
+inline constexpr int MinimumOllamaRequestTimeoutMs = 30000;
+inline constexpr int MaximumOllamaRequestTimeoutMs = 120000;
+
 struct OllamaConfig {
     QString deployment = QStringLiteral("auto");
     QString baseUrl = QStringLiteral("http:") + QStringLiteral("//127.0.0.1:11434");
     QString model = QStringLiteral("auto");
-    int connectionTimeoutMs = 1500;
-    int totalTimeoutMs = 15000;
+    int connectionTimeoutMs = DefaultOllamaConnectionTimeoutMs;
+    int totalTimeoutMs = DefaultOllamaRequestTimeoutMs;
     int maxResponseBytes = 64 * 1024;
 };
 
@@ -77,6 +82,7 @@ private:
     QNetworkRequest requestFor(const QString& path) const;
     void monitorReply(QNetworkReply* reply);
     void stopTimers();
+    int remainingPlanTimeoutMs() const;
     bool appendBody(QNetworkReply* reply);
     OllamaResult attemptResult(const QString& failureClass = QString()) const;
     void finishAttempt(OllamaResult* result);

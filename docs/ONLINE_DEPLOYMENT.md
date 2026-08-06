@@ -161,7 +161,7 @@ AI_PROVIDER=auto
 OLLAMA_BASE_URL=http://host.docker.internal:11434
 OLLAMA_MODEL=auto
 OLLAMA_CONNECT_TIMEOUT_MS=1500
-OLLAMA_TIMEOUT_MS=15000
+OLLAMA_TIMEOUT_MS=60000
 OLLAMA_MAX_RESPONSE_BYTES=65536
 ```
 
@@ -175,8 +175,10 @@ docker compose --project-name wargame --env-file .env -f deploy/compose.yml conf
 docker compose --project-name wargame --env-file .env -f deploy/compose.yml up -d --build
 ```
 
-连接、请求和响应上限分别由 `OLLAMA_CONNECT_TIMEOUT_MS`、`OLLAMA_TIMEOUT_MS` 和
-`OLLAMA_MAX_RESPONSE_BYTES` 控制；保持有限值，避免 PVE 请求拖住权威 tick。管理员可在
+连接、规划总时限和响应上限分别由 `OLLAMA_CONNECT_TIMEOUT_MS`、`OLLAMA_TIMEOUT_MS` 和
+`OLLAMA_MAX_RESPONSE_BYTES` 控制。一次规划（包括需要时的模型列表探测和对话生成）共用
+一个总时限，默认最多等待 60 秒，可配置范围为 30 至 120 秒；请求异步执行，不会阻塞权威
+tick。安装器会将旧默认值 `15000` 自动迁移为 `60000`。管理员可在
 “服务器监控”查看 `provider`、`model`、`effectiveEngine`、请求成功/失败数、延迟、最近
 失败类别和 `stickyRules`。故障排查时查看 `docker compose ... logs --tail=100 game-server`
 和监控页；不要把请求正文、凭据或完整响应写入日志。

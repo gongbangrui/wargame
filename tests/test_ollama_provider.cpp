@@ -25,6 +25,7 @@ struct HttpResponse {
     QByteArray body;
     bool hold = false;
     QByteArray extraHeaders;
+    int delayMs = 0;
 };
 
 class FakeOllamaServer final : public QObject {
@@ -51,13 +52,20 @@ public:
                     m_buffers.remove(socket);
                     const HttpResponse response = m_responses.takeFirst();
                     if (response.hold) return;
-                    const QByteArray reason = response.status == 200 ? "OK" : "Error";
-                    socket->write("HTTP/1.1 " + QByteArray::number(response.status) + " " + reason
-                                  + "\r\nContent-Type: application/json\r\nContent-Length: "
-                                  + QByteArray::number(response.body.size())
-                                  + "\r\nConnection: close\r\n" + response.extraHeaders
-                                  + "\r\n" + response.body);
-                    socket->disconnectFromHost();
+                    const auto sendResponse = [socket, response]() {
+                        const QByteArray reason = response.status == 200 ? "OK" : "Error";
+                        socket->write("HTTP/1.1 " + QByteArray::number(response.status) + " " + reason
+                                      + "\r\nContent-Type: application/json\r\nContent-Length: "
+                                      + QByteArray::number(response.body.size())
+                                      + "\r\nConnection: close\r\n" + response.extraHeaders
+                                      + "\r\n" + response.body);
+                        socket->disconnectFromHost();
+                    };
+                    if (response.delayMs > 0) {
+                        QTimer::singleShot(response.delayMs, socket, sendResponse);
+                    } else {
+                        sendResponse();
+                    }
                 });
                 connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
             }
@@ -150,8 +158,8 @@ INSTANTIATE_TEST_SUITE_P(UserInfoQueryFragmentAndScheme, InvalidUrlTest,
 
 TEST(OllamaProviderTest, UsesExactProductionBoundsByDefault) {
     const OllamaConfig config;
-    EXPECT_EQ(config.connectionTimeoutMs, 1500);
-    EXPECT_EQ(config.totalTimeoutMs, 15000);
+    EXPECT_EQ(config.connectionTimeoutMs, DefaultOllamaConnectionTimeoutMs);
+    EXPECT_EQ(config.totalTimeoutMs, DefaultOllamaRequestTimeoutMs);
     EXPECT_EQ(config.maxResponseBytes, 64 * 1024);
 }
 
@@ -176,6 +184,28 @@ TEST(OllamaProviderTest, SendsBoundedNonStreamingSchemaRequestAndAcceptsExactPla
     EXPECT_FALSE(format.value(QStringLiteral("additionalProperties")).toBool(true));
     EXPECT_TRUE(format.value(QStringLiteral("properties")).toObject()
                     .contains(QStringLiteral("planningGeneration")));
+}
+
+TEST(OllamaProviderTest, SharesOneTimeoutBudgetAcrossProbeAndChat) {
+    FakeOllamaServer server;
+    ASSERT_TRUE(server.listen());
+    server.enqueue({200, tags(), false, {}, 120});
+    server.enqueue({200, {}, true});
+    QNetworkAccessManager network;
+    OllamaConfig config = configFor(server.url());
+    config.totalTimeoutMs = 250;
+    OllamaProvider provider(config, &network);
+
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const OllamaResult result = awaitPlan(provider, 1000);
+
+    EXPECT_EQ(result.failureClass, QStringLiteral("timeout"));
+    EXPECT_EQ(server.paths(), (QList<QByteArray>{"/api/tags", "/api/chat"}));
+    EXPECT_GE(elapsed.elapsed(), 200);
+    EXPECT_LT(elapsed.elapsed(), 325);
+    EXPECT_GE(result.latencyMs, 200);
+    EXPECT_LT(result.latencyMs, 325);
 }
 
 TEST(OllamaProviderTest, MissingModelIsCachedOnlyForOneMatch) {

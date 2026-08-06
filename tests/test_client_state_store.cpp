@@ -234,6 +234,46 @@ TEST(ClientStateStoreTest, ObserverSnapshotDeltaAndResyncRemainContiguous) {
               QStringLiteral("red"));
 }
 
+TEST(ClientStateStoreTest, NormalizesEmptyLegacyObserverMapMarksAndRejectsVisibleMarkers) {
+    ClientStateStore store;
+    store.beginConnection();
+    ASSERT_EQ(store.applyEnvelope(welcome(1)).disposition,
+              ClientStateStore::Disposition::Accepted);
+
+    QJsonObject legacySnapshot = observerSnapshot(10);
+    legacySnapshot[QStringLiteral("mapMarks")] = QJsonArray{};
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("snapshot"), 2, legacySnapshot)).disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+    EXPECT_TRUE(store.lifecycle().observer);
+    EXPECT_FALSE(store.snapshot().contains(QStringLiteral("mapMarks")));
+
+    QJsonObject currentLegacySnapshot = legacySnapshot;
+    currentLegacySnapshot[QStringLiteral("stateRevision")] = 11;
+    QJsonObject currentRoomState = currentLegacySnapshot.value(QStringLiteral("roomState")).toObject();
+    currentRoomState[QStringLiteral("stateRevision")] = 11;
+    currentLegacySnapshot[QStringLiteral("roomState")] = currentRoomState;
+    QJsonObject legacyDelta = StateDelta::create(legacySnapshot, currentLegacySnapshot);
+    legacyDelta[QStringLiteral("mapMarks")] = QJsonArray{};
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("delta"), 3, legacyDelta)).disposition,
+              ClientStateStore::Disposition::DeltaApplied);
+    EXPECT_EQ(store.stateRevision(), 11);
+    EXPECT_FALSE(store.snapshot().contains(QStringLiteral("mapMarks")));
+
+    ClientStateStore rejectingStore;
+    rejectingStore.beginConnection();
+    ASSERT_EQ(rejectingStore.applyEnvelope(welcome(1)).disposition,
+              ClientStateStore::Disposition::Accepted);
+    QJsonObject visibleMarkerSnapshot = observerSnapshot(10);
+    visibleMarkerSnapshot[QStringLiteral("mapMarks")] = QJsonArray{
+        QJsonObject{{QStringLiteral("label"), QStringLiteral("private mark")}}};
+    const ClientStateStore::Result rejected = rejectingStore.applyEnvelope(
+        Protocol::makeServerEnvelope(QStringLiteral("snapshot"), 2, visibleMarkerSnapshot));
+    EXPECT_EQ(rejected.disposition, ClientStateStore::Disposition::Fatal);
+    EXPECT_EQ(rejected.message, QStringLiteral("观察员快照结构无效"));
+}
+
 } // namespace
 
 TEST(ClientStateStoreTest, AppliesContiguousSnapshotAndDelta) {
