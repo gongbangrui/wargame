@@ -145,29 +145,151 @@ bool rotationRename(const QString& source, const QString& destination, bool inst
     return QFile::rename(source, destination);
 }
 
+QJsonObject aiStateToJson(const AiCheckpointState& state) {
+    QJsonObject object{
+        {QStringLiteral("matchGeneration"), QString::number(state.matchGeneration)},
+        {QStringLiteral("commandSequence"), QString::number(state.commandSequence)},
+        {QStringLiteral("planningGeneration"), QString::number(state.planningGeneration)},
+        {QStringLiteral("rngState"), QString::number(state.rngState)},
+        {QStringLiteral("aiDifficulty"), state.aiDifficulty},
+        {QStringLiteral("providerMode"), state.providerMode},
+        {QStringLiteral("providerModel"), state.providerModel},
+        {QStringLiteral("nextDecisionAt"), state.nextDecisionAt},
+        {QStringLiteral("nextReplanAt"), state.nextReplanAt},
+        {QStringLiteral("consecutiveFailures"), state.consecutiveFailures},
+        {QStringLiteral("stickyRules"), state.stickyRules},
+        {QStringLiteral("effectiveEngine"), state.effectiveEngine},
+        {QStringLiteral("lastFailureClass"), state.lastFailureClass},
+        {QStringLiteral("providerRequests"), QString::number(state.providerRequests)},
+        {QStringLiteral("providerSuccesses"), QString::number(state.providerSuccesses)},
+        {QStringLiteral("providerFailures"), QString::number(state.providerFailures)},
+        {QStringLiteral("lastLatencyMs"), state.lastLatencyMs},
+        {QStringLiteral("averageLatencyMs"), state.averageLatencyMs}};
+    if (state.currentPlan.has_value()) {
+        object[QStringLiteral("currentPlan")] = state.currentPlan->toJson();
+    }
+    return object;
+}
+
+bool unsignedField(const QJsonObject& object, const QString& name, quint64* value) {
+    const QJsonValue field = object.value(name);
+    if (!field.isString()) return false;
+    bool ok = false;
+    const quint64 parsed = field.toString().toULongLong(&ok);
+    if (!ok || QString::number(parsed) != field.toString()) return false;
+    if (value) *value = parsed;
+    return true;
+}
+
+bool aiStateFromJson(const QJsonObject& object, AiCheckpointState* state, QString* error) {
+    const auto fail = [error](const QString& message) {
+        if (error) *error = message;
+        return false;
+    };
+    AiCheckpointState parsed;
+    if (!unsignedField(object, QStringLiteral("matchGeneration"), &parsed.matchGeneration)
+        || parsed.matchGeneration == 0
+        || !unsignedField(object, QStringLiteral("commandSequence"), &parsed.commandSequence)
+        || !unsignedField(object, QStringLiteral("planningGeneration"),
+                          &parsed.planningGeneration)
+        || !unsignedField(object, QStringLiteral("rngState"), &parsed.rngState)
+        || parsed.rngState == 0
+        || !unsignedField(object, QStringLiteral("providerRequests"),
+                          &parsed.providerRequests)
+        || !unsignedField(object, QStringLiteral("providerSuccesses"),
+                          &parsed.providerSuccesses)
+        || !unsignedField(object, QStringLiteral("providerFailures"),
+                          &parsed.providerFailures)) {
+        return fail(QStringLiteral("AI 检查点无符号计数器无效"));
+    }
+    const QJsonValue nextDecisionAt = object.value(QStringLiteral("nextDecisionAt"));
+    const QJsonValue nextReplanAt = object.value(QStringLiteral("nextReplanAt"));
+    const QJsonValue consecutiveFailures = object.value(QStringLiteral("consecutiveFailures"));
+    const QJsonValue stickyRules = object.value(QStringLiteral("stickyRules"));
+    const QJsonValue effectiveEngine = object.value(QStringLiteral("effectiveEngine"));
+    const QJsonValue lastFailureClass = object.value(QStringLiteral("lastFailureClass"));
+    const QJsonValue lastLatencyMs = object.value(QStringLiteral("lastLatencyMs"));
+    const QJsonValue averageLatencyMs = object.value(QStringLiteral("averageLatencyMs"));
+    parsed.nextDecisionAt = nextDecisionAt.toDouble(-1.0);
+    parsed.nextReplanAt = nextReplanAt.toDouble(-1.0);
+    parsed.consecutiveFailures = consecutiveFailures.toInt(-1);
+    parsed.stickyRules = stickyRules.toBool();
+    parsed.effectiveEngine = effectiveEngine.toString();
+    parsed.lastFailureClass = lastFailureClass.toString();
+    parsed.lastLatencyMs = lastLatencyMs.toInteger(-1);
+    parsed.averageLatencyMs = averageLatencyMs.toInteger(-1);
+    parsed.aiDifficulty = object.value(QStringLiteral("aiDifficulty"))
+                              .toString(QStringLiteral("normal"));
+    parsed.providerMode = object.value(QStringLiteral("providerMode"))
+                              .toString(QStringLiteral("auto"));
+    parsed.providerModel = object.value(QStringLiteral("providerModel"))
+                               .toString(QStringLiteral("qwen3:4b"));
+    if (!nextDecisionAt.isDouble() || !nextReplanAt.isDouble()
+        || !std::isfinite(parsed.nextDecisionAt) || parsed.nextDecisionAt < 0.0
+        || !std::isfinite(parsed.nextReplanAt) || parsed.nextReplanAt < 0.0
+        || !consecutiveFailures.isDouble() || parsed.consecutiveFailures < 0
+        || !stickyRules.isBool() || !effectiveEngine.isString()
+        || (parsed.effectiveEngine != QLatin1String("rules")
+            && parsed.effectiveEngine != QLatin1String("ollama"))
+        || !lastFailureClass.isString() || parsed.lastFailureClass.size() > 128
+        || (parsed.aiDifficulty != QLatin1String("easy")
+            && parsed.aiDifficulty != QLatin1String("normal")
+            && parsed.aiDifficulty != QLatin1String("hard"))
+        || (parsed.providerMode != QLatin1String("rules")
+            && parsed.providerMode != QLatin1String("auto")
+            && parsed.providerMode != QLatin1String("ollama"))
+        || parsed.providerModel.isEmpty() || parsed.providerModel.size() > 128
+        || !lastLatencyMs.isDouble() || parsed.lastLatencyMs < 0
+        || !averageLatencyMs.isDouble() || parsed.averageLatencyMs < 0
+        || parsed.providerSuccesses > parsed.providerRequests
+        || parsed.providerFailures > parsed.providerRequests - parsed.providerSuccesses) {
+        return fail(QStringLiteral("AI 检查点状态无效"));
+    }
+    const QJsonValue currentPlan = object.value(QStringLiteral("currentPlan"));
+    if (!currentPlan.isUndefined()) {
+        if (!currentPlan.isObject()) return fail(QStringLiteral("AI 检查点计划无效"));
+        AiPlanV1 plan;
+        QString planError;
+        if (!AiPlanV1::fromJson(currentPlan.toObject(), &plan, &planError)) {
+            return fail(QStringLiteral("AI 检查点计划无效: %1").arg(planError));
+        }
+        if (plan.matchGeneration != parsed.matchGeneration) {
+            return fail(QStringLiteral("AI 检查点计划与对局代次不匹配"));
+        }
+        parsed.currentPlan = plan;
+    }
+    if (state) *state = parsed;
+    return true;
+}
+
 QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
-    return {{QStringLiteral("checkpointSchemaVersion"), kCheckpointSchemaVersion},
-            {QStringLiteral("protocolVersion"), Protocol::Version},
-            {QStringLiteral("savedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
-            {QStringLiteral("scenario"), ScenarioIo::toJson(checkpoint.scenario)},
-            {QStringLiteral("runInitialScenario"), ScenarioIo::toJson(checkpoint.runInitialScenario)},
-            {QStringLiteral("runtimeUnits"), checkpoint.runtimeUnits},
-            {QStringLiteral("commandHistory"), checkpoint.commandHistory},
-            {QStringLiteral("authoritativeRoom"), checkpoint.authoritativeRoom},
-            {QStringLiteral("roomState"),
-             QJsonObject{{QStringLiteral("phase"), checkpoint.phase},
-                         {QStringLiteral("redReady"), checkpoint.redReady},
-                         {QStringLiteral("blueReady"), checkpoint.blueReady},
-                         {QStringLiteral("running"), checkpoint.running},
-                         {QStringLiteral("simTime"), checkpoint.simTime},
-                         {QStringLiteral("speed"), checkpoint.speed},
-                         {QStringLiteral("scenarioRevision"),
-                          static_cast<qint64>(checkpoint.scenarioRevision)},
-                         {QStringLiteral("stateRevision"),
-                          static_cast<qint64>(checkpoint.stateRevision)},
-                         {QStringLiteral("eventSequence"),
-                          static_cast<qint64>(checkpoint.eventSequence)},
-                         {QStringLiteral("mapMarks"), checkpoint.mapMarks}}}};
+    QJsonObject object{
+        {QStringLiteral("checkpointSchemaVersion"), kCheckpointSchemaVersion},
+        {QStringLiteral("protocolVersion"), Protocol::Version},
+        {QStringLiteral("savedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+        {QStringLiteral("scenario"), ScenarioIo::toJson(checkpoint.scenario)},
+        {QStringLiteral("runInitialScenario"), ScenarioIo::toJson(checkpoint.runInitialScenario)},
+        {QStringLiteral("runtimeUnits"), checkpoint.runtimeUnits},
+        {QStringLiteral("commandHistory"), checkpoint.commandHistory},
+        {QStringLiteral("authoritativeRoom"), checkpoint.authoritativeRoom},
+        {QStringLiteral("roomState"),
+         QJsonObject{{QStringLiteral("phase"), checkpoint.phase},
+                     {QStringLiteral("redReady"), checkpoint.redReady},
+                     {QStringLiteral("blueReady"), checkpoint.blueReady},
+                     {QStringLiteral("running"), checkpoint.running},
+                     {QStringLiteral("simTime"), checkpoint.simTime},
+                     {QStringLiteral("speed"), checkpoint.speed},
+                     {QStringLiteral("scenarioRevision"),
+                      static_cast<qint64>(checkpoint.scenarioRevision)},
+                     {QStringLiteral("stateRevision"),
+                      static_cast<qint64>(checkpoint.stateRevision)},
+                     {QStringLiteral("eventSequence"),
+                      static_cast<qint64>(checkpoint.eventSequence)},
+                     {QStringLiteral("mapMarks"), checkpoint.mapMarks}}}};
+    if (checkpoint.aiState.has_value()) {
+        object[QStringLiteral("aiState")] = aiStateToJson(*checkpoint.aiState);
+    }
+    return object;
 }
 
 bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
@@ -252,6 +374,14 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
     checkpoint->mapMarks = mapMarks.toArray();
     if (checkpoint->mapMarks.size() > 200) {
         return fail(QStringLiteral("检查点地图标记过多"));
+    }
+    const QJsonValue aiState = object.value(QStringLiteral("aiState"));
+    checkpoint->aiState.reset();
+    if (!aiState.isUndefined()) {
+        if (!aiState.isObject()) return fail(QStringLiteral("AI 检查点结构无效"));
+        AiCheckpointState parsed;
+        if (!aiStateFromJson(aiState.toObject(), &parsed, error)) return false;
+        checkpoint->aiState = parsed;
     }
     return true;
 }

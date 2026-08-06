@@ -514,11 +514,15 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
     ASSERT_TRUE(Protocol::projectSnapshot(
         QJsonObject{{QStringLiteral("roomState"), roomState}}, &snapshot).valid);
     EXPECT_EQ(snapshot.lifecycle.roomId, QStringLiteral("main"));
+    EXPECT_EQ(snapshot.lifecycle.roomMode, QStringLiteral("pvp"));
+    EXPECT_EQ(snapshot.lifecycle.aiDifficulty, QStringLiteral("normal"));
+    EXPECT_EQ(snapshot.lifecycle.configVersion, 1);
     ASSERT_EQ(snapshot.lifecycle.seats.size(), 1);
     EXPECT_EQ(snapshot.lifecycle.seats.front().seatId, QStringLiteral("red_recon_1"));
     EXPECT_TRUE(snapshot.lifecycle.seats.front().connected);
     EXPECT_TRUE(snapshot.lifecycle.seats.front().deployed);
     EXPECT_EQ(snapshot.lifecycle.seats.front().unitId, QStringLiteral("red-r1"));
+    EXPECT_EQ(snapshot.lifecycle.seats.front().controllerType, QStringLiteral("human"));
 
     Protocol::SeatDirectoryProjection directory;
     ASSERT_TRUE(Protocol::projectSeatDirectory(
@@ -530,6 +534,8 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
     EXPECT_TRUE(projectedSeat.value(QStringLiteral("deployed")).toBool());
     EXPECT_EQ(projectedSeat.value(QStringLiteral("selectedTemplate")).toString(),
               QStringLiteral("red-recon"));
+    EXPECT_EQ(projectedSeat.value(QStringLiteral("controllerType")).toString(),
+              QStringLiteral("human"));
 
     Protocol::DeploymentPromptProjection deployment;
     ASSERT_TRUE(Protocol::projectDeploymentPrompt(
@@ -555,6 +561,212 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
                     {QStringLiteral("serverTime"), 13.0}}, &command).valid);
     EXPECT_TRUE(command.accepted);
     EXPECT_DOUBLE_EQ(command.serverTime, 13.0);
+}
+
+namespace {
+
+QJsonObject observerProtocolRuntimeUnit() {
+    return {{QStringLiteral("id"), QStringLiteral("red_a1")},
+            {QStringLiteral("callsign"), QStringLiteral("Red Attack 1")},
+            {QStringLiteral("side"), QStringLiteral("red")},
+            {QStringLiteral("kind"), QStringLiteral("attackuav")},
+            {QStringLiteral("movable"), true},
+            {QStringLiteral("position"), QJsonArray{1.0, 2.0, 3.0}},
+            {QStringLiteral("detectRange"), 4000.0},
+            {QStringLiteral("attackRange"), 2500.0},
+            {QStringLiteral("commRange"), 15000.0},
+            {QStringLiteral("speed"), 100.0},
+            {QStringLiteral("baseSpeed"), 100.0},
+            {QStringLiteral("maxHp"), 120.0},
+            {QStringLiteral("attackPower"), 100.0},
+            {QStringLiteral("armor"), 0.1},
+            {QStringLiteral("hp"), 100.0},
+            {QStringLiteral("alive"), true},
+            {QStringLiteral("subsystems"),
+             QJsonObject{{QStringLiteral("sensor"), 1.0},
+                         {QStringLiteral("comms"), 1.0},
+                         {QStringLiteral("mobility"), 1.0},
+                         {QStringLiteral("weapon"), 1.0}}},
+            {QStringLiteral("serviceRequested"), false},
+            {QStringLiteral("serviceProgress"), 0.0},
+            {QStringLiteral("ammoRemaining"), 4},
+            {QStringLiteral("ammoCapacity"), 4},
+            {QStringLiteral("cooldownRemaining"), 0.0},
+            {QStringLiteral("cooldownSec"), 4.0},
+            {QStringLiteral("fuelRemaining"), 1200.0},
+            {QStringLiteral("fuelCapacity"), 1800.0},
+            {QStringLiteral("turnaroundProgress"), 0.0}};
+}
+
+QJsonObject observerProtocolScenarioUnit() {
+    return {{QStringLiteral("id"), QStringLiteral("red_a1")},
+            {QStringLiteral("callsign"), QStringLiteral("Red Attack 1")},
+            {QStringLiteral("side"), QStringLiteral("red")},
+            {QStringLiteral("kind"), QStringLiteral("attackuav")},
+            {QStringLiteral("x"), 1.0},
+            {QStringLiteral("y"), 2.0},
+            {QStringLiteral("alt"), 3.0},
+            {QStringLiteral("detectRange"), 4000.0},
+            {QStringLiteral("attackRange"), 2500.0},
+            {QStringLiteral("commRange"), 15000.0},
+            {QStringLiteral("speed"), 100.0},
+            {QStringLiteral("maxHp"), 120.0},
+            {QStringLiteral("attackPower"), 100.0},
+            {QStringLiteral("armor"), 0.1},
+            {QStringLiteral("ammoCapacity"), 4},
+            {QStringLiteral("initialAmmo"), 4},
+            {QStringLiteral("cooldownSec"), 4.0},
+            {QStringLiteral("fuelCapacitySec"), 1800.0},
+            {QStringLiteral("initialFuelSec"), 1800.0}};
+}
+
+QJsonObject observerProtocolSnapshot() {
+    const QJsonObject roomState{{QStringLiteral("phase"), QStringLiteral("running")},
+                                {QStringLiteral("roomId"), QStringLiteral("main")},
+                                {QStringLiteral("roomMode"), QStringLiteral("pvp")},
+                                {QStringLiteral("observer"), true},
+                                {QStringLiteral("running"), true},
+                                {QStringLiteral("simTime"), 1.0},
+                                {QStringLiteral("speed"), 1.0},
+                                {QStringLiteral("scenarioRevision"), 1},
+                                {QStringLiteral("stateRevision"), 1}};
+    return {
+        {QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+        {QStringLiteral("stateRevision"), 1},
+        {QStringLiteral("scenario"),
+         QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                     {QStringLiteral("map"),
+                      QJsonObject{{QStringLiteral("name"), QStringLiteral("default")},
+                                  {QStringLiteral("widthMeters"), 40000.0},
+                                  {QStringLiteral("heightMeters"), 30000.0},
+                                  {QStringLiteral("backgroundResource"), QStringLiteral("")}}},
+                     {QStringLiteral("units"),
+                      QJsonArray{observerProtocolScenarioUnit()}}}},
+        {QStringLiteral("units"), QJsonArray{observerProtocolRuntimeUnit()}},
+        {QStringLiteral("roomState"), roomState}};
+}
+
+}
+
+TEST(ProtocolTest, ObserverFlagDefaultsFalseAndRequiresBooleanWhenPresent) {
+    Protocol::RoomLifecycleProjection projection;
+    ASSERT_TRUE(Protocol::projectRoomLifecycle(QJsonObject{}, &projection).valid);
+    EXPECT_FALSE(projection.observer);
+
+    ASSERT_TRUE(Protocol::projectRoomLifecycle(
+                    QJsonObject{{QStringLiteral("observer"), true}}, &projection).valid);
+    EXPECT_TRUE(projection.observer);
+
+    ASSERT_TRUE(Protocol::projectRoomLifecycle(
+                    QJsonObject{{QStringLiteral("observer"), false}}, &projection).valid);
+    EXPECT_FALSE(projection.observer);
+
+    EXPECT_FALSE(Protocol::projectRoomLifecycle(
+                     QJsonObject{{QStringLiteral("observer"), QStringLiteral("true")}},
+                     &projection).valid);
+}
+
+TEST(ProtocolTest, ObserverSnapshotUsesStrictPositiveWhitelists) {
+    const QJsonObject validPayload = observerProtocolSnapshot();
+    const auto validate = [](const QJsonObject& payload) {
+        return Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+            QStringLiteral("snapshot"), 1, payload)).valid;
+    };
+    ASSERT_TRUE(validate(validPayload));
+
+    for (const QString& field : {QStringLiteral("messages"), QStringLiteral("mapMarks"),
+                                 QStringLiteral("serverMetrics")}) {
+        QJsonObject sensitive = validPayload;
+        sensitive[field] = field == QLatin1String("serverMetrics")
+            ? QJsonValue(QJsonObject{}) : QJsonValue(QJsonArray{});
+        EXPECT_FALSE(validate(sensitive)) << field.toStdString();
+    }
+
+    for (const QString& field : {QStringLiteral("sharedKnowledge"),
+                                 QStringLiteral("detections"), QStringLiteral("schedule"),
+                                 QStringLiteral("recentPath"), QStringLiteral("targetId"),
+                                 QStringLiteral("rulesOfEngagement"),
+                                 QStringLiteral("lastShotOutcome")}) {
+        QJsonObject sensitive = validPayload;
+        QJsonObject unit = observerProtocolRuntimeUnit();
+        unit[field] = QJsonObject{};
+        sensitive[QStringLiteral("units")] = QJsonArray{unit};
+        EXPECT_FALSE(validate(sensitive)) << field.toStdString();
+    }
+
+    for (const QString& field : {QStringLiteral("seats"),
+                                 QStringLiteral("transferRequests"),
+                                 QStringLiteral("online"), QStringLiteral("serverPrivate")}) {
+        QJsonObject sensitive = validPayload;
+        QJsonObject room = sensitive.value(QStringLiteral("roomState")).toObject();
+        room[field] = QJsonArray{};
+        sensitive[QStringLiteral("roomState")] = room;
+        EXPECT_FALSE(validate(sensitive)) << field.toStdString();
+    }
+
+    QJsonObject sensitiveScenario = validPayload;
+    QJsonObject scenario = sensitiveScenario.value(QStringLiteral("scenario")).toObject();
+    scenario[QStringLiteral("notes")] = QStringLiteral("private plan");
+    sensitiveScenario[QStringLiteral("scenario")] = scenario;
+    EXPECT_FALSE(validate(sensitiveScenario));
+}
+
+TEST(ProtocolTest, ObserverSnapshotAndDeltaRejectMalformedNestedFields) {
+    const auto validateSnapshot = [](const QJsonObject& payload) {
+        return Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+            QStringLiteral("snapshot"), 1, payload)).valid;
+    };
+    QJsonObject malformed = observerProtocolSnapshot();
+    QJsonObject malformedUnit = observerProtocolRuntimeUnit();
+    malformedUnit[QStringLiteral("position")] = QJsonArray{QStringLiteral("bad"), 2.0};
+    malformed[QStringLiteral("units")] = QJsonArray{malformedUnit};
+    EXPECT_FALSE(validateSnapshot(malformed));
+
+    malformed = observerProtocolSnapshot();
+    malformedUnit = observerProtocolRuntimeUnit();
+    QJsonObject subsystems = malformedUnit.value(QStringLiteral("subsystems")).toObject();
+    subsystems[QStringLiteral("targetId")] = QStringLiteral("blue_a1");
+    malformedUnit[QStringLiteral("subsystems")] = subsystems;
+    malformed[QStringLiteral("units")] = QJsonArray{malformedUnit};
+    EXPECT_FALSE(validateSnapshot(malformed));
+
+    const QJsonObject base = observerProtocolSnapshot();
+    QJsonObject current = base;
+    current[QStringLiteral("stateRevision")] = 2;
+    QJsonObject currentRoom = current.value(QStringLiteral("roomState")).toObject();
+    currentRoom[QStringLiteral("stateRevision")] = 2;
+    current[QStringLiteral("roomState")] = currentRoom;
+    QJsonObject delta = StateDelta::create(base, current);
+    ASSERT_FALSE(delta.isEmpty());
+    EXPECT_TRUE(Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+                    QStringLiteral("delta"), 2, delta)).valid);
+
+    delta[QStringLiteral("serverMetrics")] = QJsonObject{};
+    EXPECT_FALSE(Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+                     QStringLiteral("delta"), 2, delta)).valid);
+}
+
+TEST(ProtocolTest, RejectsMalformedOptionalPveFields) {
+    const QJsonObject malformedSeatState = Protocol::makeServerEnvelope(
+        QStringLiteral("seatState"), 1,
+        QJsonObject{{QStringLiteral("roomId"), QStringLiteral("main")},
+                    {QStringLiteral("seats"), QJsonArray{QJsonObject{
+                        {QStringLiteral("seatId"), QStringLiteral("blue_commander")},
+                        {QStringLiteral("controllerType"), QStringLiteral("bot")}}}}});
+    EXPECT_FALSE(Protocol::validateServerEnvelope(malformedSeatState).valid);
+
+    const QJsonObject malformedSnapshot = Protocol::makeServerEnvelope(
+        QStringLiteral("snapshot"), 2,
+        QJsonObject{{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+                    {QStringLiteral("stateRevision"), 1},
+                    {QStringLiteral("scenario"), QJsonObject{{QStringLiteral("units"), QJsonArray{}}}},
+                    {QStringLiteral("units"), QJsonArray{}},
+                    {QStringLiteral("messages"), QJsonArray{}},
+                    {QStringLiteral("roomState"),
+                     QJsonObject{{QStringLiteral("roomMode"), QStringLiteral("coop")},
+                                 {QStringLiteral("aiDifficulty"), QStringLiteral("normal")},
+                                 {QStringLiteral("configVersion"), 1}}}});
+    EXPECT_FALSE(Protocol::validateServerEnvelope(malformedSnapshot).valid);
 }
 
 TEST(StateDeltaTest, AppliesChangedUnitsAndRoomState) {

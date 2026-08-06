@@ -183,6 +183,12 @@ bool projectSeat(const QJsonObject& object, SeatProjection* projection) {
             && !object.value(QStringLiteral("pendingTransfer")).isBool())
         || (object.contains(QStringLiteral("redeployRequested"))
             && !object.value(QStringLiteral("redeployRequested")).isBool())
+        || (object.contains(QStringLiteral("controllerType"))
+            && (!object.value(QStringLiteral("controllerType")).isString()
+                || (object.value(QStringLiteral("controllerType")).toString()
+                    != QLatin1String("human")
+                    && object.value(QStringLiteral("controllerType")).toString()
+                       != QLatin1String("ai"))))
         || !validOptionalString(object, QStringLiteral("unitId"), MaxIdentifierLength)
         || !validOptionalString(object, QStringLiteral("selectedTemplate"), MaxIdentifierLength)
         || !validOptionalString(object, QStringLiteral("unitName"), 128)) {
@@ -204,6 +210,8 @@ bool projectSeat(const QJsonObject& object, SeatProjection* projection) {
     projection->unitId = object.value(QStringLiteral("unitId")).toString();
     projection->selectedTemplate = object.value(QStringLiteral("selectedTemplate")).toString();
     projection->unitName = object.value(QStringLiteral("unitName")).toString();
+    projection->controllerType = object.contains(QStringLiteral("controllerType"))
+        ? object.value(QStringLiteral("controllerType")).toString() : QStringLiteral("human");
     return true;
 }
 
@@ -220,6 +228,214 @@ bool projectSeats(const QJsonValue& value, QList<SeatProjection>* projection) {
     return true;
 }
 
+bool hasOnlyFields(const QJsonObject& object, const QSet<QString>& allowed) {
+    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+        if (!allowed.contains(it.key())) return false;
+    }
+    return true;
+}
+
+bool validFiniteNumber(const QJsonValue& value, double minimum = -HUGE_VAL,
+                       double maximum = HUGE_VAL) {
+    return value.isDouble() && std::isfinite(value.toDouble())
+        && value.toDouble() >= minimum && value.toDouble() <= maximum;
+}
+
+bool validObserverPosition(const QJsonValue& value) {
+    if (!value.isArray()) return false;
+    const QJsonArray position = value.toArray();
+    if (position.size() < 2 || position.size() > 3) return false;
+    for (const QJsonValue& coordinate : position) {
+        if (!validFiniteNumber(coordinate)) return false;
+    }
+    return true;
+}
+
+bool validObserverSubsystems(const QJsonValue& value) {
+    if (!value.isObject()) return false;
+    const QJsonObject subsystems = value.toObject();
+    static const QSet<QString> fields{
+        QStringLiteral("sensor"), QStringLiteral("comms"),
+        QStringLiteral("mobility"), QStringLiteral("weapon")};
+    if (subsystems.size() != fields.size() || !hasOnlyFields(subsystems, fields)) return false;
+    for (const QString& field : fields) {
+        if (!validFiniteNumber(subsystems.value(field), 0.0, 1.0)) return false;
+    }
+    return true;
+}
+
+bool validObserverRuntimeUnit(const QJsonValue& value) {
+    if (!value.isObject()) return false;
+    const QJsonObject unit = value.toObject();
+    static const QSet<QString> allowed{
+        QStringLiteral("id"), QStringLiteral("callsign"), QStringLiteral("kind"),
+        QStringLiteral("side"), QStringLiteral("movable"), QStringLiteral("position"),
+        QStringLiteral("detectRange"), QStringLiteral("attackRange"),
+        QStringLiteral("commRange"), QStringLiteral("speed"), QStringLiteral("baseSpeed"),
+        QStringLiteral("maxHp"), QStringLiteral("attackPower"), QStringLiteral("armor"),
+        QStringLiteral("hp"), QStringLiteral("alive"), QStringLiteral("subsystems"),
+        QStringLiteral("serviceRequested"), QStringLiteral("serviceProgress"),
+        QStringLiteral("ammoRemaining"), QStringLiteral("ammoCapacity"),
+        QStringLiteral("cooldownRemaining"), QStringLiteral("cooldownSec"),
+        QStringLiteral("fuelRemaining"), QStringLiteral("fuelCapacity"),
+        QStringLiteral("turnaroundProgress")};
+    if (!hasOnlyFields(unit, allowed)) return false;
+    for (const QString& field : {QStringLiteral("id"), QStringLiteral("kind")}) {
+        if (!validIdentifier(unit.value(field))) return false;
+    }
+    if (!validString(unit.value(QStringLiteral("callsign")), 128, true)) return false;
+    const QString side = unit.value(QStringLiteral("side")).toString();
+    if (side != QLatin1String("red") && side != QLatin1String("blue")) return false;
+    if (!unit.value(QStringLiteral("movable")).isBool()
+        || !validObserverPosition(unit.value(QStringLiteral("position")))
+        || !unit.value(QStringLiteral("alive")).isBool()
+        || !unit.value(QStringLiteral("serviceRequested")).isBool()
+        || !validObserverSubsystems(unit.value(QStringLiteral("subsystems")))) {
+        return false;
+    }
+    for (const QString& field : {QStringLiteral("detectRange"),
+                                 QStringLiteral("attackRange"), QStringLiteral("commRange"),
+                                 QStringLiteral("speed"), QStringLiteral("baseSpeed"),
+                                 QStringLiteral("maxHp"), QStringLiteral("hp"),
+                                 QStringLiteral("attackPower")}) {
+        if (!validFiniteNumber(unit.value(field), 0.0)) return false;
+    }
+    for (const QString& field : {QStringLiteral("cooldownRemaining"),
+                                 QStringLiteral("cooldownSec"), QStringLiteral("fuelRemaining"),
+                                 QStringLiteral("fuelCapacity")}) {
+        if (unit.contains(field) && !validFiniteNumber(unit.value(field), 0.0)) return false;
+    }
+    if (!validFiniteNumber(unit.value(QStringLiteral("armor")), 0.0, 1.0)
+        || !validFiniteNumber(unit.value(QStringLiteral("serviceProgress")), 0.0, 1.0)) {
+        return false;
+    }
+    if (unit.contains(QStringLiteral("turnaroundProgress"))
+        && !validFiniteNumber(unit.value(QStringLiteral("turnaroundProgress")), 0.0, 1.0)) {
+        return false;
+    }
+    for (const QString& field : {QStringLiteral("ammoRemaining"),
+                                 QStringLiteral("ammoCapacity")}) {
+        if (unit.contains(field) && !validNonNegativeInteger(unit.value(field))) return false;
+    }
+    if (unit.value(QStringLiteral("hp")).toDouble()
+            > unit.value(QStringLiteral("maxHp")).toDouble()
+        || unit.value(QStringLiteral("ammoRemaining")).toInteger()
+            > unit.value(QStringLiteral("ammoCapacity")).toInteger()
+        || unit.value(QStringLiteral("fuelRemaining")).toDouble()
+            > unit.value(QStringLiteral("fuelCapacity")).toDouble()) {
+        return false;
+    }
+    return true;
+}
+
+bool validObserverScenario(const QJsonValue& value) {
+    if (!value.isObject()) return false;
+    const QJsonObject scenario = value.toObject();
+    static const QSet<QString> scenarioFields{
+        QStringLiteral("schemaVersion"), QStringLiteral("map"), QStringLiteral("units")};
+    if (!hasOnlyFields(scenario, scenarioFields)
+        || !validNonNegativeInteger(scenario.value(QStringLiteral("schemaVersion")))
+        || !scenario.value(QStringLiteral("map")).isObject()
+        || !scenario.value(QStringLiteral("units")).isArray()) {
+        return false;
+    }
+    for (const QJsonValue& unitValue : scenario.value(QStringLiteral("units")).toArray()) {
+        if (!unitValue.isObject()) return false;
+        const QJsonObject unit = unitValue.toObject();
+        static const QSet<QString> allowed{
+            QStringLiteral("id"), QStringLiteral("callsign"), QStringLiteral("kind"),
+            QStringLiteral("side"), QStringLiteral("x"), QStringLiteral("y"),
+            QStringLiteral("alt"), QStringLiteral("detectRange"),
+            QStringLiteral("attackRange"), QStringLiteral("commRange"),
+            QStringLiteral("speed"), QStringLiteral("maxHp"),
+            QStringLiteral("attackPower"), QStringLiteral("armor"),
+            QStringLiteral("ammoCapacity"), QStringLiteral("initialAmmo"),
+            QStringLiteral("cooldownSec"), QStringLiteral("fuelCapacitySec"),
+            QStringLiteral("initialFuelSec")};
+        if (!hasOnlyFields(unit, allowed)) return false;
+        for (const QString& field : {QStringLiteral("id"), QStringLiteral("kind")}) {
+            if (!validIdentifier(unit.value(field))) return false;
+        }
+        if (!validString(unit.value(QStringLiteral("callsign")), 128, true)) return false;
+        const QString side = unit.value(QStringLiteral("side")).toString();
+        if (side != QLatin1String("red") && side != QLatin1String("blue")) return false;
+        for (const QString& field : {QStringLiteral("x"), QStringLiteral("y"),
+                                     QStringLiteral("alt")}) {
+            if (!validFiniteNumber(unit.value(field))) return false;
+        }
+        for (const QString& field : {QStringLiteral("detectRange"),
+                                     QStringLiteral("attackRange"),
+                                     QStringLiteral("commRange"), QStringLiteral("speed"),
+                                     QStringLiteral("maxHp"),
+                                     QStringLiteral("attackPower"),
+                                     QStringLiteral("cooldownSec"),
+                                     QStringLiteral("fuelCapacitySec"),
+                                     QStringLiteral("initialFuelSec")}) {
+            if (!validFiniteNumber(unit.value(field), 0.0)) return false;
+        }
+        if (!validFiniteNumber(unit.value(QStringLiteral("armor")), 0.0, 1.0)
+            || !validNonNegativeInteger(unit.value(QStringLiteral("ammoCapacity")))
+            || !validNonNegativeInteger(unit.value(QStringLiteral("initialAmmo")))
+            || unit.value(QStringLiteral("initialAmmo")).toInteger()
+                > unit.value(QStringLiteral("ammoCapacity")).toInteger()
+            || unit.value(QStringLiteral("initialFuelSec")).toDouble()
+                > unit.value(QStringLiteral("fuelCapacitySec")).toDouble()) {
+            return false;
+        }
+    }
+    const QJsonObject map = scenario.value(QStringLiteral("map")).toObject();
+    static const QSet<QString> mapFields{
+        QStringLiteral("name"), QStringLiteral("widthMeters"),
+        QStringLiteral("heightMeters"), QStringLiteral("backgroundResource")};
+    if (map.size() != mapFields.size() || !hasOnlyFields(map, mapFields)
+        || !validString(map.value(QStringLiteral("name")), MaxRoomNameLength, true)
+        || !validString(map.value(QStringLiteral("backgroundResource")), 512, true)
+        || !validFiniteNumber(map.value(QStringLiteral("widthMeters")), 0.0)
+        || !validFiniteNumber(map.value(QStringLiteral("heightMeters")), 0.0)) {
+        return false;
+    }
+    return true;
+}
+
+bool validObserverRoomState(const QJsonObject& roomState) {
+    static const QSet<QString> allowed{
+        QStringLiteral("phase"), QStringLiteral("roomId"), QStringLiteral("roomName"),
+        QStringLiteral("roomStatus"), QStringLiteral("roomMode"),
+        QStringLiteral("aiDifficulty"), QStringLiteral("configVersion"),
+        QStringLiteral("running"), QStringLiteral("simTime"), QStringLiteral("speed"),
+        QStringLiteral("scenarioRevision"), QStringLiteral("stateRevision"),
+        QStringLiteral("observer")};
+    return hasOnlyFields(roomState, allowed)
+        && roomState.value(QStringLiteral("observer")).isBool()
+        && roomState.value(QStringLiteral("observer")).toBool();
+}
+
+bool validObserverUnits(const QJsonValue& value) {
+    if (!value.isArray()) return false;
+    for (const QJsonValue& unit : value.toArray()) {
+        if (!validObserverRuntimeUnit(unit)) return false;
+    }
+    return true;
+}
+
+bool validObserverSnapshot(const QJsonObject& payload, const QJsonObject& roomState) {
+    static const QSet<QString> allowed{
+        QStringLiteral("schemaVersion"), QStringLiteral("stateRevision"),
+        QStringLiteral("scenario"), QStringLiteral("units"), QStringLiteral("roomState")};
+    return hasOnlyFields(payload, allowed) && validObserverRoomState(roomState)
+        && validObserverScenario(payload.value(QStringLiteral("scenario")))
+        && validObserverUnits(payload.value(QStringLiteral("units")));
+}
+
+bool validObserverDelta(const QJsonObject& payload, const QJsonObject& roomState) {
+    static const QSet<QString> allowed{
+        QStringLiteral("schemaVersion"), QStringLiteral("baseStateRevision"),
+        QStringLiteral("stateRevision"), QStringLiteral("scenarioRevision"),
+        QStringLiteral("units"), QStringLiteral("roomState")};
+    return hasOnlyFields(payload, allowed) && validObserverRoomState(roomState)
+        && validObserverUnits(payload.value(QStringLiteral("units")));
+}
+
 } // namespace
 
 ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
@@ -234,7 +450,23 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
     }
     if (!validOptionalIdentifier(roomState, QStringLiteral("roomId"))
         || !validOptionalIdentifier(roomState, QStringLiteral("phase"))
-        || !validOptionalIdentifier(roomState, QStringLiteral("roomStatus"))) {
+        || !validOptionalIdentifier(roomState, QStringLiteral("roomStatus"))
+        || (roomState.contains(QStringLiteral("roomMode"))
+            && (!roomState.value(QStringLiteral("roomMode")).isString()
+                || (roomState.value(QStringLiteral("roomMode")).toString()
+                    != QLatin1String("pvp")
+                    && roomState.value(QStringLiteral("roomMode")).toString()
+                       != QLatin1String("pve"))))
+        || (roomState.contains(QStringLiteral("aiDifficulty"))
+            && (!roomState.value(QStringLiteral("aiDifficulty")).isString()
+                || (roomState.value(QStringLiteral("aiDifficulty")).toString()
+                    != QLatin1String("easy")
+                    && roomState.value(QStringLiteral("aiDifficulty")).toString()
+                       != QLatin1String("normal")
+                    && roomState.value(QStringLiteral("aiDifficulty")).toString()
+                       != QLatin1String("hard"))))
+        || (roomState.contains(QStringLiteral("configVersion"))
+            && !validNonNegativeInteger(roomState.value(QStringLiteral("configVersion"))))) {
         return invalid();
     }
     const QString phase = roomState.value(QStringLiteral("phase")).toString(
@@ -246,6 +478,10 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
     for (const QString& field : {QStringLiteral("redReady"), QStringLiteral("blueReady"),
                                  QStringLiteral("running"), QStringLiteral("readyForSim")}) {
         if (roomState.contains(field) && !roomState.value(field).isBool()) return invalid();
+    }
+    if (roomState.contains(QStringLiteral("observer"))
+        && !roomState.value(QStringLiteral("observer")).isBool()) {
+        return invalid();
     }
     for (const QString& field : {QStringLiteral("scenarioRevision"),
                                  QStringLiteral("stateRevision")}) {
@@ -270,6 +506,13 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
     projection->roomId = roomState.value(QStringLiteral("roomId")).toString();
     projection->roomName = roomState.value(QStringLiteral("roomName")).toString();
     projection->roomStatus = roomState.value(QStringLiteral("roomStatus")).toString();
+    projection->roomMode = roomState.contains(QStringLiteral("roomMode"))
+        ? roomState.value(QStringLiteral("roomMode")).toString() : QStringLiteral("pvp");
+    projection->aiDifficulty = roomState.contains(QStringLiteral("aiDifficulty"))
+        ? roomState.value(QStringLiteral("aiDifficulty")).toString()
+        : QStringLiteral("normal");
+    projection->configVersion = roomState.value(QStringLiteral("configVersion")).toInteger(1);
+    projection->observer = roomState.value(QStringLiteral("observer")).toBool(false);
     projection->redReady = roomState.value(QStringLiteral("redReady")).toBool();
     projection->blueReady = roomState.value(QStringLiteral("blueReady")).toBool();
     projection->running = roomState.value(QStringLiteral("running")).toBool();
@@ -298,7 +541,8 @@ ValidationResult projectSnapshot(const QJsonObject& payload, SnapshotProjection*
     }
     RoomLifecycleProjection lifecycle;
     const ValidationResult result = projectRoomLifecycle(roomState, &lifecycle);
-    if (!result.valid || !projection) return result;
+    if (!result.valid) return result;
+    if (!projection) return ValidationResult::success();
     projection->lifecycle = lifecycle;
     return ValidationResult::success();
 }
@@ -445,7 +689,8 @@ QVariantList seatVariants(const QList<SeatProjection>& seats) {
                                     {QStringLiteral("redeployRequested"), seat.redeployRequested},
                                     {QStringLiteral("unitId"), seat.unitId},
                                     {QStringLiteral("selectedTemplate"), seat.selectedTemplate},
-                                    {QStringLiteral("unitName"), seat.unitName}});
+                                    {QStringLiteral("unitName"), seat.unitName},
+                                    {QStringLiteral("controllerType"), seat.controllerType}});
     }
     return variants;
 }
@@ -744,12 +989,18 @@ ValidationResult validateServerPayload(const QString& type, const QJsonObject& p
             || payload.value(QStringLiteral("stateRevision")).toInteger() <= 0
             || !payload.value(QStringLiteral("scenario")).isObject()
             || !payload.value(QStringLiteral("units")).isArray()
-            || !payload.value(QStringLiteral("messages")).isArray()
+            || (payload.contains(QStringLiteral("messages"))
+                && !payload.value(QStringLiteral("messages")).isArray())
             || !payload.value(QStringLiteral("roomState")).isObject()) {
             return invalid(QStringLiteral("完整快照结构无效"));
         }
         if (!projectSnapshot(payload, nullptr).valid) {
             return invalid(QStringLiteral("完整快照生命周期状态无效"));
+        }
+        const QJsonObject roomState = payload.value(QStringLiteral("roomState")).toObject();
+        if (roomState.value(QStringLiteral("observer")).toBool(false)
+            && !validObserverSnapshot(payload, roomState)) {
+            return invalid(QStringLiteral("观察员快照结构无效"));
         }
         if (payload.contains(QStringLiteral("mapMarks"))
             && !payload.value(QStringLiteral("mapMarks")).isArray()) {
@@ -768,6 +1019,11 @@ ValidationResult validateServerPayload(const QString& type, const QJsonObject& p
         if (!projectRoomLifecycle(payload.value(QStringLiteral("roomState")).toObject(),
                                   nullptr).valid) {
             return invalid(QStringLiteral("状态增量生命周期状态无效"));
+        }
+        const QJsonObject roomState = payload.value(QStringLiteral("roomState")).toObject();
+        if (roomState.value(QStringLiteral("observer")).toBool(false)
+            && !validObserverDelta(payload, roomState)) {
+            return invalid(QStringLiteral("观察员增量结构无效"));
         }
         if (payload.contains(QStringLiteral("mapMarks"))
             && !payload.value(QStringLiteral("mapMarks")).isArray()) {
@@ -789,6 +1045,22 @@ ValidationResult validateServerPayload(const QString& type, const QJsonObject& p
     } else if (type == QLatin1String("roomDirectory")) {
         if (!payload.value(QStringLiteral("rooms")).isArray()) {
             return invalid(QStringLiteral("房间目录结构无效"));
+        }
+        for (const QJsonValue& value : payload.value(QStringLiteral("rooms")).toArray()) {
+            if (!value.isObject()) return invalid(QStringLiteral("房间目录项无效"));
+            const QJsonObject room = value.toObject();
+            const QString mode = room.value(QStringLiteral("mode")).toString(
+                QStringLiteral("pvp"));
+            const QString difficulty = room.value(QStringLiteral("aiDifficulty")).toString(
+                QStringLiteral("normal"));
+            if ((mode != QLatin1String("pvp") && mode != QLatin1String("pve"))
+                || (difficulty != QLatin1String("easy")
+                    && difficulty != QLatin1String("normal")
+                    && difficulty != QLatin1String("hard"))
+                || (room.contains(QStringLiteral("configVersion"))
+                    && !validNonNegativeInteger(room.value(QStringLiteral("configVersion"))))) {
+                return invalid(QStringLiteral("房间模式配置无效"));
+            }
         }
     } else if (type == QLatin1String("seatState")) {
         return projectSeatDirectory(payload, nullptr);

@@ -18,7 +18,10 @@ public:
         QString seatType;
         QString side;
         qint64 userId = 0;
+        qint64 humanUserId = 0;
         QString username;
+        QString controllerType = QStringLiteral("human");
+        QString controllerId;
         QString selectedTemplate;
         QString unitId;
         QString unitName;
@@ -42,6 +45,10 @@ public:
     };
 
     explicit AuthoritativeRoom(quint64 rngSeed = 1);
+
+    Result setMode(const QString& mode);
+    Result syncAiRoster();
+    Result deployAiSeats(double mapWidth, double mapHeight, quint64 matchGeneration);
 
     static QHash<QString, ScenarioUnit> defaultTemplateCatalog();
     bool setTemplateCatalog(const QHash<QString, ScenarioUnit>& catalog, QString* error = nullptr);
@@ -86,6 +93,8 @@ public:
     QString winner() const { return m_winner; }
     quint64 revision() const { return m_revision; }
     quint64 rngState() const { return m_rngState; }
+    QString mode() const { return m_mode; }
+    bool isAiSeat(const QString& seatId) const;
 
 private:
     struct Transfer {
@@ -104,6 +113,10 @@ private:
     QString allocateUnitId(const QString& side, const QString& templateId);
     qint64 chooseSuccessor(const QString& side);
     Result promote(qint64 commanderUserId, qint64 successorUserId);
+    Result installAiSeat(const QString& seatId, const QString& templateId);
+    bool validAiPosition(const GeoPos& position, double mapWidth, double mapHeight,
+                         const QHash<QString, GeoPos>& placements) const;
+    static quint64 deterministicSeed(const QString& value, quint64 generation);
     void clearDeployment();
     void clearDeployment(Seat& seat);
 
@@ -114,6 +127,7 @@ private:
     QStringList m_operationOrder;
     QSet<qint64> m_departedUsers;
     QString m_phase = QStringLiteral("preparing");
+    QString m_mode = QStringLiteral("pvp");
     QString m_winner;
     quint64 m_revision = 1;
     quint64 m_nextUnitSequence = 1;

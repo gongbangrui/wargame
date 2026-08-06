@@ -150,6 +150,8 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 m_displayName = displayName;
                 m_userRole.clear();
                 m_currentSeatId = seatId;
+                m_isObserver = false;
+                m_observerJoinPending = false;
                 m_currentRoomId.clear();
                 m_currentSeatType.clear();
                 m_currentSeatSide.clear();
@@ -183,6 +185,7 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
             });
     connect(&m_networkClient, &NetworkClient::seatStateReceived, this,
             [this](const QJsonObject& state) {
+                if (m_isObserver || m_observerJoinPending) return;
                 Protocol::SeatDirectoryProjection directory;
                 const Protocol::ValidationResult validation =
                     Protocol::projectSeatDirectory(state, &directory);
@@ -218,6 +221,7 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                     m_currentSeatType.clear();
                     m_currentSeatSide.clear();
                     m_seatReady = false;
+                    m_isObserver = false;
                     m_onlineStage = m_currentRoomId.isEmpty()
                         ? QStringLiteral("roomSelect") : QStringLiteral("seatSelect");
                 }
@@ -308,16 +312,16 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
         const QString kind = event.value(QStringLiteral("kind")).toString();
         if (kind == QLatin1String("simulationEnded") || kind == QLatin1String("forfeit")) {
             m_matchPhase = QStringLiteral("finished");
-            m_onlineStage = m_currentSeatId.isEmpty()
-                ? QStringLiteral("seatSelect") : QStringLiteral("battle");
+            m_onlineStage = m_isObserver ? QStringLiteral("observer")
+                : m_currentSeatId.isEmpty() ? QStringLiteral("seatSelect") : QStringLiteral("battle");
             emit roomStateChanged();
             emit onlineStateChanged();
             emit simEndForward(event.value(QStringLiteral("winner")).toString(),
                                event.value(QStringLiteral("loser")).toString());
         } else if (kind == QLatin1String("matchEndedByAdmin")) {
             m_matchPhase = QStringLiteral("finished");
-            m_onlineStage = m_currentSeatId.isEmpty()
-                ? QStringLiteral("seatSelect") : QStringLiteral("battle");
+            m_onlineStage = m_isObserver ? QStringLiteral("observer")
+                : m_currentSeatId.isEmpty() ? QStringLiteral("seatSelect") : QStringLiteral("battle");
             emit roomStateChanged();
             emit onlineStateChanged();
             emit eventForward(QStringLiteral("联网推演"),
@@ -364,6 +368,10 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 }
             });
     const auto reportNetworkError = [this](const QString& message) {
+        if (m_observerJoinPending) {
+            m_observerJoinPending = false;
+            clearOnlineRoomDerivedState(false);
+        }
         if (m_leaveRoomPending) {
             m_leaveRoomPending = false;
             emit leaveRoomPendingChanged();
@@ -441,7 +449,8 @@ QString SimulationController::focusedKind() const {
 
 void SimulationController::loadDefault() {
     if (isNetworked()) {
-        if (m_userRole == QLatin1String("editor") && m_matchPhase == QLatin1String("preparing"))
+        if (!m_isObserver && m_userRole == QLatin1String("editor")
+            && m_matchPhase == QLatin1String("preparing"))
             m_networkClient.sendScenarioReplace(ScenarioIo::toJson(ScenarioIo::defaultScenario()));
         return;
     }
@@ -478,7 +487,8 @@ void SimulationController::loadScenario(const QString& path) {
         return;
     }
     if (isNetworked()) {
-        if (m_userRole == QLatin1String("editor") && m_matchPhase == QLatin1String("preparing"))
+        if (!m_isObserver && m_userRole == QLatin1String("editor")
+            && m_matchPhase == QLatin1String("preparing"))
             m_networkClient.sendScenarioReplace(ScenarioIo::toJson(s));
         return;
     }
@@ -490,7 +500,7 @@ void SimulationController::setRunning(bool r) {
         m_engine.setRunning(r);
         return;
     }
-    if (m_userRole != QLatin1String("director")) return;
+    if (m_isObserver || m_userRole != QLatin1String("director")) return;
     if (r) {
         m_networkClient.sendControl(m_matchPhase == QLatin1String("preparing")
                                         ? QStringLiteral("start") : QStringLiteral("resume"));
@@ -501,7 +511,7 @@ void SimulationController::setRunning(bool r) {
 
 void SimulationController::setSpeed(double s) {
     if (isNetworked()) {
-        if (m_userRole == QLatin1String("director"))
+        if (!m_isObserver && m_userRole == QLatin1String("director"))
             m_networkClient.sendControl(QStringLiteral("speed"), s);
     } else {
         m_engine.setSpeedMul(s);
@@ -510,7 +520,7 @@ void SimulationController::setSpeed(double s) {
 
 void SimulationController::stepOnce() {
     if (isNetworked()) {
-        if (m_userRole == QLatin1String("director"))
+        if (!m_isObserver && m_userRole == QLatin1String("director"))
             m_networkClient.sendControl(QStringLiteral("step"));
     } else {
         m_engine.stepOnce(1.0);
@@ -518,7 +528,13 @@ void SimulationController::stepOnce() {
 }
 
 void SimulationController::command(const QString& action, const QVariantMap& args) {
-    if (isNetworked()) m_networkClient.sendCommand(action, args);
+    if (isNetworked()) {
+        if (m_isObserver) {
+            emit errorForward(QStringLiteral("观察模式只读，不能下达命令"));
+            return;
+        }
+        m_networkClient.sendCommand(action, args);
+    }
     else m_engine.command(action, args);
     emit commandExecuted(action, args);
 }
@@ -530,6 +546,7 @@ QJsonObject SimulationController::unitsJson() const {
 QString SimulationController::upsertUnit(const QVariantMap& data) {
     ScenarioUnit u = scenarioUnitFromVariantMap(data, true);
     if (isNetworked()) {
+        if (m_isObserver) return {};
         if (m_matchPhase != QLatin1String("preparing")) return {};
         const bool ownsSide = m_userRole == QLatin1String("editor")
             || m_userRole == u.side;
@@ -554,7 +571,8 @@ bool SimulationController::replaceUnits(const QVariantList& units) {
         replacement.units.push_back(scenarioUnitFromVariantMap(value.toMap(), false));
     }
     if (isNetworked()) {
-        if (m_userRole != QLatin1String("editor") || m_matchPhase != QLatin1String("preparing")) return false;
+        if (m_isObserver || m_userRole != QLatin1String("editor")
+            || m_matchPhase != QLatin1String("preparing")) return false;
         m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
         return true;
     }
@@ -567,7 +585,8 @@ bool SimulationController::replaceUnits(const QVariantList& units) {
 bool SimulationController::replaceScenario(const QVariantMap& scenario) {
     const Scenario replacement = ScenarioIo::fromJson(QJsonObject::fromVariantMap(scenario));
     if (isNetworked()) {
-        if (m_userRole != QLatin1String("editor") || m_matchPhase != QLatin1String("preparing")) return false;
+        if (m_isObserver || m_userRole != QLatin1String("editor")
+            || m_matchPhase != QLatin1String("preparing")) return false;
         m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
         return true;
     }
@@ -579,6 +598,7 @@ bool SimulationController::replaceScenario(const QVariantMap& scenario) {
 
 void SimulationController::removeUnit(const QString& id) {
     if (isNetworked()) {
+        if (m_isObserver) return;
         if (m_matchPhase != QLatin1String("preparing")) return;
         const UnitBase* unit = m_engine.unit(id);
         if (!unit || (m_userRole != QLatin1String("editor") && unit->sideStr() != m_userRole)) return;
@@ -595,7 +615,7 @@ void SimulationController::removeUnit(const QString& id) {
 
 bool SimulationController::applyScenarioReplacement(const Scenario& replacement) {
     if (isNetworked()) {
-        if (m_matchPhase != QLatin1String("preparing")) return false;
+        if (m_isObserver || m_matchPhase != QLatin1String("preparing")) return false;
         m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
         return true;
     }
@@ -607,6 +627,7 @@ bool SimulationController::applyScenarioReplacement(const Scenario& replacement)
 
 bool SimulationController::removeUnits(const QStringList& ids) {
     if (ids.isEmpty()) return false;
+    if (isNetworked() && m_isObserver) return false;
     if (isNetworked() && m_userRole != QLatin1String("editor")) {
         if (m_matchPhase != QLatin1String("preparing")) return false;
         for (const QString& id : ids) {
@@ -627,6 +648,7 @@ bool SimulationController::removeUnits(const QStringList& ids) {
 bool SimulationController::batchUpdateUnits(const QStringList& ids,
                                             const QVariantMap& changes) {
     if (ids.isEmpty() || changes.isEmpty()) return false;
+    if (isNetworked() && m_isObserver) return false;
     const QSet<QString> selected(ids.cbegin(), ids.cend());
     Scenario replacement = m_engine.scenario();
     if (isNetworked() && m_userRole != QLatin1String("editor")) {
@@ -675,6 +697,7 @@ bool SimulationController::transformUnits(const QStringList& ids,
                                           const QString& operation,
                                           double value) {
     if (ids.isEmpty()) return false;
+    if (isNetworked() && m_isObserver) return false;
     const QSet<QString> selected(ids.cbegin(), ids.cend());
     Scenario replacement = m_engine.scenario();
     if (isNetworked() && m_userRole != QLatin1String("editor")) {
@@ -752,6 +775,7 @@ QStringList SimulationController::pasteUnits(const QVariantList& copied, double 
                                              double offsetY,
                                              const QString& sideOverride) {
     if (copied.isEmpty() || !std::isfinite(offsetX) || !std::isfinite(offsetY)) return {};
+    if (isNetworked() && m_isObserver) return {};
     Scenario replacement = m_engine.scenario();
     QSet<QString> existing;
     for (const ScenarioUnit& unit : replacement.units) existing.insert(unit.id);
@@ -865,6 +889,7 @@ QVariantList SimulationController::unitTemplates() const {
 
 Q_INVOKABLE void SimulationController::setUnitSchedule(const QString& uid, const QVariantList& schedule) {
     if (isNetworked()) {
+        if (m_isObserver) return;
         if (m_matchPhase == QLatin1String("running")) {
             m_networkClient.sendCommand(QStringLiteral("setSchedule"),
                                         QVariantMap{{QStringLiteral("unitId"), uid},
@@ -1360,6 +1385,8 @@ void SimulationController::useLocalMode() {
     m_currentSeatType.clear();
     m_currentSeatSide.clear();
     m_onlineStage = QStringLiteral("login");
+    m_isObserver = false;
+    m_observerJoinPending = false;
     m_seatReady = false;
     m_leaveRoomPending = false;
     emit sessionChanged();
@@ -1428,7 +1455,7 @@ void SimulationController::endMatch() {
 }
 
 void SimulationController::sendChat(const QString& text, const QStringList& recipientSeatIds) {
-    if (isNetworked() && !text.trimmed().isEmpty()) {
+    if (isNetworked() && !m_isObserver && !text.trimmed().isEmpty()) {
         m_networkClient.sendChat(text.trimmed(), recipientSeatIds);
     }
 }
@@ -1436,32 +1463,49 @@ void SimulationController::sendChat(const QString& text, const QStringList& reci
 void SimulationController::sendUnitOrder(const QString& unitId, const QString& text) {
     const QVariantMap args{{QStringLiteral("unitId"), unitId},
                            {QStringLiteral("text"), text.trimmed()}};
-    if (isNetworked()) m_networkClient.sendUnitOrder(unitId, text);
+    if (isNetworked()) {
+        if (m_isObserver) return;
+        m_networkClient.sendUnitOrder(unitId, text);
+    }
     else m_engine.command(QStringLiteral("unitOrder"), args);
     emit commandExecuted(QStringLiteral("unitOrder"), args);
 }
 
 void SimulationController::requestOnlineRooms() {
     if (!isNetworked()) return;
-    m_onlineStage = QStringLiteral("roomSelect");
+    if (!m_isObserver && !m_observerJoinPending) m_onlineStage = QStringLiteral("roomSelect");
     m_networkClient.requestRooms();
     emit onlineStateChanged();
 }
 
 void SimulationController::joinOnlineRoom(const QString& roomId) {
-    if (!isNetworked() || roomId.trimmed().isEmpty()) return;
+    if (!isNetworked() || m_isObserver || m_observerJoinPending || roomId.trimmed().isEmpty()) return;
     m_networkClient.joinRoom(roomId.trimmed());
 }
 
+void SimulationController::observeOnlineRoom(const QString& roomId) {
+    const QString normalizedRoomId = roomId.trimmed();
+    if (!isNetworked() || m_isObserver || m_observerJoinPending || normalizedRoomId.isEmpty()) return;
+    m_observerJoinPending = true;
+    m_isObserver = true;
+    m_currentRoomId = normalizedRoomId;
+    m_currentSeatId.clear();
+    m_currentSeatType.clear();
+    m_currentSeatSide.clear();
+    m_onlineStage = QStringLiteral("observer");
+    emit onlineStateChanged();
+    m_networkClient.observeRoom(normalizedRoomId);
+}
+
 void SimulationController::claimOnlineSeat(const QString& seatId) {
-    if (!isNetworked() || seatId.trimmed().isEmpty()) return;
+    if (!isNetworked() || m_isObserver || m_observerJoinPending || seatId.trimmed().isEmpty()) return;
     // The server is authoritative. Do not show an occupied seat as selected
     // before the seatState response confirms the claim.
     m_networkClient.claimSeat(seatId.trimmed());
 }
 
 void SimulationController::approveSeatTransfer(qint64 userId, qint64 requestedRevision) {
-    if (!isNetworked() || m_currentSeatType != QLatin1String("commander")
+    if (!isNetworked() || m_isObserver || m_currentSeatType != QLatin1String("commander")
         || userId <= 0 || requestedRevision <= 0) return;
     const QVariantMap args{{QStringLiteral("userId"), userId},
                            {QStringLiteral("requestedRevision"), requestedRevision}};
@@ -1470,7 +1514,7 @@ void SimulationController::approveSeatTransfer(qint64 userId, qint64 requestedRe
 }
 
 void SimulationController::rejectSeatTransfer(qint64 userId, qint64 requestedRevision) {
-    if (!isNetworked() || m_currentSeatType != QLatin1String("commander")
+    if (!isNetworked() || m_isObserver || m_currentSeatType != QLatin1String("commander")
         || userId <= 0 || requestedRevision <= 0) return;
     const QVariantMap args{{QStringLiteral("userId"), userId},
                            {QStringLiteral("requestedRevision"), requestedRevision}};
@@ -1495,40 +1539,40 @@ void SimulationController::leaveOnlineRoom() {
 }
 
 void SimulationController::setSeatReady(bool ready) {
-    if (!isNetworked() || m_currentSeatId.isEmpty()) return;
+    if (!isNetworked() || m_isObserver || m_currentSeatId.isEmpty()) return;
     m_networkClient.sendSeatReady(ready);
 }
 
 void SimulationController::deployOnlineUnit(const QString& unitId, const QVariantMap& position) {
-    if (isNetworked()) m_networkClient.sendDeployment(unitId, position);
+    if (isNetworked() && !m_isObserver) m_networkClient.sendDeployment(unitId, position);
 }
 
 void SimulationController::requestOnlineRedeploy() {
-    if (isNetworked()) m_networkClient.requestRedeploy();
+    if (isNetworked() && !m_isObserver) m_networkClient.requestRedeploy();
 }
 
 void SimulationController::redeployOnlineUnit(const QString& seatId) {
     const QString targetSeatId = seatId.trimmed();
-    if (!isNetworked() || targetSeatId.isEmpty()) return;
+    if (!isNetworked() || m_isObserver || targetSeatId.isEmpty()) return;
     m_networkClient.redeploy(targetSeatId);
     emit commandExecuted(QStringLiteral("redeploy"),
                          QVariantMap{{QStringLiteral("seatId"), targetSeatId}});
 }
 
 void SimulationController::setOnlineUnitName(const QString& unitName) {
-    if (isNetworked() && !unitName.trimmed().isEmpty()) {
+    if (isNetworked() && !m_isObserver && !unitName.trimmed().isEmpty()) {
         m_networkClient.sendUnitName(unitName.trimmed());
     }
 }
 
 void SimulationController::shareOnlineIntel(const QString& targetId, const QStringList& recipientSeatIds,
                                             const QString& note) {
-    if (isNetworked()) m_networkClient.shareIntel(targetId, recipientSeatIds, note);
+    if (isNetworked() && !m_isObserver) m_networkClient.shareIntel(targetId, recipientSeatIds, note);
 }
 
 void SimulationController::markOnlineMap(const QVariantMap& position, const QString& label,
                                          const QStringList& recipientSeatIds) {
-    if (isNetworked()) m_networkClient.sendMapMark(position, label, recipientSeatIds);
+    if (isNetworked() && !m_isObserver) m_networkClient.sendMapMark(position, label, recipientSeatIds);
 }
 
 QString SimulationController::connectToPeer(const QString& host, int port) {
@@ -1554,6 +1598,7 @@ void SimulationController::applyRoleView() {
 }
 
 void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
+    const bool wasObserver = m_isObserver;
     if (!preserveRoomId) m_currentRoomId.clear();
     m_currentSeatId.clear();
     m_currentSeatType.clear();
@@ -1562,6 +1607,9 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_matchPhase = QStringLiteral("preparing");
     m_redReady = false;
     m_blueReady = false;
+    m_roomMode = QStringLiteral("pvp");
+    m_aiDifficulty = QStringLiteral("normal");
+    m_configVersion = 1;
     m_remoteReadyForSim = false;
     m_remoteCpIssues.clear();
     m_communicationState = QStringLiteral("disconnected");
@@ -1574,8 +1622,11 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_lastCommandId.clear();
     m_lastCommandStatus.clear();
     m_lastCommandMessage.clear();
-    m_onlineStage = preserveRoomId && !m_currentRoomId.isEmpty()
-        ? QStringLiteral("seatSelect") : QStringLiteral("roomSelect");
+    m_isObserver = preserveRoomId && wasObserver;
+    m_observerJoinPending = false;
+    m_onlineStage = m_isObserver ? QStringLiteral("observer")
+        : preserveRoomId && !m_currentRoomId.isEmpty()
+            ? QStringLiteral("seatSelect") : QStringLiteral("roomSelect");
 
     Scenario emptyProjection = m_engine.scenario();
     emptyProjection.units.clear();
@@ -1611,15 +1662,25 @@ void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
         return;
     }
     const Protocol::RoomLifecycleProjection& room = projection.lifecycle;
+    m_isObserver = room.observer;
+    if (room.observer) m_observerJoinPending = false;
     // roomState is shared by all clients and therefore contains the server's
     // room id even for a client that has just left. Do not resurrect a room
     // selection while the controller is already showing the room directory.
-    if (!room.roomId.isEmpty() && m_onlineStage != QLatin1String("roomSelect")) {
+    if (!room.roomId.isEmpty()
+        && (m_onlineStage != QLatin1String("roomSelect") || room.observer)) {
         m_currentRoomId = room.roomId;
     }
     const bool roomSelectionConfirmed = !m_currentRoomId.isEmpty()
         && m_currentRoomId == room.roomId && m_onlineStage != QLatin1String("roomSelect");
-    if (roomSelectionConfirmed
+    if (room.observer) {
+        m_onlineSeats.clear();
+        m_currentSeatId.clear();
+        m_currentSeatType.clear();
+        m_currentSeatSide.clear();
+        m_seatReady = false;
+        m_onlineStage = QStringLiteral("observer");
+    } else if (roomSelectionConfirmed
         && payload.value(QStringLiteral("roomState")).toObject().contains(QStringLiteral("seats"))) {
         m_onlineSeats = Protocol::seatVariants(room.seats);
     } else if (!roomSelectionConfirmed) {
@@ -1628,6 +1689,9 @@ void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
     m_matchPhase = room.phase;
     m_redReady = room.redReady;
     m_blueReady = room.blueReady;
+    m_roomMode = room.roomMode;
+    m_aiDifficulty = room.aiDifficulty;
+    m_configVersion = room.configVersion;
     const QString projectedCommunication = payload.value(QStringLiteral("roomState"))
                                                .toObject()
                                                .value(QStringLiteral("communicationState"))
@@ -1642,7 +1706,7 @@ void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
         m_communicationState = QStringLiteral("disconnected");
     }
     const QVariantList roomSeats = Protocol::seatVariants(room.seats);
-    bool currentSeatPresent = false;
+    bool currentSeatPresent = room.observer;
     if (roomSelectionConfirmed && !m_currentSeatId.isEmpty()) {
         for (const QVariant& value : roomSeats) {
             const QVariantMap seat = value.toMap();
@@ -1665,7 +1729,9 @@ void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
     const bool activePhase = m_matchPhase == QLatin1String("running")
         || m_matchPhase == QLatin1String("paused")
         || m_matchPhase == QLatin1String("finished");
-    if (roomSelectionConfirmed && currentSeatPresent && activePhase) {
+    if (room.observer) {
+        m_onlineStage = QStringLiteral("observer");
+    } else if (roomSelectionConfirmed && currentSeatPresent && activePhase) {
         m_onlineStage = QStringLiteral("battle");
     } else if (roomSelectionConfirmed && currentSeatPresent) {
         m_onlineStage = QStringLiteral("deployment");

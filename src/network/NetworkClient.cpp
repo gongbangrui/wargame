@@ -653,6 +653,12 @@ void NetworkClient::joinRoom(const QString& roomId) {
     sendSimple(QStringLiteral("joinRoom"), QJsonObject{{QStringLiteral("roomId"), roomId}});
 }
 
+void NetworkClient::observeRoom(const QString& roomId) {
+    sendSimple(QStringLiteral("joinRoom"),
+               QJsonObject{{QStringLiteral("roomId"), roomId},
+                           {QStringLiteral("asObserver"), true}});
+}
+
 void NetworkClient::claimSeat(const QString& seatId) {
     sendSimple(QStringLiteral("claimSeat"), QJsonObject{{QStringLiteral("seatId"), seatId}});
 }

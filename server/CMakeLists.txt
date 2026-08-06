@@ -79,6 +79,16 @@ if(NOT DEFINED WARGAME_SOURCE_DIGEST)
 endif()
 
 add_library(wargame_serverlib STATIC
+    game/AiPlan.h
+    game/AiPlan.cpp
+    game/RulesAi.h
+    game/RulesAi.cpp
+    game/OllamaProvider.h
+    game/OllamaProvider.cpp
+    game/OllamaPlanningContract.h
+    game/OllamaPlanningContract.cpp
+    game/OllamaConversationStore.h
+    game/OllamaConversationStore.cpp
     game/AuthoritativeRoom.h
     game/AuthoritativeRoom.cpp
     game/GameServer.h

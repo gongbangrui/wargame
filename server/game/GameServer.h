@@ -3,6 +3,9 @@
 #include "core/Scenario.h"
 #include "core/SimulationEngine.h"
 #include "AuthoritativeRoom.h"
+#include "OllamaConversationStore.h"
+#include "RulesAi.h"
+#include "OllamaProvider.h"
 #include "RoomPersistence.h"
 #include "FastDdsNode.h"
 
@@ -45,6 +48,12 @@ private:
     static constexpr int kAuthenticationBackoffBaseMs = 250;
     static constexpr int kAuthenticationJitterMs = 100;
 
+    struct AiPlanRequestContext {
+        quint64 matchGeneration = 0;
+        quint64 planningGeneration = 0;
+        quint64 sourceStateRevision = 0;
+    };
+
     struct ClientSession {
         bool authenticated = false;
         bool authenticationPending = false;
@@ -59,6 +68,7 @@ private:
         QString seatType;
         QString side;
         bool seatReady = false;
+        bool observer = false;
         QString token;
         QString ddsTicket;
         qint64 ddsTicketExpiresAtMs = 0;
@@ -94,6 +104,15 @@ private:
         quint64 scenarioRevision = 1;
         quint64 stateRevision = 1;
         quint64 eventSequence = 0;
+        quint64 matchGeneration = 1;
+        quint64 aiCommandSequence = 0;
+        quint64 aiPlanningGeneration = 0;
+        quint64 aiRngState = 1;
+        double aiNextDecisionAt = 0.0;
+        double aiNextReplanAt = 0.0;
+        AiPlanV1 aiPlan;
+        bool aiStickyRules = false;
+        int aiConsecutiveFailures = 0;
     };
 
     struct MapMarkRateWindow {
@@ -122,7 +141,7 @@ private:
                                    qint64 expectedUserId);
     void completeJoinRoom(QWebSocket* socket, const QJsonObject& payload,
                           qint64 expectedUserId);
-    void reconcileSeatConfiguration();
+    void reconcileSeatConfiguration(bool resetReadinessForParameterChanges);
     QJsonArray roomOccupants() const;
     void reportRoomStatus(const QString& status, const QString& reason,
                           const QString& winner = QString());
@@ -157,6 +176,17 @@ private:
     void handleScenarioRemove(QWebSocket* socket, const QJsonObject& payload);
     void handleScenarioReplace(QWebSocket* socket, const QJsonObject& payload);
     void handleFastDdsEnvelope(const QString& topic, const QJsonObject& payload);
+    void runAiDecision();
+    void applyAiConfiguration(const QJsonObject& config);
+    void probeAiProvider();
+    QList<AiSeatState> aiSeatStates() const;
+    bool executeAiCommand(const AiCommand& command);
+    void cancelAiPlanRequest();
+    void resetAiMatchState();
+    void handleAiPlanResult(const AiPlanRequestContext& context, OllamaResult result);
+    void recordAiConversation(const OllamaResult& result, quint64 planningGeneration,
+                              const QString& status, const AiPlanV1& finalPlan,
+                              const QString& fallbackReason = QString());
 
     void sendEnvelope(QWebSocket* socket, const QString& type, const QJsonObject& payload);
     void sendError(QWebSocket* socket, const QString& code, const QString& message,
@@ -220,7 +250,10 @@ private:
     QTimer m_presenceTimer;
     QTimer m_monitorStatusTimer;
     QTimer m_checkpointTimer;
+    QTimer m_aiDecisionTimer;
+    QTimer m_aiProbeTimer;
     QString m_dataDir;
+    OllamaConversationStore m_aiConversationStore;
     QString m_authServiceUrl;
     QString m_internalKey;
     QString m_scenarioPath;
@@ -233,6 +266,33 @@ private:
     quint64 m_scenarioRevision = 1;
     quint64 m_stateRevision = 1;
     quint64 m_eventSequence = 0;
+    quint64 m_matchGeneration = 1;
+    quint64 m_aiCommandSequence = 0;
+    quint64 m_aiPlanningGeneration = 0;
+    quint64 m_aiRngState = 0xA17A11ULL;
+    double m_aiNextDecisionAt = 0.0;
+    double m_aiNextReplanAt = 0.0;
+    AiPlanV1 m_aiPlan;
+    bool m_aiStickyRules = false;
+    int m_aiConsecutiveFailures = 0;
+    OllamaProvider* m_ollamaProvider = nullptr;
+    QString m_aiProviderMode = QStringLiteral("auto");
+    QString m_aiEffectiveEngine = QStringLiteral("rules");
+    QString m_aiLastFailureClass;
+    QString m_aiConnectionStatus = QStringLiteral("unknown");
+    QString m_aiProbeFailureClass;
+    QString m_aiLastProbeAt;
+    quint64 m_aiConfigVersion = 0;
+    bool m_aiConfigApplied = false;
+    bool m_aiProbeInFlight = false;
+    bool m_aiPlanRequestInFlight = false;
+    quint64 m_aiPlanRequestGeneration = 0;
+    quint64 m_aiPlanRequestPlanningGeneration = 0;
+    quint64 m_aiProviderRequests = 0;
+    quint64 m_aiProviderSuccesses = 0;
+    quint64 m_aiProviderFailures = 0;
+    qint64 m_aiLastLatencyMs = 0;
+    qint64 m_aiAverageLatencyMs = 0;
     quint64 m_chatSequence = 0;
     QJsonArray m_chatHistory;
     QJsonArray m_mapMarks;
@@ -257,6 +317,8 @@ private:
         QString side;
         qint64 userId = 0;
         QString username;
+        QString controllerType = QStringLiteral("human");
+        QString controllerId;
         bool ready = false;
     };
     QHash<QString, SeatOccupant> m_seats;
@@ -270,6 +332,10 @@ private:
     QString m_roomId = QStringLiteral("main");
     QString m_roomName = QStringLiteral("主推演室");
     QString m_roomStatus = QStringLiteral("stopped");
+    bool m_observerJoinAllowed = false;
+    QString m_roomMode = QStringLiteral("pvp");
+    QString m_aiDifficulty = QStringLiteral("normal");
+    quint64 m_configVersion = 1;
     QString m_lastRoomUpdate;
 };
 

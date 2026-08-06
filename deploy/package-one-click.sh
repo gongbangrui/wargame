@@ -96,6 +96,8 @@ for required in \
     "$PACKAGE_ROOT/deploy/account.Dockerfile" \
     "$PACKAGE_ROOT/deploy/game-server.Dockerfile" \
     "$PACKAGE_ROOT/server/account/app.py" \
+    "$PACKAGE_ROOT/server/account/ai_conversation_monitor.py" \
+    "$PACKAGE_ROOT/server/account/ai_conversation_monitor_models.py" \
     "$PACKAGE_ROOT/server/account/static/index.html" \
     "$PACKAGE_ROOT/server/account/static/app.js" \
     "$PACKAGE_ROOT/server/account/static/app.css" \

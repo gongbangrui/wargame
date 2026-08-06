@@ -4,6 +4,8 @@
 #include "core/Scenario.h"
 #include "core/SimulationEngine.h"
 #include "core/UnitBase.h"
+#include "protocol/Protocol.h"
+#include "protocol/StateDelta.h"
 
 #include <QJsonDocument>
 
@@ -107,18 +109,201 @@ TEST(StateProjectorTest, DirectorRetainsFullRuntimeAndScenario) {
     EXPECT_FALSE(scenario.value(QStringLiteral("schedule")).toArray().isEmpty());
 }
 
-TEST(StateProjectorTest, ObserverRoleDoesNotBypassVisibilityProjection) {
+TEST(StateProjectorTest, ObserverSnapshotWhitelistsBilateralRuntimeState) {
     SimulationEngine engine;
     engine.loadDefaultScenario();
+    QJsonObject authoritativeRoom = roomState();
+    authoritativeRoom[QStringLiteral("roomId")] = QStringLiteral("main");
+    authoritativeRoom[QStringLiteral("roomName")] = QStringLiteral("Observed room");
+    authoritativeRoom[QStringLiteral("roomStatus")] = QStringLiteral("running");
+    authoritativeRoom[QStringLiteral("roomMode")] = QStringLiteral("pve");
+    authoritativeRoom[QStringLiteral("aiDifficulty")] = QStringLiteral("hard");
+    authoritativeRoom[QStringLiteral("configVersion")] = 3;
+    authoritativeRoom[QStringLiteral("running")] = true;
+    authoritativeRoom[QStringLiteral("speed")] = 1.0;
+    authoritativeRoom[QStringLiteral("redReady")] = true;
+    authoritativeRoom[QStringLiteral("blueReady")] = true;
+    authoritativeRoom[QStringLiteral("readyForStart")] = true;
+    authoritativeRoom[QStringLiteral("readyForSim")] = true;
+    authoritativeRoom[QStringLiteral("cpIssues")] = QStringLiteral("internal");
+    authoritativeRoom[QStringLiteral("lifecycleRevision")] = 9;
+    authoritativeRoom[QStringLiteral("online")] = QJsonObject{{QStringLiteral("lobby"), 4}};
+    authoritativeRoom[QStringLiteral("seats")] = QJsonArray{QJsonObject{
+        {QStringLiteral("seatId"), QStringLiteral("red_commander")},
+        {QStringLiteral("displayName"), QStringLiteral("private user")}}};
+    authoritativeRoom[QStringLiteral("transferRequests")] = QJsonArray{};
+    authoritativeRoom[QStringLiteral("serverPrivate")] = QStringLiteral("secret");
     const QJsonObject observer = StateProjector::snapshotFor(
-        engine, QStringLiteral("observer"), 1, roomState());
-    EXPECT_TRUE(observer.value(QStringLiteral("units")).toArray().isEmpty());
-    EXPECT_TRUE(observer.value(QStringLiteral("scenario")).toObject()
-                    .value(QStringLiteral("units")).toArray().isEmpty());
+        engine, QStringLiteral("observer"), 1, authoritativeRoom);
+    const QJsonArray units = observer.value(QStringLiteral("units")).toArray();
+    ASSERT_FALSE(units.isEmpty());
+    EXPECT_FALSE(unitById(units, QStringLiteral("red_cp")).isEmpty());
+    EXPECT_FALSE(unitById(units, QStringLiteral("blue_cp")).isEmpty());
+    const QSet<QString> allowedSnapshotKeys{
+        QStringLiteral("schemaVersion"), QStringLiteral("stateRevision"),
+        QStringLiteral("scenario"), QStringLiteral("units"), QStringLiteral("roomState")};
+    for (auto it = observer.constBegin(); it != observer.constEnd(); ++it) {
+        EXPECT_TRUE(allowedSnapshotKeys.contains(it.key())) << it.key().toStdString();
+    }
+    const QJsonObject projectedRoom = observer.value(QStringLiteral("roomState")).toObject();
+    EXPECT_TRUE(projectedRoom.value(QStringLiteral("observer")).toBool());
+    const QSet<QString> allowedRoomKeys{
+        QStringLiteral("phase"), QStringLiteral("roomId"), QStringLiteral("roomName"),
+        QStringLiteral("roomStatus"), QStringLiteral("roomMode"),
+        QStringLiteral("aiDifficulty"), QStringLiteral("configVersion"),
+        QStringLiteral("running"), QStringLiteral("simTime"), QStringLiteral("speed"),
+        QStringLiteral("scenarioRevision"), QStringLiteral("stateRevision"),
+        QStringLiteral("observer")};
+    for (auto it = projectedRoom.constBegin(); it != projectedRoom.constEnd(); ++it) {
+        EXPECT_TRUE(allowedRoomKeys.contains(it.key())) << it.key().toStdString();
+    }
+
+    const QSet<QString> allowedRuntimeKeys{
+        QStringLiteral("id"), QStringLiteral("callsign"), QStringLiteral("kind"),
+        QStringLiteral("side"), QStringLiteral("movable"), QStringLiteral("position"),
+        QStringLiteral("detectRange"), QStringLiteral("attackRange"),
+        QStringLiteral("commRange"), QStringLiteral("speed"), QStringLiteral("baseSpeed"),
+        QStringLiteral("maxHp"), QStringLiteral("attackPower"), QStringLiteral("armor"),
+        QStringLiteral("hp"), QStringLiteral("alive"), QStringLiteral("subsystems"),
+        QStringLiteral("serviceRequested"), QStringLiteral("serviceProgress"),
+        QStringLiteral("ammoRemaining"), QStringLiteral("ammoCapacity"),
+        QStringLiteral("cooldownRemaining"), QStringLiteral("cooldownSec"),
+        QStringLiteral("fuelRemaining"), QStringLiteral("fuelCapacity"),
+        QStringLiteral("turnaroundProgress")};
+    for (const QJsonValue& value : units) {
+        const QJsonObject unit = value.toObject();
+        for (auto it = unit.constBegin(); it != unit.constEnd(); ++it) {
+            EXPECT_TRUE(allowedRuntimeKeys.contains(it.key())) << it.key().toStdString();
+        }
+        for (const QString& sensitive : {QStringLiteral("sharedKnowledge"),
+                                          QStringLiteral("detections"),
+                                          QStringLiteral("schedule"),
+                                          QStringLiteral("recentPath"),
+                                          QStringLiteral("targetId"),
+                                          QStringLiteral("rulesOfEngagement"),
+                                          QStringLiteral("armed"),
+                                          QStringLiteral("lastShotOutcome"),
+                                          QStringLiteral("status")}) {
+            EXPECT_FALSE(unit.contains(sensitive)) << sensitive.toStdString();
+        }
+    }
+    const QJsonObject attackRuntime = unitById(units, QStringLiteral("red_a1"));
+    ASSERT_FALSE(attackRuntime.isEmpty());
+    for (const QString& panelField : {QStringLiteral("hp"), QStringLiteral("maxHp"),
+                                      QStringLiteral("position"), QStringLiteral("speed"),
+                                      QStringLiteral("detectRange"),
+                                      QStringLiteral("attackRange"),
+                                      QStringLiteral("commRange"),
+                                      QStringLiteral("attackPower"), QStringLiteral("armor"),
+                                      QStringLiteral("subsystems"),
+                                      QStringLiteral("ammoRemaining"),
+                                      QStringLiteral("ammoCapacity"),
+                                      QStringLiteral("cooldownRemaining"),
+                                      QStringLiteral("cooldownSec"),
+                                      QStringLiteral("fuelRemaining"),
+                                      QStringLiteral("fuelCapacity"),
+                                      QStringLiteral("turnaroundProgress")}) {
+        EXPECT_TRUE(attackRuntime.contains(panelField)) << panelField.toStdString();
+    }
+    const QJsonObject scenario = observer.value(QStringLiteral("scenario")).toObject();
+    EXPECT_FALSE(scenario.contains(QStringLiteral("notes")));
+    const QJsonArray scenarioUnits = scenario.value(QStringLiteral("units")).toArray();
+    EXPECT_FALSE(scenarioUnits.isEmpty());
+    for (const QJsonValue& value : scenarioUnits) {
+        const QJsonObject unit = value.toObject();
+        EXPECT_TRUE(unit.contains(QStringLiteral("x")));
+        EXPECT_TRUE(unit.contains(QStringLiteral("y")));
+        EXPECT_TRUE(unit.contains(QStringLiteral("alt")));
+        EXPECT_FALSE(unit.contains(QStringLiteral("position")));
+        for (const QString& sensitive : {QStringLiteral("schedule"),
+                                          QStringLiteral("targetId"),
+                                          QStringLiteral("sharedKnowledge")}) {
+            EXPECT_FALSE(unit.contains(sensitive)) << sensitive.toStdString();
+        }
+    }
     EXPECT_FALSE(StateProjector::canControlSide(QStringLiteral("observer"),
                                                 QStringLiteral("red")));
     EXPECT_FALSE(StateProjector::canEditSide(QStringLiteral("observer"),
                                              QStringLiteral("red")));
+}
+
+TEST(StateProjectorTest, ObserverEventsWhitelistLifecycleAndDropSensitiveKinds) {
+    SimulationEngine engine;
+    engine.loadDefaultScenario();
+    const QJsonObject lifecycle{{QStringLiteral("kind"), QStringLiteral("matchStarted")},
+                                {QStringLiteral("message"), QStringLiteral("started")},
+                                {QStringLiteral("seatId"), QStringLiteral("red_a1")}};
+    const QJsonObject projectedLifecycle = StateProjector::projectEvent(
+        engine, QStringLiteral("observer"), lifecycle);
+    EXPECT_EQ(projectedLifecycle.value(QStringLiteral("kind")).toString(),
+              QStringLiteral("matchStarted"));
+    EXPECT_EQ(projectedLifecycle.value(QStringLiteral("message")).toString(),
+              QStringLiteral("started"));
+    EXPECT_FALSE(projectedLifecycle.contains(QStringLiteral("seatId")));
+
+    const QJsonObject destroyed{{QStringLiteral("kind"), QStringLiteral("targetDestroyed")},
+                                {QStringLiteral("unitId"), QStringLiteral("blue_a1")},
+                                {QStringLiteral("x"), 4000.0},
+                                {QStringLiteral("y"), 5000.0},
+                                {QStringLiteral("attackerId"), QStringLiteral("red_a1")}};
+    const QJsonObject projectedDestroyed = StateProjector::projectEvent(
+        engine, QStringLiteral("observer"), destroyed);
+    const QSet<QString> allowedDestroyedKeys{
+        QStringLiteral("kind"), QStringLiteral("unitId"),
+        QStringLiteral("x"), QStringLiteral("y")};
+    EXPECT_EQ(projectedDestroyed.size(), allowedDestroyedKeys.size());
+    for (auto it = projectedDestroyed.constBegin(); it != projectedDestroyed.constEnd(); ++it) {
+        EXPECT_TRUE(allowedDestroyedKeys.contains(it.key())) << it.key().toStdString();
+    }
+
+    const QList<QJsonObject> sensitiveEvents{
+        QJsonObject{{QStringLiteral("kind"), QStringLiteral("simulationEvent")},
+                    {QStringLiteral("title"), QStringLiteral("发现目标")},
+                    {QStringLiteral("body"), QStringLiteral("red_r1 reports blue_a1")},
+                    {QStringLiteral("sourceUnitId"), QStringLiteral("red_cp")}},
+        QJsonObject{{QStringLiteral("kind"), QStringLiteral("chat")},
+                    {QStringLiteral("text"), QStringLiteral("do not forward")}},
+        QJsonObject{{QStringLiteral("kind"), QStringLiteral("intelShare")},
+                    {QStringLiteral("targetId"), QStringLiteral("blue_a1")}},
+        QJsonObject{{QStringLiteral("kind"), QStringLiteral("mapMark")},
+                    {QStringLiteral("label"), QStringLiteral("private")}},
+        QJsonObject{{QStringLiteral("kind"), QStringLiteral("transferRequested")},
+                    {QStringLiteral("userId"), 42}},
+        QJsonObject{{QStringLiteral("kind"), QStringLiteral("redeployRequested")},
+                    {QStringLiteral("seatId"), QStringLiteral("red_attack_1")}}};
+    for (const QJsonObject& event : sensitiveEvents) {
+        EXPECT_TRUE(StateProjector::projectEvent(
+                        engine, QStringLiteral("observer"), event).isEmpty())
+            << event.value(QStringLiteral("kind")).toString().toStdString();
+    }
+}
+
+TEST(StateProjectorTest, ObserverProjectionProducesContiguousDeltaAndStableScenario) {
+    SimulationEngine engine;
+    engine.loadDefaultScenario();
+    const QJsonObject base = StateProjector::snapshotFor(
+        engine, QStringLiteral("observer"), 10, roomState());
+    UnitBase* blue = engine.unit(QStringLiteral("blue_a1"));
+    ASSERT_NE(blue, nullptr);
+    blue->setPosition(GeoPos{blue->pos().x + 125.0, blue->pos().y + 75.0, blue->pos().alt});
+    blue->setHp(blue->hp() - 10.0);
+
+    QJsonObject advancedRoom = roomState();
+    advancedRoom[QStringLiteral("simTime")] = 0.05;
+    const QJsonObject current = StateProjector::snapshotFor(
+        engine, QStringLiteral("observer"), 11, advancedRoom);
+    EXPECT_EQ(base.value(QStringLiteral("scenario")), current.value(QStringLiteral("scenario")));
+    ASSERT_TRUE(StateDelta::canCreate(base, current));
+
+    const QJsonObject delta = StateDelta::create(base, current);
+    ASSERT_FALSE(delta.isEmpty());
+    EXPECT_TRUE(Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+                    QStringLiteral("delta"), 2, delta)).valid);
+    QJsonObject reconstructed = base;
+    QString error;
+    ASSERT_TRUE(StateDelta::apply(reconstructed, delta, &error))
+        << error.toStdString();
+    EXPECT_EQ(reconstructed, current);
 }
 
 TEST(StateProjectorTest, FactionEventRedactsUndetectedEnemyIdentity) {

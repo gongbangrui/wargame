@@ -55,11 +55,15 @@ class SimulationController : public QObject {
     Q_PROPERTY(QString currentSeatType READ currentSeatType NOTIFY onlineStateChanged)
     Q_PROPERTY(QString currentSeatSide READ currentSeatSide NOTIFY onlineStateChanged)
     Q_PROPERTY(QString onlineStage READ onlineStage NOTIFY onlineStateChanged)
+    Q_PROPERTY(bool isObserver READ isObserver NOTIFY onlineStateChanged)
     Q_PROPERTY(bool seatReady READ seatReady NOTIFY onlineStateChanged)
     Q_PROPERTY(bool leaveRoomPending READ leaveRoomPending NOTIFY leaveRoomPendingChanged)
     Q_PROPERTY(QString matchPhase READ matchPhase NOTIFY roomStateChanged)
     Q_PROPERTY(bool redReady READ redReady NOTIFY roomStateChanged)
     Q_PROPERTY(bool blueReady READ blueReady NOTIFY roomStateChanged)
+    Q_PROPERTY(QString roomMode READ roomMode NOTIFY roomStateChanged)
+    Q_PROPERTY(QString aiDifficulty READ aiDifficulty NOTIFY roomStateChanged)
+    Q_PROPERTY(qint64 configVersion READ configVersion NOTIFY roomStateChanged)
     Q_PROPERTY(QString communicationState READ communicationState NOTIFY roomStateChanged)
     Q_PROPERTY(QVariantList chatMessages READ chatMessages NOTIFY chatMessagesChanged)
     Q_PROPERTY(bool canEditScenario READ canEditScenario NOTIFY sessionChanged)
@@ -116,16 +120,22 @@ public:
     QString currentSeatType() const { return m_currentSeatType; }
     QString currentSeatSide() const { return m_currentSeatSide; }
     QString onlineStage() const { return m_onlineStage; }
+    bool isObserver() const { return m_isObserver; }
     bool seatReady() const { return m_seatReady; }
     bool leaveRoomPending() const { return m_leaveRoomPending; }
     QString matchPhase() const { return m_matchPhase; }
     bool redReady() const { return m_redReady; }
     bool blueReady() const { return m_blueReady; }
+    QString roomMode() const { return m_roomMode; }
+    QString aiDifficulty() const { return m_aiDifficulty; }
+    qint64 configVersion() const { return m_configVersion; }
     QString communicationState() const { return m_communicationState; }
     QVariantList chatMessages() const { return m_chatMessages; }
-    bool canEditScenario() const { return !isNetworked() || m_userRole == QLatin1String("editor"); }
-    bool canEditOwnRoster() const { return isNetworked() && m_currentSeatType == QLatin1String("commander"); }
-    bool canDirect() const { return !isNetworked() || m_currentSeatType == QLatin1String("commander"); }
+    bool canEditScenario() const {
+        return !isNetworked() || (!m_isObserver && m_userRole == QLatin1String("editor"));
+    }
+    bool canEditOwnRoster() const { return isNetworked() && !m_isObserver && m_currentSeatType == QLatin1String("commander"); }
+    bool canDirect() const { return !isNetworked() || (!m_isObserver && m_currentSeatType == QLatin1String("commander")); }
     QVariantList timeline() const { return isNetworked() ? QVariantList{} : m_engine.timelineForView(); }
     double replayDuration() const { return isNetworked() ? 0.0 : m_engine.replayDuration(); }
 
@@ -163,6 +173,7 @@ public:
     Q_INVOKABLE void sendUnitOrder(const QString& unitId, const QString& text);
     Q_INVOKABLE void requestOnlineRooms();
     Q_INVOKABLE void joinOnlineRoom(const QString& roomId);
+    Q_INVOKABLE void observeOnlineRoom(const QString& roomId);
     Q_INVOKABLE void claimOnlineSeat(const QString& seatId);
     Q_INVOKABLE void approveSeatTransfer(qint64 userId, qint64 requestedRevision);
     Q_INVOKABLE void rejectSeatTransfer(qint64 userId, qint64 requestedRevision);
@@ -309,6 +320,9 @@ private:
     bool m_remoteReadyForSim = false;
     bool m_redReady = false;
     bool m_blueReady = false;
+    QString m_roomMode = QStringLiteral("pvp");
+    QString m_aiDifficulty = QStringLiteral("normal");
+    qint64 m_configVersion = 1;
     QString m_communicationState = QStringLiteral("disconnected");
     qint64 m_remoteScenarioRevision = -1;
     QVariantList m_remoteMessages;
@@ -322,6 +336,8 @@ private:
     QString m_currentSeatType;
     QString m_currentSeatSide;
     QString m_onlineStage = QStringLiteral("login");
+    bool m_isObserver = false;
+    bool m_observerJoinPending = false;
     bool m_seatReady = false;
     bool m_leaveRoomPending = false;
 };

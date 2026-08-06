@@ -281,6 +281,8 @@ if(TARGET wargame_serverlib)
     target_sources(wargame_tests PRIVATE
         tests/test_room_persistence.cpp
         tests/test_state_projector.cpp
+        tests/test_rules_ai.cpp
+        tests/test_ollama_conversation_store.cpp
     )
     target_link_libraries(wargame_tests PRIVATE wargame_serverlib)
 
@@ -292,6 +294,26 @@ if(TARGET wargame_serverlib)
     target_include_directories(authoritative_room_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     wargame_enable_sanitizers(authoritative_room_tests)
     add_test(NAME GameServer.AuthoritativeRoom COMMAND authoritative_room_tests)
+
+    add_executable(observer_server_tests
+        tests/test_observer_server.cpp
+    )
+    target_link_libraries(observer_server_tests PRIVATE
+        wargame_serverlib GTest::gtest)
+    target_include_directories(observer_server_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    wargame_enable_sanitizers(observer_server_tests)
+    add_test(NAME GameServer.Observer COMMAND observer_server_tests)
+
+    add_executable(ollama_provider_tests
+        tests/test_ollama_provider.cpp
+        tests/test_ollama_dynamic.cpp
+    )
+    target_link_libraries(ollama_provider_tests PRIVATE
+        wargame_serverlib GTest::gtest)
+    target_include_directories(ollama_provider_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/server/game)
+    wargame_enable_sanitizers(ollama_provider_tests)
+    add_test(NAME GameServer.OllamaProvider COMMAND ollama_provider_tests)
 endif()
 
 include(GoogleTest)

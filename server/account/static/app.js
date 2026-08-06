@@ -1,7 +1,7 @@
 const storedUiScaleValue = localStorage.getItem("wargameUiScale");
 const storedUiScale = storedUiScaleValue === null ? Number.NaN : Number(storedUiScaleValue);
 const roomOperationTimeoutMs = 25000;
-const state = { token: sessionStorage.getItem("adminToken") || "", users: [], rooms: [], roomsLoaded: false, deleteId: null, roomDeleteId: null, roomOperations: {}, autoPausingRooms: new Set(), autoPausedOperations: {}, roomKickRequests: new Set(), roomStatusFilter: "all", openRoomMenuId: "", roomSaving: false, overview: null, events: [], terminalUnlocked: false, terminalSocket: null, monitorTimer: null, roomTimer: null, roomRefreshInFlight: false, occupantsRoomId: "", occupants: [], occupantsTimer: null, activeModal: null, modalReturnFocus: null, uiScale: Number.isFinite(storedUiScale) ? Math.max(0.85, Math.min(1.15, storedUiScale)) : 1 };
+const state = { token: sessionStorage.getItem("adminToken") || "", users: [], rooms: [], roomsLoaded: false, deleteId: null, roomDeleteId: null, roomOperations: {}, autoPausingRooms: new Set(), autoPausedOperations: {}, roomKickRequests: new Set(), roomStatusFilter: "all", openRoomMenuId: "", roomSaving: false, overview: null, events: [], terminalUnlocked: false, terminalSocket: null, monitorTimer: null, monitorRequestGeneration: 0, roomTimer: null, roomRefreshInFlight: false, occupantsRoomId: "", occupants: [], occupantsTimer: null, activeModal: null, modalReturnFocus: null, aiConfigDirty: false, aiConfigSaving: false, aiHistory: { status: "all", items: [], nextBefore: null, hasMore: false, listState: "idle", listError: "", selectedId: "", detail: null, detailState: "empty", detailError: "", activeTab: "prompts", requestGeneration: 0, detailGeneration: 0, pageSize: 24 }, uiScale: Number.isFinite(storedUiScale) ? Math.max(0.85, Math.min(1.15, storedUiScale)) : 1 };
 const $ = (id) => document.getElementById(id);
 const seatDefinitions = [
   ["red_commander", "红方指挥官", true], ["red_attack", "红方攻击机", false], ["red_recon", "红方侦察机", false], ["red_ground", "红方地面单位", false], ["red_jammer", "红方干扰机", false],
@@ -86,17 +86,26 @@ function formatApiError(data) {
   return "请求失败";
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, requestGuard = null) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
   const response = await fetch(path, { ...options, headers });
   let data = {};
   try { data = await response.json(); } catch (_) { data = {}; }
   if (!response.ok) {
-    if (response.status === 401 && path !== "/api/admin/login") logout(false);
+    const currentRequest = requestIsCurrent(requestGuard);
+    if (response.status === 401 && path !== "/api/admin/login" && currentRequest) logout(false);
     throw new Error(formatApiError(data));
   }
   return data;
+}
+
+function requestIsCurrent(requestGuard) {
+  if (!requestGuard) return true;
+  return requestGuard.token === state.token
+    && (requestGuard.generation === undefined || requestGuard.generation === state.monitorRequestGeneration)
+    && (requestGuard.historyGeneration === undefined || requestGuard.historyGeneration === state.aiHistory.requestGeneration)
+    && (requestGuard.detailGeneration === undefined || requestGuard.detailGeneration === state.aiHistory.detailGeneration);
 }
 
 function toast(message, error = false) {
@@ -201,6 +210,22 @@ function logout(callServer = true) {
   state.roomKickRequests.clear();
   state.overview = null;
   state.events = [];
+  state.aiConfigDirty = false;
+  state.aiConfigSaving = false;
+  state.aiHistory.status = "all";
+  state.aiHistory.items = [];
+  state.aiHistory.nextBefore = null;
+  state.aiHistory.hasMore = false;
+  state.aiHistory.listState = "idle";
+  state.aiHistory.listError = "";
+  state.aiHistory.selectedId = "";
+  state.aiHistory.detail = null;
+  state.aiHistory.detailState = "empty";
+  state.aiHistory.detailError = "";
+  state.aiHistory.activeTab = "prompts";
+  state.aiHistory.requestGeneration += 1;
+  state.aiHistory.detailGeneration += 1;
+  state.monitorRequestGeneration += 1;
   window.clearInterval(state.monitorTimer);
   window.clearInterval(state.roomTimer);
   state.roomTimer = null;
@@ -269,6 +294,64 @@ const roomStatusLabels = {
   stale: "状态过期",
   unknown: "状态未知",
 };
+const roomModeLabels = { pvp: "PVP 对抗", pve: "PVE 电脑对抗" };
+const aiDifficultyLabels = { easy: "简单", normal: "普通", hard: "困难" };
+const aiProviderLabels = { rules: "规则引擎", auto: "自动选择", ollama: "Ollama", unknown: "未报告" };
+const aiEngineLabels = { rules: "规则引擎", ollama: "Ollama", unknown: "未报告" };
+const aiConnectionLabels = { disabled: "仅规则引擎（未使用 Ollama）", checking: "检查中", connected: "已连接", model_missing: "服务可达，模型缺失", unavailable: "无法连接", timeout: "连接超时", http_error: "服务返回错误", invalid_json: "响应格式错误", schema_invalid: "响应结构错误", response_too_large: "响应过大", configuration_error: "配置无效", unknown: "未检测" };
+const aiFailureLabels = { rules_disabled: "规则引擎", busy: "请求繁忙", unavailable: "不可达", timeout: "超时", http_error: "HTTP 错误", model_missing: "模型缺失", response_too_large: "响应过大", invalid_json: "JSON 无效", schema_invalid: "结构无效", stale_response: "响应过期", configuration_error: "配置无效", unknown: "未知" };
+const aiHistoryStatusLabels = { all: "全部状态", completed: "已完成", rejected: "已拒绝", failed: "失败", cancelled: "已取消", unknown: "未知状态" };
+const aiHistoryTabLabels = {
+  prompts: { label: "提示词", english: "prompts" },
+  raw: { label: "原始响应", english: "raw response" },
+  parsed: { label: "解析计划", english: "parsed plan" },
+  final: { label: "执行结果", english: "execution result" },
+};
+
+function historyValueText(value, emptyText = "暂无内容") {
+  if (value === undefined || value === null || value === "") return emptyText;
+  if (typeof value === "string") return value;
+  try {
+    const serialized = JSON.stringify(value, null, 2);
+    return serialized === undefined ? String(value) : serialized;
+  } catch (_) {
+    return String(value);
+  }
+}
+
+function historyTimestamp(value) {
+  if (typeof value !== "string" || !value) return "--";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function historyStatusLabel(value) {
+  return aiHistoryStatusLabels[value] || aiHistoryStatusLabels.unknown;
+}
+
+function historyStatusClass(value) {
+  return Object.prototype.hasOwnProperty.call(aiHistoryStatusLabels, value) && value !== "all" ? value : "unknown";
+}
+
+function appendHistoryState(container, message, stateClass = "") {
+  const node = document.createElement("div");
+  node.className = `ai-history-state${stateClass ? ` ${stateClass}` : ""}`;
+  node.textContent = message;
+  container.appendChild(node);
+  return node;
+}
+
+function appendHistoryLabelValue(container, label, value, className = "") {
+  const wrapper = document.createElement("div");
+  wrapper.className = className || "ai-history-meta-item";
+  const labelNode = document.createElement("dt");
+  labelNode.textContent = label;
+  const valueNode = document.createElement("dd");
+  setTextWithTitle(valueNode, value);
+  wrapper.append(labelNode, valueNode);
+  container.appendChild(wrapper);
+  return wrapper;
+}
 
 function roomCapacity(room) {
   const limits = Object.entries(room.seatLimits || {});
@@ -385,7 +468,8 @@ function renderRooms() {
       </header>
       <div class="room-card-body">
         <div class="room-fact"><span>战位</span><strong class="capacity-total"></strong><small class="capacity-detail"></small></div>
-        <div class="room-fact"><span>就绪</span><strong class="room-readiness"></strong><small class="room-operation"></small></div>
+        <div class="room-fact"><span>模式</span><strong class="room-mode"></strong><small class="room-operation"></small></div>
+        <div class="room-fact"><span>就绪</span><strong class="room-readiness"></strong><small class="room-readiness-detail"></small></div>
       </div>
       <footer class="room-card-actions">
         <button class="room-occupants secondary compact" type="button">战位与用户</button>
@@ -412,6 +496,9 @@ function renderRooms() {
     setTextWithTitle(enabled, room.enabled ? "可进入" : "已关闭");
     const readiness = `红 ${room.redCommanderReady ? "就绪" : "未就绪"} · 蓝 ${room.blueCommanderReady ? "就绪" : "未就绪"}`;
     setTextWithTitle(card.querySelector(".room-readiness"), readiness);
+    const mode = room.mode === "pve" ? "pve" : "pvp";
+    const difficulty = aiDifficultyLabels[room.aiDifficulty] || aiDifficultyLabels.normal;
+    setTextWithTitle(card.querySelector(".room-mode"), mode === "pve" ? `${roomModeLabels[mode]} · ${difficulty}` : roomModeLabels[mode]);
     const operationNode = card.querySelector(".room-operation");
     if (operation) {
       const timedOut = operation.state === "pending" && operationTimedOut(operation);
@@ -419,6 +506,8 @@ function renderRooms() {
       operationNode.className = `room-operation ${operation.state}${timedOut ? " timed-out" : ""}`;
       if (timedOut) pauseTimedOutOperation(room, operation);
     }
+    if (!operation) setTextWithTitle(card.querySelector(".room-operation"), `配置版本 ${room.configVersion || 1}`);
+    setTextWithTitle(card.querySelector(".room-readiness-detail"), room.readyForStart ? "可开始推演" : "等待部署和就绪");
     const capacity = roomCapacity(room);
     setTextWithTitle(card.querySelector(".capacity-total"), `${capacity.total} 席`);
     setTextWithTitle(card.querySelector(".capacity-detail"), capacity.detail);
@@ -553,8 +642,23 @@ function openRoomModal(room = null) {
   $("roomScenario").value = room ? room.scenarioId : "default";
   $("roomParameters").value = JSON.stringify(room ? room.seatParameters : {}, null, 2);
   $("roomEnabled").checked = room ? room.enabled : true;
+  $("roomModePve").checked = room?.mode === "pve";
+  $("roomModePvp").checked = room?.mode !== "pve";
+  $("roomAiDifficulty").value = room?.aiDifficulty || "normal";
+  $("roomForm").dataset.modeLocked = room && room.status !== "stopped" ? "true" : "false";
+  updateRoomModeEditor();
   renderSeatEditors(room);
   openModal($("roomModal"), $("roomName"));
+}
+
+function updateRoomModeEditor() {
+  const locked = $("roomForm").dataset.modeLocked === "true";
+  const mode = $("roomModePve").checked ? "pve" : "pvp";
+  $("roomModePvp").disabled = locked;
+  $("roomModePve").disabled = locked;
+  $("roomAiDifficultyField").classList.toggle("hidden", mode !== "pve");
+  $("roomAiDifficulty").disabled = locked || mode !== "pve";
+  $("roomModeLockHint").classList.toggle("hidden", !locked);
 }
 
 function closeRoomModal() {
@@ -614,7 +718,7 @@ function renderTerminal() {
   $("terminalCommandForm").classList.toggle("locked", !unlocked);
   $("terminalCommand").disabled = !unlocked;
   $("terminalExecute").disabled = !unlocked;
-  $("terminalCommand").placeholder = unlocked ? "输入 Shell 命令，按 Enter 执行" : "完成终端认证后可输入 Shell 命令";
+  $("terminalCommand").placeholder = unlocked ? "输入 Shell 命令，按 Enter 执行" : "认证后可输入命令";
   $("terminalDisconnect").classList.toggle("hidden", !unlocked);
   if (!unlocked) {
     $("terminalOutput").textContent = "$ 等待认证";
@@ -637,6 +741,38 @@ function closeTerminal(message = "") {
   state.terminalUnlocked = false;
   renderTerminal();
   if (message) appendTerminalOutput(`\n${message}\n`);
+}
+
+function aiConnectionLabel(value) {
+  return aiConnectionLabels[value] || aiConnectionLabels.unknown;
+}
+
+function renderAiConfiguration(config, status) {
+  const provider = config?.provider;
+  const model = config?.model;
+  const host = config?.ollamaHost;
+  const port = config?.ollamaPort;
+  const scheme = config?.ollamaScheme;
+  const version = Number(config?.configVersion || 0);
+  const appliedVersion = Number(status?.configVersion || 0);
+  const stateNode = $("aiConfigState");
+  const syncNode = $("aiConfigSync");
+  const form = $("aiConfigForm");
+  if (!stateNode || !syncNode || !form) return;
+  if (!state.aiConfigDirty && !state.aiConfigSaving) {
+    $("aiProvider").value = ["rules", "auto", "ollama"].includes(provider) ? provider : "auto";
+    $("aiModel").value = typeof model === "string" ? model : "";
+    $("aiScheme").value = scheme === "https" ? "https" : "http";
+    $("aiHost").value = typeof host === "string" ? host : "";
+    $("aiPort").value = port === undefined || port === null ? "" : String(port);
+  }
+  const connection = status?.connectionStatus || "unknown";
+  const syncState = version <= 0 ? "unread" : state.aiConfigSaving ? "saving" : state.aiConfigDirty ? "dirty" : appliedVersion === version && status?.configApplied ? "synced" : "pending";
+  const stateText = version <= 0 ? "未读取" : state.aiConfigSaving ? "保存中" : state.aiConfigDirty ? "有未保存修改" : syncState === "synced" ? `已同步 v${version}` : `等待同步 v${version}`;
+  stateNode.className = `config-state state-${syncState}`;
+  stateNode.textContent = stateText;
+  syncNode.textContent = state?.lastProbeAt ? `最近探测：${new Date(state.lastProbeAt).toLocaleString("zh-CN", { hour12: false })}` : connection === "checking" ? "正在检查 Ollama 服务" : "保存后自动同步到游戏服务";
+  $("aiConfigSave").disabled = state.aiConfigSaving;
 }
 
 function openTerminal(ticket) {
@@ -665,6 +801,8 @@ function renderMonitor() {
   const game = overview.gameStatus || {};
   const room = game.roomState || {};
   const metrics = game.metrics || {};
+  const ai = overview.aiStatus || {};
+  renderAiConfiguration(overview.aiConfig || {}, ai);
   $("accountServiceState").textContent = monitorStateLabel(overview.accountStatus);
   $("gameServiceState").textContent = monitorStateLabel(game.status);
   renderServiceBadge(overview.accountStatus, game.status);
@@ -679,6 +817,23 @@ function renderMonitor() {
   $("scenarioRevision").textContent = room.scenarioRevision ?? "--";
   $("redReady").textContent = room.redReady ? "已就绪" : "未就绪";
   $("blueReady").textContent = room.blueReady ? "已就绪" : "未就绪";
+  const roomMode = room.roomMode === "pve" ? "pve" : room.roomMode === "pvp" ? "pvp" : "";
+  $("monitorRoomMode").textContent = roomMode ? roomModeLabels[roomMode] : "--";
+  $("monitorAiRuntime").textContent = ai.active
+    ? `${aiEngineLabels[ai.effectiveEngine] || aiEngineLabels.unknown}${ai.stickyRules ? "（规则回退）" : ""}`
+    : "未启用";
+  const failure = ai.lastFailureClass && ai.lastFailureClass !== "unknown" ? ` · ${aiFailureLabels[ai.lastFailureClass] || aiFailureLabels.unknown}` : "";
+  $("monitorAiProvider").textContent = `${aiProviderLabels[ai.provider] || aiProviderLabels.unknown} · ${Number(ai.successes || 0)}/${Number(ai.requests || 0)}${failure}`;
+  const connectionNode = $("monitorAiConnection");
+  if (connectionNode) {
+    connectionNode.className = `ai-connection-status state-${ai.connectionStatus || "unknown"}`;
+    setTextWithTitle(connectionNode, aiConnectionLabel(ai.connectionStatus));
+  }
+  const configured = overview.aiConfig || {};
+  const modelNode = $("monitorAiModel");
+  if (modelNode) setTextWithTitle(modelNode, ai.model || configured.model || "--");
+  const endpointNode = $("monitorAiEndpoint");
+  if (endpointNode) setTextWithTitle(endpointNode, ai.baseUrl || configured.baseUrl || "--");
   const list = $("monitorEvents");
   list.replaceChildren();
   for (const event of state.events) {
@@ -698,14 +853,319 @@ function renderMonitor() {
   renderTerminal();
 }
 
+function historySummaryModel(summary) {
+  return summary.resolvedModel || summary.configuredModel || "未报告模型";
+}
+
+function createAiHistoryRow(summary) {
+  const row = document.createElement("button");
+  const selected = state.aiHistory.selectedId === summary.conversationId;
+  const status = summary.status || "unknown";
+  row.type = "button";
+  row.className = `ai-history-row${selected ? " selected" : ""}`;
+  row.dataset.conversationId = summary.conversationId;
+  row.setAttribute("aria-pressed", String(selected));
+  row.title = "查看 AI 会话详情";
+
+  const top = document.createElement("span");
+  top.className = "ai-history-row-top";
+  const time = document.createElement("time");
+  time.className = "ai-history-time";
+  time.dateTime = typeof summary.timestamp === "string" ? summary.timestamp : "";
+  setTextWithTitle(time, historyTimestamp(summary.timestamp));
+  const badge = document.createElement("span");
+  badge.className = `badge ai-history-status status-${historyStatusClass(status)}`;
+  setTextWithTitle(badge, historyStatusLabel(status));
+  top.append(time, badge);
+
+  const id = document.createElement("strong");
+  id.className = "ai-history-row-id";
+  setTextWithTitle(id, summary.conversationId || "未命名会话");
+  const metadata = document.createElement("span");
+  metadata.className = "ai-history-row-meta";
+  const model = historySummaryModel(summary);
+  const latency = Number.isFinite(Number(summary.latencyMs)) ? `${Number(summary.latencyMs)} ms` : "延迟未知";
+  setTextWithTitle(metadata, `${model} · ${latency}`);
+  const room = document.createElement("span");
+  room.className = "ai-history-row-room";
+  setTextWithTitle(room, summary.roomId ? `房间 ${summary.roomId}` : "房间未知");
+  row.append(top, id, metadata, room);
+  row.addEventListener("click", () => selectAiConversation(summary.conversationId));
+  return row;
+}
+
+function renderAiHistoryPaging() {
+  const history = state.aiHistory;
+  const button = $("aiHistoryLoadMore");
+  const stateNode = $("aiHistoryPagingState");
+  if (!button || !stateNode) return;
+  const loading = history.listState === "loading";
+  button.classList.toggle("hidden", !history.hasMore);
+  button.disabled = loading || !history.hasMore;
+  button.textContent = loading ? "读取中…" : "加载更早记录";
+  if (loading) stateNode.textContent = "正在读取会话历史";
+  else if (history.hasMore) stateNode.textContent = "按时间从新到旧排列";
+  else if (history.items.length) stateNode.textContent = "已显示全部符合条件的记录";
+  else stateNode.textContent = "";
+}
+
+function renderAiHistoryList() {
+  const history = state.aiHistory;
+  const list = $("aiHistoryList");
+  if (!list) return;
+  list.replaceChildren();
+  list.setAttribute("aria-busy", String(history.listState === "loading"));
+  if (history.listState === "idle") {
+    appendHistoryState(list, "进入监控页后读取会话历史。", "idle");
+  } else if (history.listState === "loading" && !history.items.length) {
+    appendHistoryState(list, "正在读取 AI 会话历史…", "loading");
+    for (let index = 0; index < 3; index += 1) {
+      const skeleton = document.createElement("div");
+      skeleton.className = "ai-history-skeleton";
+      skeleton.setAttribute("aria-hidden", "true");
+      list.appendChild(skeleton);
+    }
+  } else if (history.listState === "ready" && !history.items.length) {
+    appendHistoryState(list, `暂无${history.status === "all" ? "符合条件的" : historyStatusLabel(history.status)} AI 会话。`, "empty");
+  }
+  for (const summary of history.items) list.appendChild(createAiHistoryRow(summary));
+  if (history.listState === "loading" && history.items.length) appendHistoryState(list, "正在读取更早记录…", "loading inline");
+  if (history.listState === "error") {
+    appendHistoryState(list, history.listError || "AI 会话历史读取失败。", "error");
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "secondary compact ai-history-retry";
+    retry.textContent = "重试";
+    retry.addEventListener("click", () => loadAiHistory({ reset: history.items.length === 0, showError: true }));
+    list.appendChild(retry);
+  }
+  const count = $("aiHistoryCount");
+  if (count) count.textContent = `${history.items.length} 条`;
+  renderAiHistoryPaging();
+}
+
+function createHistoryContentBlock(label, value, className = "") {
+  const block = document.createElement("div");
+  block.className = `ai-history-content-block${className ? ` ${className}` : ""}`;
+  const heading = document.createElement("h5");
+  heading.textContent = label;
+  const pre = document.createElement("pre");
+  pre.className = "ai-history-content-text";
+  pre.textContent = historyValueText(value);
+  block.append(heading, pre);
+  return block;
+}
+
+function historyPromptEntries(detail) {
+  const entries = [];
+  if (detail.systemMessage !== undefined && detail.systemMessage !== null) entries.push(["system", detail.systemMessage]);
+  if (detail.userMessage !== undefined && detail.userMessage !== null) entries.push(["user", detail.userMessage]);
+  if (!entries.length && Array.isArray(detail.messages) && detail.messages.length) {
+    entries.push(["messages", detail.messages]);
+  }
+  return entries.length ? entries : [["prompts", null]];
+}
+
+function renderAiHistoryTabs(detailBody, detail) {
+  const history = state.aiHistory;
+  const tabs = document.createElement("div");
+  tabs.className = "ai-history-tabs";
+  tabs.setAttribute("role", "tablist");
+  for (const key of Object.keys(aiHistoryTabLabels)) {
+    const meta = aiHistoryTabLabels[key];
+    const button = document.createElement("button");
+    const active = history.activeTab === key;
+    button.type = "button";
+    button.className = `ai-history-tab${active ? " active" : ""}`;
+    button.dataset.historyTab = key;
+    button.id = `aiHistoryTab-${key}`;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(active));
+    button.setAttribute("aria-controls", "aiHistoryTabPanel");
+    button.setAttribute("aria-label", meta.english);
+    button.title = meta.english;
+    button.textContent = meta.label;
+    button.addEventListener("click", () => {
+      history.activeTab = key;
+      renderAiHistoryDetail();
+    });
+    button.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const keys = Object.keys(aiHistoryTabLabels);
+      const offset = event.key === "ArrowRight" ? 1 : -1;
+      const next = keys[(keys.indexOf(key) + offset + keys.length) % keys.length];
+      history.activeTab = next;
+      renderAiHistoryDetail();
+      $("aiHistoryTab-" + next)?.focus();
+    });
+    tabs.appendChild(button);
+  }
+
+  const panel = document.createElement("div");
+  panel.className = "ai-history-tab-panel";
+  panel.id = "aiHistoryTabPanel";
+  panel.setAttribute("role", "tabpanel");
+  panel.setAttribute("aria-labelledby", `aiHistoryTab-${history.activeTab}`);
+  if (history.activeTab === "prompts") {
+    for (const [label, value] of historyPromptEntries(detail)) panel.appendChild(createHistoryContentBlock(label, value));
+  } else if (history.activeTab === "raw") {
+    panel.appendChild(createHistoryContentBlock("raw response", detail.rawAssistantContent));
+  } else if (history.activeTab === "parsed") {
+    panel.appendChild(createHistoryContentBlock("parsed plan", detail.parsedPlan));
+  } else {
+    panel.appendChild(createHistoryContentBlock("execution result", detail.executionResult));
+  }
+  detailBody.append(tabs, panel);
+}
+
+function renderAiHistoryDetail() {
+  const history = state.aiHistory;
+  const detailNode = $("aiHistoryDetail");
+  if (!detailNode) return;
+  detailNode.replaceChildren();
+  if (history.detailState === "loading") {
+    appendHistoryState(detailNode, "正在读取会话详情…", "loading");
+    return;
+  }
+  if (history.detailState === "error") {
+    appendHistoryState(detailNode, history.detailError || "会话详情读取失败。", "error");
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "secondary compact ai-history-retry";
+    retry.textContent = "重试详情";
+    retry.addEventListener("click", () => selectAiConversation(history.selectedId));
+    detailNode.appendChild(retry);
+    return;
+  }
+  const detail = history.detail;
+  if (history.detailState !== "ready" || !detail) {
+    appendHistoryState(detailNode, "选择一条会话查看详情。", "empty");
+    return;
+  }
+
+  const head = document.createElement("div");
+  head.className = "ai-history-detail-head";
+  const title = document.createElement("div");
+  title.className = "ai-history-detail-title";
+  const heading = document.createElement("h4");
+  setTextWithTitle(heading, detail.conversationId || "未命名会话");
+  const subtitle = document.createElement("p");
+  setTextWithTitle(subtitle, `${historyTimestamp(detail.timestamp)} · ${historySummaryModel(detail)}`);
+  title.append(heading, subtitle);
+  const badge = document.createElement("span");
+  badge.className = `badge ai-history-status status-${historyStatusClass(detail.status)}`;
+  setTextWithTitle(badge, historyStatusLabel(detail.status));
+  head.append(title, badge);
+
+  const metadata = document.createElement("dl");
+  metadata.className = "ai-history-meta";
+  appendHistoryLabelValue(metadata, "请求 ID", detail.requestId || "--");
+  appendHistoryLabelValue(metadata, "房间", detail.roomId || "--");
+  appendHistoryLabelValue(metadata, "规划代次", detail.planningGeneration ?? "--");
+  appendHistoryLabelValue(metadata, "延迟", Number.isFinite(Number(detail.latencyMs)) ? `${Number(detail.latencyMs)} ms` : "--");
+  appendHistoryLabelValue(metadata, "最终引擎", detail.finalEngine || "--");
+  appendHistoryLabelValue(metadata, "回退原因", detail.rulesFallbackReason || "--");
+  const body = document.createElement("div");
+  body.className = "ai-history-detail-body";
+  renderAiHistoryTabs(body, detail);
+  detailNode.append(head, metadata, body);
+}
+
+function renderAiHistory() {
+  renderAiHistoryList();
+  renderAiHistoryDetail();
+  const updated = $("aiHistoryUpdated");
+  if (updated && state.aiHistory.listState === "ready") {
+    updated.textContent = `筛选：${historyStatusLabel(state.aiHistory.status)} · 原文已按服务端规则脱敏`;
+  }
+}
+
+async function selectAiConversation(conversationId) {
+  if (!conversationId) return;
+  const history = state.aiHistory;
+  history.selectedId = conversationId;
+  history.detail = null;
+  history.detailError = "";
+  history.detailState = "loading";
+  history.activeTab = "prompts";
+  const detailGeneration = ++history.detailGeneration;
+  renderAiHistoryDetail();
+  try {
+    const data = await api(`/api/admin/monitor/ai-conversations/${encodeURIComponent(conversationId)}`, {}, {
+      token: state.token,
+      detailGeneration,
+    });
+    if (!requestIsCurrent({ token: state.token, detailGeneration })) return;
+    history.detail = data.conversation || null;
+    history.detailState = history.detail ? "ready" : "empty";
+    renderAiHistoryDetail();
+  } catch (error) {
+    if (!requestIsCurrent({ token: state.token, detailGeneration })) return;
+    history.detailState = "error";
+    history.detailError = error.message || "会话详情读取失败。";
+    renderAiHistoryDetail();
+  }
+}
+
+async function loadAiHistory({ reset = false, showError = false } = {}) {
+  const history = state.aiHistory;
+  const filter = $("aiHistoryStatusFilter")?.value || history.status || "all";
+  if (reset) {
+    history.status = filter;
+    history.items = [];
+    history.nextBefore = null;
+    history.hasMore = false;
+    history.selectedId = "";
+    history.detail = null;
+    history.detailState = "empty";
+    history.detailError = "";
+    history.detailGeneration += 1;
+  }
+  const requestGeneration = ++history.requestGeneration;
+  history.listState = "loading";
+  history.listError = "";
+  renderAiHistory();
+  const params = new URLSearchParams({ status: history.status, limit: String(history.pageSize) });
+  if (!reset && history.nextBefore) params.set("before", history.nextBefore);
+  try {
+    const data = await api(`/api/admin/monitor/ai-conversations?${params.toString()}`, {}, {
+      token: state.token,
+      historyGeneration: requestGeneration,
+    });
+    if (!requestIsCurrent({ token: state.token, historyGeneration: requestGeneration })) return;
+    const incoming = Array.isArray(data.conversations) ? data.conversations : [];
+    const existingIds = new Set(history.items.map((item) => item.conversationId));
+    history.items = reset ? incoming : history.items.concat(incoming.filter((item) => !existingIds.has(item.conversationId)));
+    history.nextBefore = typeof data.nextBefore === "string" && data.nextBefore ? data.nextBefore : null;
+    history.hasMore = data.hasMore === true && Boolean(history.nextBefore);
+    history.listState = "ready";
+    renderAiHistory();
+    if (reset && history.items.length) selectAiConversation(history.items[0].conversationId);
+  } catch (error) {
+    if (!requestIsCurrent({ token: state.token, historyGeneration: requestGeneration })) return;
+    history.listState = "error";
+    history.listError = error.message || "AI 会话历史读取失败。";
+    renderAiHistory();
+    if (showError) toast(history.listError, true);
+  }
+}
+
 async function loadMonitor(showError = false) {
+  const requestGeneration = ++state.monitorRequestGeneration;
+  const requestGuard = { generation: requestGeneration, token: state.token };
   try {
     const category = $("monitorFilter").value;
-    const [overview, events] = await Promise.all([api("/api/admin/monitor/overview"), api(`/api/admin/monitor/events?category=${encodeURIComponent(category)}&limit=120`)]);
+    const [overview, events] = await Promise.all([
+      api("/api/admin/monitor/overview", {}, requestGuard),
+      api(`/api/admin/monitor/events?category=${encodeURIComponent(category)}&limit=120`, {}, requestGuard),
+    ]);
+    if (requestGeneration !== state.monitorRequestGeneration) return;
     state.overview = overview;
     state.events = events.events || [];
     renderMonitor();
   } catch (error) {
+    if (requestGeneration !== state.monitorRequestGeneration) return;
     if (showError) toast(error.message, true);
   }
 }
@@ -713,6 +1173,7 @@ async function loadMonitor(showError = false) {
 function startMonitorRefresh() {
   window.clearInterval(state.monitorTimer);
   loadMonitor(true);
+  loadAiHistory({ reset: true, showError: true });
   state.monitorTimer = window.setInterval(() => loadMonitor(false), 5000);
 }
 
@@ -768,6 +1229,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("roomCancel")?.addEventListener("click", closeRoomModal);
   $("roomModal")?.addEventListener("click", (event) => { if (event.target === $("roomModal")) closeRoomModal(); });
   $("roomStatusFilter")?.addEventListener("change", (event) => { state.roomStatusFilter = event.target.value; renderRooms(); });
+  document.querySelectorAll("input[name='roomMode']").forEach((input) => input.addEventListener("change", updateRoomModeEditor));
   $("roomForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (state.roomSaving) return;
@@ -777,7 +1239,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const seatLimits = collectSeatLimits();
       const seatParameters = collectSeatParameters();
       const roomId = $("roomId").value || $("roomKey").value.trim();
-      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_limits: seatLimits, seat_parameters: seatParameters, enabled: $("roomEnabled").checked };
+      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_limits: seatLimits, seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value };
       await api(roomId && $("roomId").value ? `/api/admin/rooms/${encodeURIComponent(roomId)}` : "/api/admin/rooms", { method: roomId && $("roomId").value ? "PUT" : "POST", body: JSON.stringify(body) });
       closeRoomModal(); await loadRooms(); toast("房间已保存");
     } catch (error) { toast(error.message || "房间配置 JSON 无效", true); state.roomSaving = false; $("roomSave").disabled = false; }
@@ -817,11 +1279,54 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("securityPage").classList.toggle("hidden", page !== "security");
     $("pageTitle").textContent = page === "users" ? "兵棋账号" : page === "rooms" ? "推演房间" : page === "monitor" ? "服务器监控" : "安全设置";
     if (page === "rooms") loadRooms().catch((error) => toast(error.message, true));
-    if (page === "monitor") loadMonitor(true);
+    if (page === "monitor") {
+      loadMonitor(true);
+      if (state.aiHistory.listState === "idle") loadAiHistory({ reset: true, showError: true });
+    }
   }));
 
-  $("monitorRefresh").addEventListener("click", () => loadMonitor(true));
+  $("monitorRefresh").addEventListener("click", () => {
+    loadMonitor(true);
+    loadAiHistory({ reset: true, showError: true });
+  });
   $("monitorFilter").addEventListener("change", () => loadMonitor(true));
+  $("aiHistoryRefresh")?.addEventListener("click", () => loadAiHistory({ reset: true, showError: true }));
+  $("aiHistoryStatusFilter")?.addEventListener("change", () => loadAiHistory({ reset: true, showError: true }));
+  $("aiHistoryLoadMore")?.addEventListener("click", () => loadAiHistory({ reset: false, showError: true }));
+  ["aiProvider", "aiModel", "aiScheme", "aiHost", "aiPort"].forEach((id) => {
+    const field = $(id);
+    field?.addEventListener("input", () => { state.aiConfigDirty = true; $("aiConfigState").className = "config-state state-dirty"; $("aiConfigState").textContent = "有未保存修改"; });
+    field?.addEventListener("change", () => { state.aiConfigDirty = true; $("aiConfigState").className = "config-state state-dirty"; $("aiConfigState").textContent = "有未保存修改"; });
+  });
+  $("aiConfigForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (state.aiConfigSaving) return;
+    state.monitorRequestGeneration += 1;
+    state.aiConfigSaving = true;
+    renderAiConfiguration(state.overview?.aiConfig || {}, state.overview?.aiStatus || {});
+    try {
+      const data = await api("/api/admin/ai-config", {
+        method: "PUT",
+        body: JSON.stringify({
+          provider: $("aiProvider").value,
+          model: $("aiModel").value.trim(),
+          ollama_scheme: $("aiScheme").value,
+          ollama_host: $("aiHost").value.trim(),
+          ollama_port: Number($("aiPort").value),
+        }),
+      });
+      state.aiConfigDirty = false;
+      state.aiConfigSaving = false;
+      state.overview = { ...(state.overview || {}), aiConfig: data.aiConfig };
+      renderMonitor();
+      toast(data.message || "AI 配置已保存");
+      await loadMonitor(true);
+    } catch (error) {
+      state.aiConfigSaving = false;
+      renderAiConfiguration(state.overview?.aiConfig || {}, state.overview?.aiStatus || {});
+      toast(error.message, true);
+    }
+  });
   $("terminalLoginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {

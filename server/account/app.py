@@ -8,9 +8,11 @@ import json
 import math
 import os
 import pty
+import re
 import secrets
 import sqlite3
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -23,10 +25,24 @@ from urllib.parse import urlsplit
 import anyio
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.websockets import WebSocketState
+
+_ACCOUNT_SERVICE_DIR = str(Path(__file__).resolve().parent)
+if _ACCOUNT_SERVICE_DIR not in sys.path:
+    sys.path.insert(0, _ACCOUNT_SERVICE_DIR)
+
+from ai_conversation_monitor import (
+    ConversationQuery,
+    InvalidConversationId,
+    InvalidConversationStatus,
+    InvalidMonitorCursor,
+    get_conversation,
+    list_conversations,
+)
+from ai_conversation_monitor_models import ConversationDetailResponse, ConversationPage
 
 
 class ConfigurationError(RuntimeError):
@@ -80,6 +96,48 @@ def parse_trusted_proxy_networks(
     )
 
 
+def normalize_ollama_host(value: str) -> str:
+    candidate = value.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    if not candidate or any(character in candidate for character in "\r\n/?#@"):
+        raise ValueError("Ollama 地址无效")
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?", candidate) is None:
+            raise ValueError("Ollama 地址必须是主机名或 IP 地址")
+    return candidate
+
+
+def ollama_base_url_parts(value: str) -> tuple[str, str, int]:
+    parsed = urlsplit(value.strip())
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Ollama 地址端口无效") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or port is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Ollama 地址必须是带端口的 http/https 地址")
+    return parsed.scheme, normalize_ollama_host(parsed.hostname), port
+
+
+def build_ollama_base_url(scheme: str, host: str, port: int) -> str:
+    normalized_host = normalize_ollama_host(host)
+    if scheme not in {"http", "https"} or not 1 <= port <= 65535:
+        raise ValueError("Ollama 协议或端口无效")
+    formatted_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+    return f"{scheme}://{formatted_host}:{port}"
+
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DB_PATH = DATA_DIR / "wargame.db"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -124,6 +182,32 @@ DEFAULT_SEAT_LIMITS = {
     "blue_commander": 1, "blue_attack": 2, "blue_recon": 1,
     "blue_ground": 2, "blue_jammer": 1,
 }
+DEFAULT_OLLAMA_BASE_URL: Final = "http://host.docker.internal:11434"
+DEFAULT_OLLAMA_MODEL: Final = "auto"
+LEGACY_OLLAMA_MODEL: Final = "qwen3.5:4b"
+
+
+def environment_ai_config() -> dict[str, str | int]:
+    provider = os.getenv("AI_PROVIDER", "auto").strip().lower() or "auto"
+    if provider not in {"rules", "auto", "ollama"}:
+        raise ConfigurationError("AI_PROVIDER 必须是 rules、auto 或 ollama")
+    try:
+        scheme, host, port = ollama_base_url_parts(
+            os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+        )
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    model = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL).strip()
+    if not model or len(model) > 128 or any(character in model for character in "\r\n"):
+        raise ConfigurationError("OLLAMA_MODEL 无效")
+    return {
+        "provider": provider,
+        "ollamaScheme": scheme,
+        "ollamaHost": host,
+        "ollamaPort": port,
+        "baseUrl": build_ollama_base_url(scheme, host, port),
+        "model": model,
+    }
 
 password_hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
 terminal_tickets: dict[str, tuple[int, str, float]] = {}
@@ -201,6 +285,8 @@ class RoomBody(BaseModel):
     seat_limits: dict[str, int] = Field(default_factory=dict)
     seat_parameters: dict[str, dict[str, float | int | bool]] = Field(default_factory=dict)
     enabled: bool = True
+    mode: Literal["pvp", "pve"] = "pvp"
+    ai_difficulty: Literal["easy", "normal", "hard"] = "normal"
 
     @field_validator("room_id", "name", "description", "scenario_id", mode="before")
     @classmethod
@@ -218,6 +304,7 @@ class RoomBody(BaseModel):
             if key.endswith("_commander") and count != 1:
                 raise ValueError("红蓝双方指挥官数量必须固定为 1")
         return value
+
 
     @field_validator("seat_parameters")
     @classmethod
@@ -238,6 +325,33 @@ class RoomBody(BaseModel):
                     raise ValueError(f"{name} 必须是数值")
                 if parameter < 0 or parameter > 1_000_000:
                     raise ValueError(f"{name} 必须在 0 到 1000000 米之间")
+        return value
+
+
+class AiConfigBody(BaseModel):
+    provider: Literal["rules", "auto", "ollama"] = "auto"
+    ollama_scheme: Literal["http", "https"] = "http"
+    ollama_host: str = Field(min_length=1, max_length=253)
+    ollama_port: int = Field(ge=1, le=65535)
+    model: str = Field(min_length=1, max_length=128)
+
+    @field_validator("ollama_host", mode="before")
+    @classmethod
+    def strip_ollama_host(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        return normalize_ollama_host(value)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def strip_model(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("model")
+    @classmethod
+    def validate_model_name(cls, value: str) -> str:
+        if any(character in value for character in "\r\n"):
+            raise ValueError("模型名称不能包含换行")
         return value
 
 
@@ -349,6 +463,9 @@ def initialize_database() -> None:
                 scenario_id TEXT NOT NULL DEFAULT 'default',
                 seat_limits TEXT NOT NULL DEFAULT '{}',
                 seat_parameters TEXT NOT NULL DEFAULT '{}',
+                mode TEXT NOT NULL DEFAULT 'pvp',
+                ai_difficulty TEXT NOT NULL DEFAULT 'normal',
+                config_version INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'stopped',
                 winner TEXT NOT NULL DEFAULT '',
                 status_reason TEXT NOT NULL DEFAULT '',
@@ -357,6 +474,14 @@ def initialize_database() -> None:
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_rooms_enabled ON rooms(enabled, updated_at);
+            CREATE TABLE IF NOT EXISTS ai_config (
+                config_id INTEGER PRIMARY KEY CHECK(config_id = 1),
+                provider TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                config_version INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS room_operations (
                 operation_id TEXT PRIMARY KEY,
                 room_id TEXT NOT NULL,
@@ -448,9 +573,20 @@ def initialize_database() -> None:
         for name, declaration in (
             ("winner", "TEXT NOT NULL DEFAULT ''"),
             ("status_reason", "TEXT NOT NULL DEFAULT ''"),
+            ("mode", "TEXT NOT NULL DEFAULT 'pvp'"),
+            ("ai_difficulty", "TEXT NOT NULL DEFAULT 'normal'"),
+            ("config_version", "INTEGER NOT NULL DEFAULT 1"),
         ):
             if name not in room_columns:
                 db.execute(f"ALTER TABLE rooms ADD COLUMN {name} {declaration}")
+        db.execute(
+            "UPDATE rooms SET mode='pvp' WHERE mode NOT IN ('pvp', 'pve') OR mode IS NULL"
+        )
+        db.execute(
+            "UPDATE rooms SET ai_difficulty='normal' "
+            "WHERE ai_difficulty NOT IN ('easy', 'normal', 'hard') OR ai_difficulty IS NULL"
+        )
+        db.execute("UPDATE rooms SET config_version=1 WHERE config_version IS NULL OR config_version < 1")
         operation_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(room_operations)")
         }
@@ -516,11 +652,34 @@ def initialize_database() -> None:
         if db.execute("SELECT 1 FROM rooms WHERE room_id=?", (ACTIVE_GAME_ROOM_ID,)).fetchone() is None:
             now = iso_time(utc_now())
             db.execute(
-                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,status,enabled,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,config_version,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ACTIVE_GAME_ROOM_ID, "主推演室", "默认联网推演房间", "default",
                  json.dumps(DEFAULT_SEAT_LIMITS, ensure_ascii=False),
-                 json.dumps({}, ensure_ascii=False), "stopped", 1, now, now),
+                 json.dumps({}, ensure_ascii=False), "pvp", "normal", 1, "stopped", 1, now, now),
+            )
+        ai_config_row = db.execute(
+            "SELECT provider, base_url, model, config_version FROM ai_config WHERE config_id=1"
+        ).fetchone()
+        if ai_config_row is None:
+            config = environment_ai_config()
+            db.execute(
+                "INSERT INTO ai_config(config_id,provider,base_url,model,config_version,updated_at) "
+                "VALUES(1,?,?,?,?,?)",
+                (config["provider"], config["baseUrl"], config["model"], 1, iso_time(utc_now())),
+            )
+        elif (
+            ai_config_row["provider"] == "auto"
+            and ai_config_row["base_url"] == DEFAULT_OLLAMA_BASE_URL
+            and ai_config_row["model"] == LEGACY_OLLAMA_MODEL
+            and ai_config_row["config_version"] == 1
+        ):
+            db.execute(
+                "UPDATE ai_config SET model=?, config_version=config_version + 1, updated_at=? "
+                "WHERE config_id=1 AND provider='auto' AND base_url=? AND model=? "
+                "AND config_version=1",
+                (DEFAULT_OLLAMA_MODEL, iso_time(utc_now()), DEFAULT_OLLAMA_BASE_URL,
+                 LEGACY_OLLAMA_MODEL),
             )
         db.execute(
             "UPDATE room_operations SET state='failed', acknowledged_at=? "
@@ -796,6 +955,20 @@ def public_user(row: sqlite3.Row) -> dict:
     return result
 
 
+def public_ai_config(row: sqlite3.Row) -> dict:
+    scheme, host, port = ollama_base_url_parts(row["base_url"])
+    return {
+        "provider": row["provider"],
+        "model": row["model"],
+        "ollamaScheme": scheme,
+        "ollamaHost": host,
+        "ollamaPort": port,
+        "baseUrl": row["base_url"],
+        "configVersion": int(row["config_version"]),
+        "updatedAt": row["updated_at"],
+    }
+
+
 def public_room(row: sqlite3.Row) -> dict:
     def decode(value: str, fallback: object) -> object:
         try:
@@ -811,6 +984,9 @@ def public_room(row: sqlite3.Row) -> dict:
         "scenarioId": row["scenario_id"],
         "seatLimits": decode(row["seat_limits"], {}),
         "seatParameters": decode(row["seat_parameters"], {}),
+        "mode": row["mode"],
+        "aiDifficulty": row["ai_difficulty"],
+        "configVersion": int(row["config_version"]),
         "status": row["status"],
         "winner": row["winner"],
         "statusReason": row["status_reason"],
@@ -926,6 +1102,62 @@ def read_game_status() -> dict:
         return {}
 
 
+def redacted_ai_status(game_status: dict, configured_ai: dict | None = None) -> dict:
+    raw_ai = game_status.get("ai")
+    ai = raw_ai if isinstance(raw_ai, dict) else {}
+    raw_room = game_status.get("roomState")
+    room = raw_room if isinstance(raw_room, dict) else {}
+
+    def allowed_text(value: object, values: set[str]) -> str:
+        return value if isinstance(value, str) and value in values else "unknown"
+
+    def nonnegative_count(value: object) -> int:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    provider = allowed_text(ai.get("provider"), {"rules", "auto", "ollama"})
+    if provider == "unknown" and isinstance(configured_ai, dict):
+        provider = allowed_text(configured_ai.get("provider"), {"rules", "auto", "ollama"})
+    connection_status = allowed_text(
+        ai.get("connectionStatus"),
+        {"disabled", "checking", "connected", "model_missing", "unavailable", "timeout",
+         "http_error", "invalid_json", "schema_invalid", "response_too_large", "configuration_error"},
+    )
+    if connection_status == "unknown" and provider == "rules":
+        connection_status = "disabled"
+    model = ai.get("model") if isinstance(ai.get("model"), str) else ""
+    base_url = ai.get("baseUrl") if isinstance(ai.get("baseUrl"), str) else ""
+    if isinstance(configured_ai, dict):
+        model = model or str(configured_ai.get("model", ""))
+        base_url = base_url or str(configured_ai.get("baseUrl", ""))
+
+    return {
+        "active": room.get("roomMode") == "pve",
+        "provider": provider,
+        "model": model,
+        "baseUrl": base_url,
+        "effectiveEngine": allowed_text(ai.get("effectiveEngine"), {"rules", "ollama"}),
+        "connectionStatus": connection_status,
+        "configVersion": nonnegative_count(ai.get("configVersion")),
+        "configApplied": bool(ai.get("configApplied")),
+        "lastProbeAt": ai.get("lastProbeAt") if isinstance(ai.get("lastProbeAt"), str) else "",
+        "probeFailureClass": allowed_text(
+            ai.get("probeFailureClass"),
+            {"busy", "unavailable", "timeout", "http_error", "model_missing", "invalid_json",
+             "schema_invalid", "response_too_large", "configuration_error"},
+        ),
+        "requests": nonnegative_count(ai.get("requests")),
+        "successes": nonnegative_count(ai.get("successes")),
+        "failures": nonnegative_count(ai.get("failures")),
+        "lastFailureClass": allowed_text(
+            ai.get("lastFailureClass"),
+            {"rules_disabled", "busy", "unavailable", "timeout", "http_error", "model_missing",
+             "response_too_large", "invalid_json", "schema_invalid", "stale_response",
+             "configuration_error"},
+        ),
+        "stickyRules": bool(ai.get("stickyRules")),
+    }
+
+
 def room_ready_for_start(room_id: str) -> bool:
     """Wait for the next monitor snapshot when seat readiness just changed."""
     deadline = time.monotonic() + MONITOR_READY_WAIT_SECONDS
@@ -1003,6 +1235,10 @@ def read_monitor_events(category: str, limit: int) -> list[dict]:
             break
     output.reverse()
     return output
+
+
+def ai_conversation_history_root() -> Path:
+    return DATA_DIR / "ai-planning-history"
 
 
 @app.get("/")
@@ -1087,6 +1323,47 @@ def admin_me(admin: sqlite3.Row = Depends(require_admin)) -> dict:
     return {"username": admin["username"]}
 
 
+@app.get("/api/admin/ai-config")
+def admin_ai_config(_: sqlite3.Row = Depends(require_admin)) -> dict:
+    with database() as db:
+        row = db.execute("SELECT * FROM ai_config WHERE config_id=1").fetchone()
+    if row is None:
+        raise HTTPException(status_code=503, detail="AI 配置尚未初始化")
+    return {"aiConfig": public_ai_config(row)}
+
+
+@app.put("/api/admin/ai-config")
+def update_admin_ai_config(
+    body: AiConfigBody,
+    _: sqlite3.Row = Depends(require_admin),
+) -> dict:
+    try:
+        base_url = build_ollama_base_url(body.ollama_scheme, body.ollama_host, body.ollama_port)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with database() as db:
+        existing = db.execute("SELECT * FROM ai_config WHERE config_id=1").fetchone()
+        if existing is None:
+            raise HTTPException(status_code=503, detail="AI 配置尚未初始化")
+        changed = (
+            body.provider != existing["provider"]
+            or base_url != existing["base_url"]
+            or body.model != existing["model"]
+        )
+        version = int(existing["config_version"]) + (1 if changed else 0)
+        now = iso_time(utc_now())
+        db.execute(
+            "UPDATE ai_config SET provider=?,base_url=?,model=?,config_version=?,updated_at=? "
+            "WHERE config_id=1",
+            (body.provider, base_url, body.model, version, now),
+        )
+        row = db.execute("SELECT * FROM ai_config WHERE config_id=1").fetchone()
+    return {
+        "aiConfig": public_ai_config(row),
+        "message": "AI 配置已保存，游戏服务将在数秒内同步",
+    }
+
+
 @app.get("/api/admin/users")
 def list_users(_: sqlite3.Row = Depends(require_admin)) -> dict:
     with database() as db:
@@ -1138,14 +1415,20 @@ def kick_user_offline(
 @app.get("/api/admin/monitor/overview")
 def monitor_overview(_: sqlite3.Row = Depends(require_admin)) -> dict:
     game_status = read_game_status()
+    safe_game_status = dict(game_status)
+    safe_game_status.pop("ai", None)
     with database() as db:
+        ai_config_row = db.execute("SELECT * FROM ai_config WHERE config_id=1").fetchone()
         active_players = db.execute(
             "SELECT COUNT(*) FROM sessions WHERE subject_type='player' AND expires_at > ?",
             (iso_time(utc_now()),),
         ).fetchone()[0]
+    configured_ai = public_ai_config(ai_config_row) if ai_config_row is not None else None
     return {
         "accountStatus": "healthy",
-        "gameStatus": game_status or {"status": "unknown"},
+        "gameStatus": safe_game_status or {"status": "unknown"},
+        "aiConfig": configured_ai or {},
+        "aiStatus": redacted_ai_status(game_status, configured_ai),
         "activePlayerSessions": active_players,
         "recentConnections": len(read_monitor_events("connection", 200)),
         "recentMessages": len(read_monitor_events("message", 200)),
@@ -1161,6 +1444,39 @@ def monitor_events(
     if category not in {"all", "connection", "message", "server"}:
         raise HTTPException(status_code=422, detail="不支持的监控类别")
     return {"events": read_monitor_events(category, max(1, min(limit, 200)))}
+
+
+@app.get("/api/admin/monitor/ai-conversations", response_model=ConversationPage)
+def monitor_ai_conversations(
+    status: str = Query(default=""),
+    limit: int = Query(default=50, ge=1),
+    before: str | None = Query(default=None, max_length=512),
+    _: sqlite3.Row = Depends(require_admin),
+) -> ConversationPage:
+    try:
+        return list_conversations(
+            ai_conversation_history_root(),
+            ConversationQuery(status=status, limit=limit, before=before),
+        )
+    except (InvalidConversationStatus, InvalidMonitorCursor) as exc:
+        raise HTTPException(status_code=422, detail="监控历史查询参数无效") from exc
+
+
+@app.get(
+    "/api/admin/monitor/ai-conversations/{conversation_id}",
+    response_model=ConversationDetailResponse,
+)
+def monitor_ai_conversation_detail(
+    conversation_id: str,
+    _: sqlite3.Row = Depends(require_admin),
+) -> ConversationDetailResponse:
+    try:
+        result = get_conversation(ai_conversation_history_root(), conversation_id)
+    except InvalidConversationId as exc:
+        raise HTTPException(status_code=422, detail="会话标识无效") from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return result
 
 
 @app.post("/api/admin/monitor/terminal/login")
@@ -1496,11 +1812,12 @@ def create_room(body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict
     try:
         with database() as db:
             db.execute(
-                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,status,enabled,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,config_version,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (body.room_id, body.name, body.description, body.scenario_id,
                  json.dumps(body.seat_limits, ensure_ascii=False),
-                 json.dumps(body.seat_parameters, ensure_ascii=False), "stopped", int(body.enabled), now, now),
+                 json.dumps(body.seat_parameters, ensure_ascii=False), body.mode,
+                 body.ai_difficulty, 1, "stopped", int(body.enabled), now, now),
             )
             row = db.execute("SELECT * FROM rooms WHERE room_id=?", (body.room_id,)).fetchone()
     except sqlite3.IntegrityError as exc:
@@ -1516,14 +1833,41 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
         existing = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
         if existing is None:
             raise HTTPException(status_code=404, detail="房间不存在")
+        mode_changed = "mode" in body.model_fields_set and body.mode != existing["mode"]
+        difficulty_changed = (
+            "ai_difficulty" in body.model_fields_set
+            and body.ai_difficulty != existing["ai_difficulty"]
+        )
         if existing["status"] == "running":
             raise HTTPException(status_code=409, detail="推演进行中不能修改房间配置")
+        if (mode_changed or difficulty_changed) and existing["status"] != "stopped":
+            raise HTTPException(status_code=409, detail="只有停止状态才能修改房间模式或 AI 强度")
+        mode = body.mode if "mode" in body.model_fields_set else existing["mode"]
+        ai_difficulty = (
+            body.ai_difficulty
+            if "ai_difficulty" in body.model_fields_set
+            else existing["ai_difficulty"]
+        )
+        config_version = int(existing["config_version"])
+        changed = (
+            body.name != existing["name"]
+            or body.description != existing["description"]
+            or body.scenario_id != existing["scenario_id"]
+            or body.seat_limits != json.loads(existing["seat_limits"])
+            or body.seat_parameters != json.loads(existing["seat_parameters"])
+            or bool(body.enabled) != bool(existing["enabled"])
+            or mode != existing["mode"]
+            or ai_difficulty != existing["ai_difficulty"]
+        )
+        if changed:
+            config_version += 1
         now = iso_time(utc_now())
         db.execute(
-            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,enabled=?,updated_at=? WHERE room_id=?",
+            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,mode=?,ai_difficulty=?,config_version=?,enabled=?,updated_at=? WHERE room_id=?",
             (body.name, body.description, body.scenario_id,
              json.dumps(body.seat_limits, ensure_ascii=False),
-             json.dumps(body.seat_parameters, ensure_ascii=False), int(body.enabled), now, room_id),
+             json.dumps(body.seat_parameters, ensure_ascii=False), mode, ai_difficulty,
+             config_version, int(body.enabled), now, room_id),
         )
         row = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
     return {"room": public_room(row)}
@@ -1694,6 +2038,7 @@ def internal_rooms(x_internal_key: str | None = Header(default=None)) -> dict:
         raise HTTPException(status_code=403, detail="内部认证失败")
     with database() as db:
         rows = room_rows(db, True)
+        ai_config_row = db.execute("SELECT * FROM ai_config WHERE config_id=1").fetchone()
         kicks = db.execute(
             "SELECT id, room_id, user_id, reason, requested_at FROM room_kick_requests "
             "WHERE processed_at IS NULL ORDER BY requested_at LIMIT 128"
@@ -1704,6 +2049,7 @@ def internal_rooms(x_internal_key: str | None = Header(default=None)) -> dict:
         ).fetchall()
     return {
         "rooms": [public_room(row) for row in rows],
+        "aiConfig": public_ai_config(ai_config_row) if ai_config_row is not None else {},
         "kickRequests": [{"id": row["id"], "roomId": row["room_id"], "userId": row["user_id"],
                           "reason": row["reason"], "requestedAt": row["requested_at"]} for row in kicks],
         "logoutRequests": [{"id": row["id"], "userId": row["user_id"], "reason": row["reason"],

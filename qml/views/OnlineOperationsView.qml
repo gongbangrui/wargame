@@ -50,7 +50,9 @@ Item {
 
     signal openChatRequested()
 
-    property bool isCommander: root.controller && root.controller.currentSeatType === "commander"
+    property bool isHumanControlledSeat: root.controller && (root.controller.roomMode !== "pve"
+        || root.controller.currentSeatSide === "red")
+    property bool isCommander: root.isHumanControlledSeat && root.controller.currentSeatType === "commander"
     property bool canDeploy: root.isCommander && root.controller.matchPhase === "preparing"
                             && root.deploymentTargetSeatId.length > 0 && root.deployUnitId.length > 0
     property var selectedUnitSnapshot: {
@@ -146,15 +148,28 @@ Item {
              : root.dim
     }
     function roomCanJoin(room) {
-        return room && room.hostedByGameServer === true && room.status === "preparing"
+        return room && room.enabled !== false && room.hostedByGameServer === true
+                && room.status === "preparing"
+    }
+    function roomCanObserve(room) {
+        return room && room.enabled !== false && room.hostedByGameServer === true
+                && ["preparing", "running", "paused", "finished"].indexOf(room.status) >= 0
+    }
+    function roomConfigurationLabel() {
+        if (root.controller.roomMode === "pve") {
+            var labels = { easy: "简单", normal: "普通", hard: "困难" }
+            return "人机对抗 · " + (labels[root.controller.aiDifficulty] || "普通")
+                    + " · 配置 v" + root.controller.configVersion
+        }
+        return "人人对抗 · 配置 v" + root.controller.configVersion
     }
     function orderedRooms() {
         var rooms = (root.controller.onlineRooms || []).filter(function(room) {
             return room && room.roomId
         })
         rooms.sort(function(a, b) {
-            var aJoinable = root.roomCanJoin(a) ? 0 : 1
-            var bJoinable = root.roomCanJoin(b) ? 0 : 1
+            var aJoinable = root.roomCanJoin(a) ? 0 : root.roomCanObserve(a) ? 1 : 2
+            var bJoinable = root.roomCanJoin(b) ? 0 : root.roomCanObserve(b) ? 1 : 2
             if (aJoinable !== bJoinable) return aJoinable - bJoinable
             return String(a.name || a.roomId).localeCompare(String(b.name || b.roomId))
         })
@@ -171,7 +186,9 @@ Item {
         return null
     }
     function canClaimSeat(seat) {
-        if (!seat || seat.occupied || root.controller.matchPhase !== "preparing") return false
+        if (!seat || seat.occupied || seat.controllerType === "ai"
+                || root.controller.matchPhase !== "preparing") return false
+        if (root.controller.roomMode === "pve" && seat.side !== "red") return false
         if (root.switchSeatSelection) {
             return !root.switchRequestPending && seat.side === root.controller.currentSeatSide
                     && seat.seatType !== "commander"
@@ -184,6 +201,7 @@ Item {
         return true
     }
     function seatHint(seat) {
+        if (seat.controllerType === "ai") return "AI 控制"
         if (seat.occupied) return seat.displayName || "已占用"
         if (root.switchSeatSelection && seat.side !== root.controller.currentSeatSide)
             return "只能申请本方战位"
@@ -197,6 +215,7 @@ Item {
     }
     function seatStatusLabel(seat) {
         if (!seat.occupied) return "空缺"
+        if (seat.controllerType === "ai") return seat.deployed ? "AI 执行中" : "AI 已就位"
         if (seat.pendingTransfer) return "交接中"
         if (!seat.connected) return "失联"
         if (!seat.deployed) return seat.seatType === "commander" ? "待选指挥所" : "等待指挥官部署"
@@ -205,6 +224,7 @@ Item {
     }
     function seatStatusColor(seat) {
         if (!seat.occupied) return root.dim
+        if (seat.controllerType === "ai") return seat.deployed ? root.cyan : root.info
         if (seat.pendingTransfer || !seat.deployed) return root.orange
         if (!seat.connected) return root.danger
         if (seat.ready) return root.cyan
@@ -257,6 +277,11 @@ Item {
         return ids
     }
     function deployedFriendlyUnits() {
+        if (root.controller.isObserver) {
+            return (root.controller.units || []).filter(function(unit) {
+                return unit && unit.alive
+            })
+        }
         var deployed = root.deployedUnitIds()
         return (root.controller.units || []).filter(function(unit) {
             return unit.alive && unit.side === root.controller.currentSeatSide
@@ -354,7 +379,13 @@ Item {
         }
     }
     function selectUnit(unit) {
-        if (!unit || unit.side !== root.controller.currentSeatSide) return
+        if (!unit) return
+        if (root.controller.isObserver) {
+            root.selectedUnitId = unit.id
+            root.attackTargetId = ""
+            return
+        }
+        if (unit.side !== root.controller.currentSeatSide) return
         var ownSeat = root.seatById(root.controller.currentSeatId)
         if (!root.isCommander && ownSeat && ownSeat.unitId && ownSeat.unitId !== unit.id) return
         root.selectedUnitId = unit.id
@@ -773,8 +804,8 @@ Item {
             RowLayout {
                 Layout.fillWidth: true; Layout.preferredHeight: 54; spacing: 14
                 ColumnLayout { Layout.fillWidth: true; spacing: 2
-                Text { Layout.fillWidth: true; text: root.controller.onlineStage === "roomSelect" ? "选择推演房间" : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? "选择战位" : "联网实战席"; color: root.ink; font.pixelSize: root.compactLayout ? 20 : 23; font.bold: true; elide: Text.ElideRight }
-                Text { Layout.fillWidth: true; text: root.controller.currentRoomId ? root.controller.currentRoomId : "选择准备中的房间"; color: root.dim; font.pixelSize: 12; elide: Text.ElideRight }
+                Text { Layout.fillWidth: true; text: root.controller.onlineStage === "roomSelect" ? "选择推演房间" : root.controller.isObserver ? "只读观战" : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? "选择战位" : "联网实战席"; color: root.ink; font.pixelSize: root.compactLayout ? 20 : 23; font.bold: true; elide: Text.ElideRight }
+                Text { Layout.fillWidth: true; text: root.controller.currentRoomId ? root.controller.currentRoomId + " · " + root.roomConfigurationLabel() : "选择准备中的房间"; color: root.dim; font.pixelSize: 12; elide: Text.ElideRight }
             }
             Rectangle { Layout.preferredWidth: root.compactLayout ? 148 : 180; Layout.preferredHeight: 34; color: root.panelAlt; border.color: root.line; radius: 5
                 RowLayout { anchors.fill: parent; anchors.margins: 8; spacing: 8
@@ -785,7 +816,7 @@ Item {
         }
 
         Rectangle {
-            visible: root.controller.onlineStage === "deployment" || root.controller.onlineStage === "battle"
+            visible: root.controller.onlineStage === "deployment" || root.controller.onlineStage === "battle" || root.controller.onlineStage === "observer"
             Layout.fillWidth: true
             Layout.preferredHeight: visible ? 42 : 0
             color: root.panel
@@ -802,18 +833,18 @@ Item {
                     Behavior on color { ColorAnimation { duration: 220 } }
                 }
                 Text {
-                    text: root.controller.matchPhase === "running" ? "推演执行中" : root.controller.matchPhase === "finished" ? "推演已结束" : "部署准备阶段"
+                    text: root.controller.isObserver ? (root.controller.matchPhase === "running" ? "观战 · 推演执行中" : root.controller.matchPhase === "finished" ? "观战 · 推演已结束" : root.controller.matchPhase === "paused" ? "观战 · 推演暂停" : "观战 · 准备阶段") : root.controller.matchPhase === "running" ? "推演执行中" : root.controller.matchPhase === "finished" ? "推演已结束" : "部署准备阶段"
                     color: root.ink; font.pixelSize: 11; font.bold: true
                 }
                 Item { Layout.fillWidth: true }
                 Text {
-                    visible: root.isCommander && root.controller.matchPhase === "preparing"
+                    visible: !root.controller.isObserver && root.isCommander && root.controller.matchPhase === "preparing"
                     text: "待部署 " + root.pendingDeploymentSeats().length
                     color: root.pendingDeploymentSeats().length > 0 ? root.orange : root.cyan
                     font.pixelSize: 10; font.bold: true
                 }
                 Text {
-                    text: "战位 " + root.controller.currentSeatId
+                    text: root.controller.isObserver ? "只读观察" : "战位 " + root.controller.currentSeatId
                     color: root.dim; font.pixelSize: 10; font.family: "Consolas"
                 }
             }
@@ -825,9 +856,9 @@ Item {
                 ColumnLayout { anchors.centerIn: parent; width: Math.min(parent.width - 40, 760); spacing: 14
                     Text { text: "可用推演室"; color: root.ink; font.pixelSize: 16; font.bold: true }
                     ListView { id: roomList; Layout.fillWidth: true; Layout.preferredHeight: Math.min(430, Math.max(130, contentHeight)); spacing: 8; model: root.orderedRooms(); clip: true
-                    delegate: Button { id: roomDelegate; required property var modelData; required property int index; width: roomList.width; height: 72; padding: 0; hoverEnabled: true; focusPolicy: Qt.TabFocus; enabled: root.roomCanJoin(roomDelegate.modelData); Accessible.name: (enabled ? "进入" : roomDelegate.modelData.hostedByGameServer === true ? "不可进入" : "未托管，不可进入") + roomDelegate.modelData.name; onClicked: root.controller.joinOnlineRoom(roomDelegate.modelData.roomId)
-                            Component.onCompleted: if (roomDelegate.index === 0) Qt.callLater(roomDelegate.forceActiveFocus)
-                            contentItem: RowLayout { anchors.fill: parent; anchors.margins: 14; spacing: 14
+                    delegate: Rectangle { id: roomDelegate; required property var modelData; required property int index; width: roomList.width; height: 72; color: roomHover.hovered ? root.panelAlt : root.panel; border.color: roomHover.hovered ? root.cyan : root.line; radius: 6
+                            HoverHandler { id: roomHover }
+                            RowLayout { anchors.fill: parent; anchors.margins: 14; spacing: 14
                                 Rectangle { Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: 18; color: roomDelegate.modelData.status === "running" ? root.panelAlt : root.panel
                                     Text { anchors.centerIn: parent; text: roomDelegate.modelData.status === "running" ? "战" : "室"; color: root.cyan; font.bold: true }
                                 }
@@ -835,12 +866,22 @@ Item {
                                     Text { Layout.fillWidth: true; text: roomDelegate.modelData.name; color: root.ink; font.bold: true; font.pixelSize: 14; elide: Text.ElideRight }
                                     Text { Layout.fillWidth: true; text: roomDelegate.modelData.roomId; color: root.dim; font.family: "Consolas"; font.pixelSize: 11; elide: Text.ElideRight }
                                 }
-                                ColumnLayout { spacing: 2
+                                ColumnLayout { Layout.preferredWidth: 112; spacing: 2
                                     Text { text: root.roomStatusLabel(roomDelegate.modelData.status); color: root.roomStatusColor(roomDelegate.modelData.status); font.pixelSize: 11; font.bold: true }
-                                    Text { text: roomDelegate.modelData.hostedByGameServer === true ? "可进入" : "未托管"; color: root.dim; font.pixelSize: 9 }
+                                    Text { text: roomDelegate.modelData.hostedByGameServer === true ? (root.roomCanObserve(roomDelegate.modelData) ? "可加入或观战" : "不可用") : "未托管"; color: root.dim; font.pixelSize: 9 }
+                                }
+                                ColumnLayout { Layout.preferredWidth: 76; spacing: 4
+                                    Button { id: joinRoomButton; visible: root.roomCanJoin(roomDelegate.modelData); enabled: visible; text: "加入"; Accessible.name: "加入" + roomDelegate.modelData.name; onClicked: root.controller.joinOnlineRoom(roomDelegate.modelData.roomId)
+                                        contentItem: Text { text: joinRoomButton.text; color: joinRoomButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
+                                        background: Rectangle { color: joinRoomButton.enabled ? root.cyan : root.line; radius: 4 }
+                                    }
+                                    Button { id: observeRoomButton; visible: root.roomCanObserve(roomDelegate.modelData); enabled: visible; text: "观战"; Accessible.name: "观战" + roomDelegate.modelData.name; onClicked: root.controller.observeOnlineRoom(roomDelegate.modelData.roomId)
+                                        contentItem: Text { text: observeRoomButton.text; color: observeRoomButton.enabled ? root.cyan : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                        background: Rectangle { color: observeRoomButton.hovered ? root.panelAlt : "transparent"; border.color: observeRoomButton.enabled ? root.cyan : root.line; radius: 4 }
+                                    }
+                                    Text { visible: !joinRoomButton.visible && !observeRoomButton.visible; text: "不可用"; color: root.dim; font.pixelSize: 9; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
                                 }
                             }
-                            background: Rectangle { color: roomDelegate.down ? root.page : roomDelegate.hovered ? root.panelAlt : root.panel; border.color: roomDelegate.hovered || roomDelegate.visualFocus ? root.cyan : root.line; radius: 6 }
                         }
                     }
                     Text { visible: roomList.count === 0; text: "暂无房间"; color: root.dim; font.pixelSize: 11; Layout.alignment: Qt.AlignHCenter }
@@ -900,8 +941,9 @@ Item {
             Item {
                     GridLayout { id: battleLayout; anchors.fill: parent; columns: root.compactLayout ? 1 : 2; columnSpacing: 12; rowSpacing: 12
                     Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 420; Layout.preferredWidth: root.compactLayout ? -1 : Math.max(420, battleLayout.width - 368); Layout.minimumHeight: root.compactLayout ? 250 : 0; Layout.preferredHeight: root.compactLayout ? Math.max(260, battleLayout.height * 0.52) : -1; color: root.panel; border.color: root.line; radius: 6
-                        MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.currentSeatSide || "red"; showAllSides: false; visibleUnitIds: root.deployedUnitIds(); detectedEnemyIds: root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: true; showCommRange: root.showCommunicationRange; showDetectRange: root.showDetectionRange; showAttackRange: root.showAttackRange; rangeUnitIds: root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.participantMapMarkers(); selectedMapMarkerId: root.selectedCommandMarkerId
+                        MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; visibleUnitIds: root.controller.isObserver ? null : root.deployedUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId
                             onClickedMap: function(point) {
+                                if (root.controller.isObserver) return
                                 if (root.canDeploy) {
                                     root.controller.deployOnlineUnit(root.deployUnitId, point)
                                     root.deploymentState = "submitting"
@@ -915,6 +957,7 @@ Item {
                                 }
                             }
                             onRightClickedMap: function(point) {
+                                if (root.controller.isObserver) return
                                 if (root.controller.matchPhase === "running") {
                                     var recipients = root.mapMarkRecipientSeats()
                                     root.controller.markOnlineMap(point,
@@ -930,7 +973,9 @@ Item {
                             onUnitClicked: function(unitId, button) {
                                 var unit = root.controller.unitAt(unitId)
                                 if (!unit) return
-                                if (unit.side === root.controller.currentSeatSide) {
+                                if (root.controller.isObserver) {
+                                    root.selectUnit(unit)
+                                } else if (unit.side === root.controller.currentSeatSide) {
                                     root.selectUnit(unit)
                                 } else if (root.isCommander && commanderCommandPanel.awaitingAttackTarget) {
                                     commanderCommandPanel.mapTargetSelected(unitId)
@@ -942,10 +987,12 @@ Item {
                                 }
                             }
                             onGuideSourceChanged: function(unitId) {
+                                if (root.controller.isObserver) return
                                 var unit = root.controller.unitAt(unitId)
                                 if (unit) root.selectUnit(unit)
                             }
                             onGuidePointPicked: function(point) {
+                                if (root.controller.isObserver) return
                                 if (!root.commanderPointSelectionActive) return
                                 root.commanderPointSelectionActive = false
                                 onlineCanvas.stopGuideMode()
@@ -953,12 +1000,14 @@ Item {
                                 onlineCanvas.pulseActionAt(point, root.cyan)
                             }
                             onGuideCancelled: {
+                                if (root.controller.isObserver) return
                                 if (!root.commanderPointSelectionActive) return
                                 root.commanderPointSelectionActive = false
                                 commanderCommandPanel.mapSelectionCanceled()
                                 root.deploymentNotice = "已取消地图选点，未发送命令。"
                             }
                             onMapMarkerClicked: function(marker) {
+                                if (root.controller.isObserver) return
                                 if (!root.isCommander && marker && marker.category === "command")
                                     root.selectedCommandMarkerId = marker.id || ""
                             }
@@ -1005,7 +1054,7 @@ Item {
                             }
                             RowLayout { Layout.fillWidth: true; spacing: 8
                                 Item { Layout.fillWidth: true }
-                                Button { id: switchSeatButton; text: "切换战位"; visible: root.controller.currentSeatType !== "commander" && root.controller.matchPhase === "preparing"; enabled: !root.switchRequestPending; onClicked: switchSeatConfirmation.open()
+                                Button { id: switchSeatButton; text: "切换战位"; visible: !root.controller.isObserver && root.controller.currentSeatType !== "commander" && root.controller.matchPhase === "preparing"; enabled: !root.switchRequestPending; onClicked: switchSeatConfirmation.open()
                                     contentItem: Text { text: switchSeatButton.text; color: root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
                                     background: Rectangle { color: switchSeatButton.hovered ? root.panelAlt : "transparent"; border.color: root.line; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
                                 }
@@ -1034,7 +1083,7 @@ Item {
                                 Item { visible: root.isCommander; Layout.fillWidth: true }
                                 Button {
                                     id: openInboxButton
-                                    visible: root.isCommander
+                                    visible: !root.controller.isObserver && root.isCommander
                                     text: "实时收件箱 · " + root.controller.chatMessages.length
                                     Accessible.name: "打开指挥官实时通信收件箱"
                                     onClicked: root.openChatRequested()
@@ -1043,7 +1092,7 @@ Item {
                                 }
                             }
                             ColumnLayout {
-                                visible: root.controller.matchPhase === "running"
+                                visible: !root.controller.isObserver && root.controller.matchPhase === "running"
                                          && root.visibleMapMarkFeed().length > 0
                                 Layout.fillWidth: true
                                 spacing: 6
@@ -1100,7 +1149,7 @@ Item {
                                 }
                             }
                             Rectangle {
-                                visible: !root.isCommander
+                                visible: !root.controller.isObserver && !root.isCommander
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? subordinateComposer.implicitHeight + 16 : 0
                                 color: root.panelAlt; border.color: root.subordinateCanSend() ? root.line : root.orange; radius: 5
@@ -1146,7 +1195,7 @@ Item {
                                 }
                             }
                             Rectangle {
-                                visible: root.isCommander && root.controller.matchPhase === "preparing"
+                                visible: !root.controller.isObserver && root.isCommander && root.controller.matchPhase === "preparing"
                                          && (root.controller.pendingSeatTransfers.length > 0
                                              || root.pendingRedeploySeats().length > 0)
                                 Layout.fillWidth: true
@@ -1205,7 +1254,7 @@ Item {
                             }
                             CommandPanel {
                                 id: commanderCommandPanel
-                                visible: root.isCommander && root.controller.matchPhase === "running"
+                                visible: !root.controller.isObserver && root.isCommander && root.controller.matchPhase === "running"
                                 Layout.fillWidth: true
                                 controller: root.controller
                                 selectedUnitId: root.selectedUnitId
@@ -1221,7 +1270,7 @@ Item {
                                 onPointSelectionCancelled: root.cancelCommanderPointSelection()
                             }
                             Rectangle {
-                                visible: !root.isCommander && root.controller.matchPhase === "running"
+                                visible: !root.controller.isObserver && !root.isCommander && root.controller.matchPhase === "running"
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? participantFeedColumn.implicitHeight + 18 : 0
                                 color: root.panelAlt; border.color: root.line; radius: 5
@@ -1272,7 +1321,7 @@ Item {
                                 }
                             }
                             Rectangle {
-                                visible: root.controller.matchPhase === "preparing"
+                                visible: !root.controller.isObserver && root.controller.matchPhase === "preparing"
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? deploymentPanel.implicitHeight + 18 : 0
                                 color: "#111f2a"; border.color: root.deploymentState === "waiting" ? root.orange : root.line; radius: 5
@@ -1327,12 +1376,13 @@ Item {
                                 Behavior on border.color { ColorAnimation { duration: 180 } }
                             }
                             RowLayout {
-                                visible: root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander"
+                                visible: !root.controller.isObserver && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander")
                                 Layout.fillWidth: true
                                 Text { Layout.fillWidth: true; text: root.isCommander ? "标点 / 情报接收战位" : "情报接收战位"; color: root.dim; font.pixelSize: 10 }
                                 Text { text: root.selectedRecipientIds.length + " 已选"; color: root.selectedRecipientIds.length > 0 ? root.cyan : root.orange; font.pixelSize: 9 }
                             }
                             Flow {
+                                visible: !root.controller.isObserver
                                 Layout.fillWidth: true
                                 spacing: 6
                                 CheckBox { id: communicationRangeToggle; text: "通信范围"; checked: root.showCommunicationRange; Accessible.name: "显示选中单位的通信范围"; onToggled: root.showCommunicationRange = checked
@@ -1349,7 +1399,7 @@ Item {
                                 }
                             }
                             Flow {
-                                visible: root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander"
+                                visible: !root.controller.isObserver && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander")
                                 Layout.fillWidth: true; spacing: 5
                                 Repeater {
                                     model: root.controller.onlineSeats || []
@@ -1364,7 +1414,7 @@ Item {
                                     }
                                 }
                             }
-                            Text { text: "已部署友方单位"; color: root.dim; font.pixelSize: 10 }
+                            Text { text: root.controller.isObserver ? "战场单位" : "已部署友方单位"; color: root.dim; font.pixelSize: 10 }
                             Text { visible: root.deployedFriendlyUnits().length === 0; text: "当前没有已部署单位"; color: root.dim; font.pixelSize: 10 }
                             ListView { id: friendlyUnitList; visible: count > 0; Layout.fillWidth: true; Layout.preferredHeight: visible ? Math.min(180, Math.max(38, contentHeight)) : 0; model: root.deployedFriendlyUnits(); clip: true; spacing: 4
                                 delegate: Rectangle { id: friendlyDelegate; required property var modelData; width: friendlyUnitList.width; height: 38; color: root.selectedUnitId === friendlyDelegate.modelData.id ? root.panelAlt : root.panel; border.color: root.selectedUnitId === friendlyDelegate.modelData.id ? root.cyan : "transparent"; radius: 4; visible: friendlyDelegate.modelData.alive
@@ -1389,7 +1439,9 @@ Item {
                             }
                             ComboBox {
                                 id: intelTargetBox
-                                visible: (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander") && root.controller.matchPhase === "running"
+                                visible: !root.controller.isObserver
+                                         && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander")
+                                         && root.controller.matchPhase === "running"
                                 Layout.fillWidth: true
                                 model: root.controller.unitStateRevision >= 0
                                     ? root.controller.detectedEnemyOptions(root.selectedUnitId, root.controller.currentSeatSide, root.controller.currentSeatSide === "red" ? "blue" : "red") : []
@@ -1399,14 +1451,14 @@ Item {
                                 background: Rectangle { color: "#0b151c"; border.color: root.line; radius: 4 }
                                 contentItem: Text { text: intelTargetBox.currentText || "选择要共享的敌情"; color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; font.pixelSize: 10 }
                             }
-                            Button { id: shareIntelButton; visible: root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander"; Layout.fillWidth: true; text: "共享选定敌情"; enabled: intelTargetBox.count > 0 && root.recipientSeats().length > 0
+                            Button { id: shareIntelButton; visible: !root.controller.isObserver && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander"); Layout.fillWidth: true; text: "共享选定敌情"; enabled: intelTargetBox.count > 0 && root.recipientSeats().length > 0
                                 onClicked: root.controller.shareOnlineIntel(intelTargetBox.currentValue, root.recipientSeats(), "手动共享敌情")
                                 contentItem: Text { text: shareIntelButton.text; color: root.cyan; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
                                 background: Rectangle { color: shareIntelButton.enabled ? root.panelAlt : root.line; border.color: root.line; radius: 4 }
                             }
                             ComboBox {
                                 id: targetBox
-                                visible: root.controller.currentSeatType === "attack" && root.controller.matchPhase === "running"
+                                visible: !root.controller.isObserver && root.controller.currentSeatType === "attack" && root.controller.matchPhase === "running"
                                 Layout.fillWidth: true
                                 model: root.controller.unitStateRevision >= 0
                                     ? root.controller.detectedEnemyOptions(root.selectedUnitId, root.controller.currentSeatSide, root.controller.currentSeatSide === "red" ? "blue" : "red") : []
@@ -1418,7 +1470,7 @@ Item {
                             }
                             ColumnLayout {
                                 id: attackControl
-                                visible: root.controller.currentSeatType === "attack" && root.controller.matchPhase === "running"
+                                visible: !root.controller.isObserver && root.controller.currentSeatType === "attack" && root.controller.matchPhase === "running"
                                 Layout.fillWidth: true; spacing: 5
                                 property var selectedAttackUnit: root.selectedUnitSnapshot
                                 property real cooldownRemaining: Number(selectedAttackUnit.cooldownRemaining || 0)
@@ -1451,7 +1503,7 @@ Item {
                                 }
                             }
                             ColumnLayout {
-                                visible: !root.isCommander && root.controller.matchPhase === "running"
+                                visible: !root.controller.isObserver && !root.isCommander && root.controller.matchPhase === "running"
                                 Layout.fillWidth: true
                                 spacing: 5
                                 Text { text: "本单位移动速度"; color: root.dim; font.pixelSize: 10 }
@@ -1485,7 +1537,7 @@ Item {
                                     background: Rectangle { color: root.panel; border.color: applyUnitSpeedButton.enabled ? root.cyan : root.line; radius: 4 }
                                 }
                             }
-                            Button { id: commanderReadyButton; visible: root.controller.currentSeatType === "commander"; Layout.fillWidth: true; enabled: root.canDeploy ? onlineCanvas.pointerInside : (root.seatById(root.controller.currentSeatId) || ({})).deployed === true && (root.controller.seatReady || root.friendlySeatsReady()); text: root.canDeploy ? "确认当前位置部署指挥所" : root.controller.seatReady ? "取消指挥官就绪" : enabled ? "确认指挥官就绪" : root.friendlySeatsReady() ? "请先部署指挥所" : "等待本方单位部署并就绪"; onClicked: {
+                            Button { id: commanderReadyButton; visible: !root.controller.isObserver && root.controller.currentSeatType === "commander"; Layout.fillWidth: true; enabled: root.canDeploy ? onlineCanvas.pointerInside : (root.seatById(root.controller.currentSeatId) || ({})).deployed === true && (root.controller.seatReady || root.friendlySeatsReady()); text: root.canDeploy ? "确认当前位置部署指挥所" : root.controller.seatReady ? "取消指挥官就绪" : enabled ? "确认指挥官就绪" : root.friendlySeatsReady() ? "请先部署指挥所" : "等待本方单位部署并就绪"; onClicked: {
                                     if (root.canDeploy) {
                                         var point = onlineCanvas.pointerLogicalPos
                                         root.controller.deployOnlineUnit(root.deployUnitId, point)
@@ -1500,13 +1552,13 @@ Item {
                                 contentItem: Text { text: commanderReadyButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
                                 background: Rectangle { color: commanderReadyButton.enabled ? (root.controller.seatReady ? root.orange : root.cyan) : root.line; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
                             }
-                            Button { id: participantReadyButton; visible: root.controller.currentSeatType !== "commander"; Layout.fillWidth: true; enabled: (root.seatById(root.controller.currentSeatId) || ({})).deployed === true; text: root.controller.seatReady ? "取消战位就绪" : enabled ? "确认部署并就绪" : "等待指挥官部署"; onClicked: root.controller.setSeatReady(!root.controller.seatReady)
+                            Button { id: participantReadyButton; visible: !root.controller.isObserver && root.controller.currentSeatType !== "commander"; Layout.fillWidth: true; enabled: (root.seatById(root.controller.currentSeatId) || ({})).deployed === true; text: root.controller.seatReady ? "取消战位就绪" : enabled ? "确认部署并就绪" : "等待指挥官部署"; onClicked: root.controller.setSeatReady(!root.controller.seatReady)
                                 contentItem: Text { text: participantReadyButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
                                 background: Rectangle { color: participantReadyButton.enabled ? (root.controller.seatReady ? root.orange : root.cyan) : root.line; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
                             }
                             Button {
                                 id: redeployRequestButton
-                                visible: root.controller.currentSeatType !== "commander" && root.controller.matchPhase === "preparing"
+                                visible: !root.controller.isObserver && root.controller.currentSeatType !== "commander" && root.controller.matchPhase === "preparing"
                                 Layout.fillWidth: true
                                 property var ownSeat: root.seatById(root.controller.currentSeatId) || ({})
                                 enabled: ownSeat.deployed === true && !ownSeat.redeployRequested
@@ -1517,7 +1569,7 @@ Item {
                             }
                             TextField {
                                 id: unitNameField
-                                visible: root.controller.matchPhase === "preparing" && root.controller.currentSeatId !== ""
+                                visible: !root.controller.isObserver && root.controller.matchPhase === "preparing" && root.controller.currentSeatId !== ""
                                 Layout.fillWidth: true
                                 placeholderText: "本单位画布显示名称"
                                 maximumLength: 128

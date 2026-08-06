@@ -479,6 +479,51 @@ TEST(SimulationControllerTest, PreparingSnapshotWithoutCurrentSeatReturnsToSeatS
     EXPECT_EQ(controller.onlineStage(), QStringLiteral("seatSelect"));
 }
 
+TEST(SimulationControllerTest, PveSnapshotPublishesAuthorizedConfigurationAndAiSeat) {
+    SimulationController controller;
+    SimulationControllerTestPeer::seedActiveOnlineRoom(controller);
+    Scenario projected = controller.engine()->scenario();
+    projected.units.clear();
+    const QJsonObject snapshot{
+        {QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+        {QStringLiteral("stateRevision"), 1},
+        {QStringLiteral("scenario"), ScenarioIo::toJson(projected)},
+        {QStringLiteral("units"), QJsonArray{}},
+        {QStringLiteral("messages"), QJsonArray{}},
+        {QStringLiteral("mapMarks"), QJsonArray{}},
+        {QStringLiteral("roomState"),
+         QJsonObject{{QStringLiteral("phase"), QStringLiteral("preparing")},
+                     {QStringLiteral("roomId"), QStringLiteral("main")},
+                     {QStringLiteral("roomMode"), QStringLiteral("pve")},
+                     {QStringLiteral("aiDifficulty"), QStringLiteral("hard")},
+                     {QStringLiteral("configVersion"), 7},
+                     {QStringLiteral("scenarioRevision"), 2},
+                     {QStringLiteral("simTime"), 0.0},
+                     {QStringLiteral("running"), false},
+                     {QStringLiteral("speed"), 1.0},
+                     {QStringLiteral("seats"), QJsonArray{QJsonObject{
+                         {QStringLiteral("seatId"), QStringLiteral("red_commander")},
+                         {QStringLiteral("seatType"), QStringLiteral("commander")},
+                         {QStringLiteral("side"), QStringLiteral("red")},
+                         {QStringLiteral("occupied"), true},
+                         {QStringLiteral("controllerType"), QStringLiteral("human")}},
+                         QJsonObject{{QStringLiteral("seatId"), QStringLiteral("blue_commander")},
+                                     {QStringLiteral("seatType"), QStringLiteral("commander")},
+                                     {QStringLiteral("side"), QStringLiteral("blue")},
+                                     {QStringLiteral("occupied"), true},
+                                     {QStringLiteral("controllerType"), QStringLiteral("ai")}}}}}}};
+
+    SimulationControllerTestPeer::applyOnlineSnapshot(controller, snapshot);
+
+    EXPECT_EQ(controller.property("roomMode").toString(), QStringLiteral("pve"));
+    EXPECT_EQ(controller.property("aiDifficulty").toString(), QStringLiteral("hard"));
+    EXPECT_EQ(controller.property("configVersion").toLongLong(), 7);
+    const QVariantList seats = controller.onlineSeats();
+    ASSERT_EQ(seats.size(), 2);
+    EXPECT_EQ(seats.at(1).toMap().value(QStringLiteral("controllerType")).toString(),
+              QStringLiteral("ai"));
+}
+
 TEST(SimulationControllerTest, RoomDirectoryAfterLeaveClearsStaleSeatState) {
     SimulationController controller;
     SimulationControllerTestPeer::seedActiveOnlineRoom(controller);

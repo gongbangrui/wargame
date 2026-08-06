@@ -36,6 +36,11 @@ EOF
 chmod +x "$BIN_DIR/docker" "$BIN_DIR/curl"
 
 archive="$WORK_DIR/wargame-server-fixture.tar.gz"
+grep -Fqx 'AI_PROVIDER=auto' "$ROOT_DIR/deploy/.env.example"
+grep -Fqx 'OLLAMA_BASE_URL=http://host.docker.internal:11434' "$ROOT_DIR/deploy/.env.example"
+grep -Fqx 'OLLAMA_MODEL=auto' "$ROOT_DIR/deploy/.env.example"
+grep -Fqx '      OLLAMA_MODEL: "${OLLAMA_MODEL:-auto}"' "$ROOT_DIR/deploy/compose.yml"
+grep -Fqx 'OLLAMA_MODEL="auto"' <(sed -n '1,80p' "$ROOT_DIR/deploy/install-server.sh")
 tar -C "$ROOT_DIR" \
     --exclude='server/account/*.db*' \
     --exclude='server/account/*.log' \
@@ -81,6 +86,7 @@ grep -Fqx 'WARGAME_FASTDDS_MODE=disabled' "$install_root/.env"
 grep -Fqx 'FASTDDS_DOMAIN_ID=0' "$install_root/.env"
 grep -Fqx 'FASTDDS_DISCOVERY_TIMEOUT_MS=5000' "$install_root/.env"
 grep -Fqx 'FASTDDS_STATIC_PEERS=' "$install_root/.env"
+grep -Fqx "OLLAMA_MODEL='auto'" "$install_root/.env"
 grep -Fq -- "--project-name fixture" "$DOCKER_LOG"
 grep -Fq -- "-f $install_root/current/deploy/compose.yml" "$DOCKER_LOG"
 
@@ -96,6 +102,12 @@ sed -i \
     -e 's/^FASTDDS_DOMAIN_ID=.*/FASTDDS_DOMAIN_ID=7/' \
     -e 's/^FASTDDS_DISCOVERY_TIMEOUT_MS=.*/FASTDDS_DISCOVERY_TIMEOUT_MS=1200/' \
     -e 's/^FASTDDS_STATIC_PEERS=.*/FASTDDS_STATIC_PEERS=10.0.0.2:7400/' \
+    -e 's/^AI_PROVIDER=.*/AI_PROVIDER=ollama/' \
+    -e 's#^OLLAMA_BASE_URL=.*#OLLAMA_BASE_URL=\x27http://127.0.0.1:11434\x27#' \
+    -e 's/^OLLAMA_MODEL=.*/OLLAMA_MODEL=\x27explicit-model\x27/' \
+    -e 's/^OLLAMA_CONNECT_TIMEOUT_MS=.*/OLLAMA_CONNECT_TIMEOUT_MS=1200/' \
+    -e 's/^OLLAMA_TIMEOUT_MS=.*/OLLAMA_TIMEOUT_MS=12000/' \
+    -e 's/^OLLAMA_MAX_RESPONSE_BYTES=.*/OLLAMA_MAX_RESPONSE_BYTES=32768/' \
     "$install_root/.env"
 run_installer --reuse-admin-password --no-reset-admin
 second_digest="$(sed -n 's/^WARGAME_SOURCE_DIGEST=//p' "$install_root/.env" | head -n1)"
@@ -106,6 +118,12 @@ grep -Fqx 'WARGAME_FASTDDS_MODE=disabled' "$install_root/.env"
 grep -Fqx 'FASTDDS_DOMAIN_ID=7' "$install_root/.env"
 grep -Fqx 'FASTDDS_DISCOVERY_TIMEOUT_MS=1200' "$install_root/.env"
 grep -Fqx 'FASTDDS_STATIC_PEERS=10.0.0.2:7400' "$install_root/.env"
+grep -Fqx 'AI_PROVIDER=ollama' "$install_root/.env"
+grep -Fqx "OLLAMA_BASE_URL='http://127.0.0.1:11434'" "$install_root/.env"
+grep -Fqx "OLLAMA_MODEL='explicit-model'" "$install_root/.env"
+grep -Fqx 'OLLAMA_CONNECT_TIMEOUT_MS=1200' "$install_root/.env"
+grep -Fqx 'OLLAMA_TIMEOUT_MS=12000' "$install_root/.env"
+grep -Fqx 'OLLAMA_MAX_RESPONSE_BYTES=32768' "$install_root/.env"
 
 if NO_BUILD_IMAGE_MISSING=1 run_installer --reuse-admin-password --no-reset-admin --no-build; then
     printf '%s\n' '--no-build accepted a missing release-tagged image' >&2

@@ -17,7 +17,10 @@ Item {
     activeFocusOnTab: true
     // 联网推演的开停、速率和单步由网页管理员控制；本地模式保持原有席位控制。
     property bool simulationControlAllowed: !root.controller.networked
-    property bool unitControlAllowed: !root.controller.networked || (root.controller.currentSeatId !== "" && root.controller.matchPhase === "running")
+    property bool unitControlAllowed: !root.controller.networked
+        || (!root.controller.isObserver
+            && root.controller.currentSeatId !== ""
+            && root.controller.matchPhase === "running")
     property bool directorCanStart: !root.controller.networked
     property var activePage: pageLoader.item
     property int chatLastSeenCount: 0
@@ -111,7 +114,7 @@ Item {
             if (canvas) canvas.setTrackingTarget("", "")
             if (root.controller.focusedUnitId) root.controller.command("halt", { unitId: root.controller.focusedUnitId })
         }
-        enabled: root.controller.viewMode !== "editor"
+        enabled: !root.controller.isObserver && root.controller.viewMode !== "editor"
     }
 
     // ── Settings state (loaded from QSettings) ──
@@ -361,7 +364,7 @@ Item {
                 visible: !root.compactTopBar; text: "快捷键"; onClicked: shortcutHelpDialog.open()
             }
             GhostButton {
-                visible: root.controller.networked && !root.compactTopBar
+                visible: root.controller.networked && !root.controller.isObserver && !root.compactTopBar
                 text: {
                     var base = root.controller.currentSeatType === "commander"
                         ? "收件箱 · " + root.controller.chatMessages.length : "通信"
@@ -447,8 +450,10 @@ Item {
                  && ((!root.controller.networked && root.controller.sessionMode !== "unselected")
                      || (root.controller.networked
                          && (root.controller.onlineStage === "deployment"
-                             || root.controller.onlineStage === "battle")))
+                             || root.controller.onlineStage === "battle"
+                             || root.controller.onlineStage === "observer")))
         sideFilter: {
+            if (root.controller.isObserver) return ""
             if (root.controller.viewMode === "commandpost-red") return "red"
             if (root.controller.viewMode === "commandpost-blue") return "blue"
             return ""
@@ -479,6 +484,10 @@ Item {
     }
 
     function refreshDetectedEnemies() {
+        if (root.controller.isObserver) {
+            miniMap.detectedEnemies = []
+            return
+        }
         var msgs = root.controller.messages
         var cache = {}
         for (var i = 0; i < Math.min(msgs.length, 60); i++) {
@@ -502,6 +511,9 @@ Item {
     Connections {
         target: root.controller
         function onMessagesForward() { root.refreshDetectedEnemies() }
+        function onOnlineStateChanged() {
+            if (root.controller.isObserver && chatPanel.visible) chatPanel.close()
+        }
     }
 
     Component.onCompleted: {

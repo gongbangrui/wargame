@@ -34,6 +34,7 @@ public:
     void sendChat(const QString& text, const QStringList& recipientSeatIds = {});
     void requestRooms();
     void joinRoom(const QString& roomId);
+    void observeRoom(const QString& roomId);
     void claimSeat(const QString& seatId);
     void approveSeatTransfer(const QString& seatId, qint64 userId, qint64 requestedRevision);
     void rejectSeatTransfer(const QString& seatId, qint64 userId, qint64 requestedRevision);

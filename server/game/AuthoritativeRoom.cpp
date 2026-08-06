@@ -29,6 +29,184 @@ QStringList seatParts(const QString& seatId) {
 AuthoritativeRoom::AuthoritativeRoom(quint64 rngSeed)
     : m_rngState(rngSeed == 0 ? 1 : rngSeed) {}
 
+quint64 AuthoritativeRoom::deterministicSeed(const QString& value, quint64 generation) {
+    quint64 hash = 1469598103934665603ULL ^ generation;
+    for (const QChar character : value) {
+        hash ^= static_cast<quint64>(character.unicode());
+        hash *= 1099511628211ULL;
+    }
+    return hash == 0 ? 1 : hash;
+}
+
+AuthoritativeRoom::Result AuthoritativeRoom::setMode(const QString& mode) {
+    if (m_phase != QLatin1String("preparing")) return failure(QStringLiteral("SEAT_LOCKED"));
+    if (mode != QLatin1String("pvp") && mode != QLatin1String("pve")) {
+        return failure(QStringLiteral("INVALID_ROOM_MODE"));
+    }
+    if (m_mode == mode) {
+        return mode == QLatin1String("pve") ? syncAiRoster()
+                                             : Result{true, {}, m_revision, true};
+    }
+    m_mode = mode;
+    if (m_mode == QLatin1String("pvp")) {
+        QStringList aiSeats;
+        for (const Seat& seat : m_seats) {
+            if (seat.controllerType == QLatin1String("ai")) aiSeats.append(seat.seatId);
+        }
+        for (const QString& seatId : aiSeats) m_seats.remove(seatId);
+        return success();
+    }
+    const Result roster = syncAiRoster();
+    if (!roster.ok) return roster;
+    return roster;
+}
+
+AuthoritativeRoom::Result AuthoritativeRoom::installAiSeat(const QString& seatId,
+                                                           const QString& templateId) {
+    QString side;
+    QString type;
+    if (!validSeatTemplate(seatId, templateId, &side, &type)
+        || side != QLatin1String("blue")) {
+        return failure(QStringLiteral("INVALID_AI_SEAT"));
+    }
+    if (m_seats.contains(seatId)
+        && m_seats.value(seatId).controllerType != QLatin1String("ai")) {
+        return failure(QStringLiteral("SIDE_RESERVED_FOR_AI"));
+    }
+    const Seat existing = m_seats.value(seatId);
+    if (existing.controllerType == QLatin1String("ai")
+        && existing.selectedTemplate == templateId) {
+        return Result{true, {}, m_revision, true};
+    }
+    Seat seat;
+    seat.seatId = seatId;
+    seat.seatType = type;
+    seat.side = side;
+    seat.userId = 0;
+    seat.humanUserId = 0;
+    seat.username = QStringLiteral("AI");
+    seat.controllerType = QStringLiteral("ai");
+    seat.controllerId = QStringLiteral("ai:%1").arg(seatId);
+    seat.selectedTemplate = templateId;
+    seat.unitId = type == QLatin1String("commander")
+        ? QStringLiteral("blue_cp") : allocateUnitId(side, templateId);
+    seat.position = {};
+    seat.connected = true;
+    seat.deployed = false;
+    seat.ready = false;
+    seat.revision = m_revision + 1;
+    m_seats.insert(seatId, seat);
+    return success();
+}
+
+AuthoritativeRoom::Result AuthoritativeRoom::syncAiRoster() {
+    if (m_mode != QLatin1String("pve")) return Result{true, {}, m_revision, true};
+    if (m_phase != QLatin1String("preparing")) return failure(QStringLiteral("SEAT_LOCKED"));
+    const QJsonObject before = toJson();
+    const Result commander = installAiSeat(QStringLiteral("blue_commander"),
+                                           QStringLiteral("commandpost"));
+    if (!commander.ok) return commander;
+
+    QSet<QString> desired{QStringLiteral("blue_commander")};
+    QStringList redSeats = m_seats.keys();
+    std::sort(redSeats.begin(), redSeats.end());
+    for (const QString& redSeatId : redSeats) {
+        const Seat redSeat = m_seats.value(redSeatId);
+        if (redSeat.side != QLatin1String("red")
+            || redSeat.seatType == QLatin1String("commander")
+            || redSeat.controllerType != QLatin1String("human")) continue;
+        const QString blueSeatId = QStringLiteral("blue_")
+            + redSeatId.mid(QStringLiteral("red_").size());
+        desired.insert(blueSeatId);
+        const Result installed = installAiSeat(blueSeatId, redSeat.selectedTemplate);
+        if (!installed.ok) return installed;
+    }
+    QStringList stale;
+    for (const Seat& seat : m_seats) {
+        if (seat.controllerType == QLatin1String("ai") && !desired.contains(seat.seatId)) {
+            stale.append(seat.seatId);
+        }
+    }
+    for (const QString& seatId : stale) m_seats.remove(seatId);
+    if (before == toJson()) return Result{true, {}, m_revision, true};
+    for (auto it = m_seats.begin(); it != m_seats.end(); ++it) {
+        it->ready = false;
+        it->revision = m_revision + 1;
+    }
+    return success();
+}
+
+bool AuthoritativeRoom::validAiPosition(const GeoPos& position, double mapWidth,
+                                        double mapHeight,
+                                        const QHash<QString, GeoPos>& placements) const {
+    if (!std::isfinite(position.x) || !std::isfinite(position.y)
+        || position.x < 0.0 || position.y < 0.0
+        || position.x > mapWidth || position.y > mapHeight) return false;
+    constexpr double kMinimumSpacing = 80.0;
+    for (const GeoPos& other : placements) {
+        const double dx = position.x - other.x;
+        const double dy = position.y - other.y;
+        if (std::hypot(dx, dy) < kMinimumSpacing) return false;
+    }
+    return true;
+}
+
+AuthoritativeRoom::Result AuthoritativeRoom::deployAiSeats(double mapWidth, double mapHeight,
+                                                           quint64 matchGeneration) {
+    if (m_mode != QLatin1String("pve") || m_phase != QLatin1String("preparing")) {
+        return failure(QStringLiteral("SEAT_LOCKED"));
+    }
+    if (!std::isfinite(mapWidth) || !std::isfinite(mapHeight)
+        || mapWidth <= 0.0 || mapHeight <= 0.0) {
+        return failure(QStringLiteral("AI_DEPLOYMENT_FAILED"));
+    }
+    const QJsonObject before = toJson();
+    QHash<QString, GeoPos> placements;
+    for (const Seat& seat : m_seats) {
+        if (seat.controllerType != QLatin1String("ai") && seat.deployed) {
+            placements.insert(seat.seatId, seat.position);
+        }
+    }
+    QStringList aiSeats;
+    for (const Seat& seat : m_seats) {
+        if (seat.controllerType == QLatin1String("ai")) aiSeats.append(seat.seatId);
+    }
+    std::sort(aiSeats.begin(), aiSeats.end());
+    for (const QString& seatId : aiSeats) {
+        const Seat current = m_seats.value(seatId);
+        const ScenarioUnit templateUnit = m_templates.value(current.selectedTemplate);
+        GeoPos candidate = templateUnit.pos;
+        bool placed = validAiPosition(candidate, mapWidth, mapHeight, placements);
+        if (!placed) {
+            quint64 seed = deterministicSeed(current.controllerId, matchGeneration);
+            for (int attempt = 0; attempt < 64 && !placed; ++attempt) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                candidate.x = std::fmod(static_cast<double>(seed % 1000000ULL) / 1000000.0
+                                            * mapWidth,
+                                        mapWidth);
+                candidate.y = std::fmod(static_cast<double>((seed >> 20) % 1000000ULL)
+                                            / 1000000.0 * mapHeight,
+                                        mapHeight);
+                candidate.alt = templateUnit.pos.alt;
+                placed = validAiPosition(candidate, mapWidth, mapHeight, placements);
+            }
+        }
+        if (!placed) {
+            restore(before);
+            return failure(QStringLiteral("AI_DEPLOYMENT_FAILED"));
+        }
+        Seat& seat = m_seats[seatId];
+        seat.position = candidate;
+        seat.deployed = true;
+        seat.ready = true;
+        seat.revision = m_revision + 1;
+        placements.insert(seatId, candidate);
+    }
+    return success();
+}
+
 QHash<QString, ScenarioUnit> AuthoritativeRoom::defaultTemplateCatalog() {
     QHash<QString, ScenarioUnit> catalog;
     for (const ScenarioUnit& unit : ScenarioIo::defaultScenario().units) {
@@ -64,14 +242,22 @@ AuthoritativeRoom::Result AuthoritativeRoom::success() {
 }
 
 QString AuthoritativeRoom::seatForUser(qint64 userId) const {
+    if (userId <= 0) return {};
     for (auto it = m_seats.cbegin(); it != m_seats.cend(); ++it) {
-        if (it->userId == userId) return it.key();
+        if (it->controllerType == QLatin1String("human") && it->userId == userId) {
+            return it.key();
+        }
     }
     return {};
 }
 
 bool AuthoritativeRoom::hasUser(qint64 userId) const {
     return !seatForUser(userId).isEmpty();
+}
+
+bool AuthoritativeRoom::isAiSeat(const QString& seatId) const {
+    return m_seats.contains(seatId)
+        && m_seats.value(seatId).controllerType == QLatin1String("ai");
 }
 
 bool AuthoritativeRoom::validSeatTemplate(const QString& seatId, const QString& templateId,
@@ -107,6 +293,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
     if (!validSeatTemplate(seatId, templateId, &side, &type)) {
         return failure(QStringLiteral("INVALID_TEMPLATE"));
     }
+    if (m_mode == QLatin1String("pve") && side == QLatin1String("blue")) {
+        return failure(QStringLiteral("SIDE_RESERVED_FOR_AI"));
+    }
     if (m_seats.contains(seatId) && m_seats.value(seatId).userId != userId) {
         return failure(QStringLiteral("SEAT_OCCUPIED"));
     }
@@ -123,8 +312,19 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
     if (!current.isEmpty() && current != seatId) return failure(QStringLiteral("TRANSFER_REQUIRED"));
     if (current == seatId) return Result{true, {}, m_revision, true};
 
-    Seat seat{seatId, type, side, userId, username, templateId,
-              allocateUnitId(side, templateId), {}, {}, true, false, false, m_revision + 1};
+    Seat seat;
+    seat.seatId = seatId;
+    seat.seatType = type;
+    seat.side = side;
+    seat.userId = userId;
+    seat.humanUserId = userId;
+    seat.username = username;
+    seat.controllerType = QStringLiteral("human");
+    seat.controllerId = QString::number(userId);
+    seat.selectedTemplate = templateId;
+    seat.unitId = allocateUnitId(side, templateId);
+    seat.connected = true;
+    seat.revision = m_revision + 1;
     m_seats.insert(seatId, seat);
     if (type != QLatin1String("commander")) {
         const QString commanderSeatId = side + QStringLiteral("_commander");
@@ -134,7 +334,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
         }
     }
     m_departedUsers.remove(userId);
-    return success();
+    const Result result = success();
+    return m_mode == QLatin1String("pve") && side == QLatin1String("red")
+        ? syncAiRoster() : result;
 }
 
 AuthoritativeRoom::Result AuthoritativeRoom::requestTransfer(qint64 userId,
@@ -244,7 +446,8 @@ AuthoritativeRoom::Result AuthoritativeRoom::approveTransfer(qint64 commanderUse
     seat.pendingTransfer = false;
     seat.revision = m_revision + 1;
     m_seats.insert(seat.seatId, seat);
-    return success();
+    const Result result = success();
+    return m_mode == QLatin1String("pve") ? syncAiRoster() : result;
 }
 
 AuthoritativeRoom::Result AuthoritativeRoom::promote(qint64 commanderUserId,
@@ -287,6 +490,11 @@ AuthoritativeRoom::Result AuthoritativeRoom::promote(qint64 commanderUserId,
     m_departedUsers.insert(commanderUserId);
     Result result = success();
     result.successorUserId = successorUserId;
+    if (m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")) {
+        const Result roster = syncAiRoster();
+        if (!roster.ok) return roster;
+        result.revision = roster.revision;
+    }
     return result;
 }
 
@@ -300,7 +508,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::leave(qint64 userId, qint64 success
     m_seats.remove(current);
     m_transfers.remove(userId);
     m_departedUsers.insert(userId);
-    return success();
+    const Result result = success();
+    return m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")
+        ? syncAiRoster() : result;
 }
 
 AuthoritativeRoom::Result AuthoritativeRoom::leaveRoom(qint64 userId) {
@@ -313,13 +523,17 @@ AuthoritativeRoom::Result AuthoritativeRoom::leaveRoom(qint64 userId) {
     if (m_phase != QLatin1String("preparing")) return failure(QStringLiteral("SUCCESSOR_REQUIRED"));
     m_seats.remove(current);
     m_departedUsers.insert(userId);
-    return success();
+    const Result result = success();
+    return m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")
+        ? syncAiRoster() : result;
 }
 
 qint64 AuthoritativeRoom::chooseSuccessor(const QString& side) {
     QList<qint64> candidates;
     for (const Seat& seat : m_seats) {
-        if (seat.side == side && seat.seatType != QLatin1String("commander") && seat.connected) {
+        if (seat.controllerType == QLatin1String("human") && seat.userId > 0
+            && seat.side == side && seat.seatType != QLatin1String("commander")
+            && seat.connected) {
             candidates.append(seat.userId);
         }
     }
@@ -343,7 +557,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::disconnect(qint64 userId) {
     if (m_phase == QLatin1String("preparing")) {
         m_seats.remove(current);
         m_departedUsers.insert(userId);
-        return success();
+        const Result result = success();
+        return m_mode == QLatin1String("pve")
+            ? syncAiRoster() : result;
     }
     if (m_phase == QLatin1String("finished")) return Result{true, {}, m_revision, true};
     m_seats.remove(current);
@@ -540,8 +756,15 @@ AuthoritativeRoom::Result AuthoritativeRoom::applyOperation(const QString& opera
     m_phase = QStringLiteral("preparing");
     m_winner.clear();
     m_transfers.clear();
-    if (action == QLatin1String("reset")) m_seats.clear();
-    else clearDeployment();
+    if (action == QLatin1String("reset")) {
+        m_seats.clear();
+        if (m_mode == QLatin1String("pve")) {
+            const Result roster = syncAiRoster();
+            if (!roster.ok) return roster;
+        }
+    } else {
+        clearDeployment();
+    }
     Result result = success();
     m_operations.insert(operationId, result);
     m_operationOrder.append(operationId);
@@ -557,6 +780,9 @@ bool AuthoritativeRoom::removeUser(qint64 userId) {
     m_seats.remove(current);
     m_transfers.remove(userId);
     ++m_revision;
+    if (m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")) {
+        syncAiRoster();
+    }
     return true;
 }
 
@@ -595,7 +821,10 @@ QJsonArray AuthoritativeRoom::seatProjection() const {
                                  {QStringLiteral("seatType"), seat.seatType},
                                  {QStringLiteral("side"), seat.side},
                                  {QStringLiteral("userId"), seat.userId},
+                                 {QStringLiteral("humanUserId"), seat.humanUserId},
                                  {QStringLiteral("username"), seat.username},
+                                 {QStringLiteral("controllerType"), seat.controllerType},
+                                 {QStringLiteral("controllerId"), seat.controllerId},
                                  {QStringLiteral("occupied"), true},
                                  {QStringLiteral("connected"), seat.connected},
                                  {QStringLiteral("commander"), seat.seatType == QLatin1String("commander")},
@@ -643,6 +872,7 @@ QJsonObject AuthoritativeRoom::toJson() const {
                                       static_cast<qint64>(transfer.revision)}});
     }
     return {{QStringLiteral("schemaVersion"), 1},
+            {QStringLiteral("mode"), m_mode},
             {QStringLiteral("phase"), m_phase},
             {QStringLiteral("winner"), m_winner},
             {QStringLiteral("revision"), static_cast<qint64>(m_revision)},
@@ -659,8 +889,11 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
     const qint64 nextUnit = object.value(QStringLiteral("nextUnitSequence")).toInteger();
     const qint64 rng = object.value(QStringLiteral("rngState")).toInteger();
     const QString phase = object.value(QStringLiteral("phase")).toString();
+    const QString mode = object.contains(QStringLiteral("mode"))
+        ? object.value(QStringLiteral("mode")).toString() : QStringLiteral("pvp");
     if (object.value(QStringLiteral("schemaVersion")).toInt() != 1 || revision <= 0
         || nextUnit <= 0 || rng <= 0
+        || (mode != QLatin1String("pvp") && mode != QLatin1String("pve"))
         || (phase != QLatin1String("preparing") && phase != QLatin1String("running")
             && phase != QLatin1String("paused") && phase != QLatin1String("finished"))) {
         if (error) *error = QStringLiteral("invalid authoritative room state");
@@ -669,29 +902,42 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
     QHash<QString, Seat> seats;
     for (const QJsonValue& value : object.value(QStringLiteral("seats")).toArray()) {
         const QJsonObject item = value.toObject();
-        Seat seat{item.value(QStringLiteral("seatId")).toString(),
-                  item.value(QStringLiteral("seatType")).toString(),
-                  item.value(QStringLiteral("side")).toString(),
-                  item.value(QStringLiteral("userId")).toInteger(),
-                  item.value(QStringLiteral("username")).toString(),
-                  item.value(QStringLiteral("selectedTemplate")).toString(),
-                  item.value(QStringLiteral("unitId")).toString(),
-                  item.value(QStringLiteral("unitName")).toString(),
-                  GeoPos{item.value(QStringLiteral("position")).toObject()
-                             .value(QStringLiteral("x")).toDouble(),
-                         item.value(QStringLiteral("position")).toObject()
-                             .value(QStringLiteral("y")).toDouble(),
-                         item.value(QStringLiteral("position")).toObject()
-                             .value(QStringLiteral("alt")).toDouble()},
-                  item.value(QStringLiteral("connected")).toBool(),
-                  item.value(QStringLiteral("deployed")).toBool(),
-                  item.value(QStringLiteral("ready")).toBool(),
-                  static_cast<quint64>(item.value(QStringLiteral("revision")).toInteger()),
-                  item.value(QStringLiteral("pendingTransfer")).toBool(),
-                  item.value(QStringLiteral("redeployRequested")).toBool()};
+        Seat seat;
+        seat.seatId = item.value(QStringLiteral("seatId")).toString();
+        seat.seatType = item.value(QStringLiteral("seatType")).toString();
+        seat.side = item.value(QStringLiteral("side")).toString();
+        seat.userId = item.value(QStringLiteral("userId")).toInteger();
+        seat.humanUserId = item.contains(QStringLiteral("humanUserId"))
+            ? item.value(QStringLiteral("humanUserId")).toInteger() : seat.userId;
+        seat.username = item.value(QStringLiteral("username")).toString();
+        seat.controllerType = item.contains(QStringLiteral("controllerType"))
+            ? item.value(QStringLiteral("controllerType")).toString() : QStringLiteral("human");
+        seat.controllerId = item.contains(QStringLiteral("controllerId"))
+            ? item.value(QStringLiteral("controllerId")).toString()
+            : QString::number(seat.userId);
+        seat.selectedTemplate = item.value(QStringLiteral("selectedTemplate")).toString();
+        seat.unitId = item.value(QStringLiteral("unitId")).toString();
+        seat.unitName = item.value(QStringLiteral("unitName")).toString();
+        const QJsonObject position = item.value(QStringLiteral("position")).toObject();
+        seat.position = GeoPos{position.value(QStringLiteral("x")).toDouble(),
+                               position.value(QStringLiteral("y")).toDouble(),
+                               position.value(QStringLiteral("alt")).toDouble()};
+        seat.connected = item.value(QStringLiteral("connected")).toBool();
+        seat.deployed = item.value(QStringLiteral("deployed")).toBool();
+        seat.ready = item.value(QStringLiteral("ready")).toBool();
+        seat.revision = static_cast<quint64>(item.value(QStringLiteral("revision")).toInteger());
+        seat.pendingTransfer = item.value(QStringLiteral("pendingTransfer")).toBool();
+        seat.redeployRequested = item.value(QStringLiteral("redeployRequested")).toBool();
         QString side;
         QString type;
-        if (seat.userId <= 0 || seats.contains(seat.seatId)
+        const bool ai = seat.controllerType == QLatin1String("ai");
+        if ((ai && (seat.userId != 0 || seat.humanUserId != 0
+                    || seat.controllerId.trimmed().isEmpty()))
+            || (!ai && (seat.userId <= 0 || seat.humanUserId != seat.userId
+                        || seat.controllerId.trimmed().isEmpty()))
+            || (seat.controllerType != QLatin1String("human")
+                && seat.controllerType != QLatin1String("ai"))
+            || seats.contains(seat.seatId)
             || !validSeatTemplate(seat.seatId, seat.selectedTemplate, &side, &type)
             || side != seat.side || type != seat.seatType || (seat.ready && !seat.deployed)) {
             if (error) *error = QStringLiteral("invalid persisted seat state");
@@ -701,6 +947,7 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
     }
     m_seats = seats;
     m_phase = phase;
+    m_mode = mode;
     m_winner = object.value(QStringLiteral("winner")).toString();
     m_revision = static_cast<quint64>(revision);
     m_nextUnitSequence = static_cast<quint64>(nextUnit);

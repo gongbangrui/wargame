@@ -225,15 +225,16 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             spacing: 10
-            visible: root.interactionEnabled && root.snap.alive && root.snap.movable === true
+            visible: root.snap.speed !== undefined
             Text { text: "\u901f\u5ea6"; color: t.muted; font.pixelSize: 11; renderType: Text.NativeRendering }
             Rectangle {
-                Layout.preferredWidth: 104; implicitHeight: 26; radius: 4
+                Layout.preferredWidth: root.interactionEnabled ? 104 : 66; implicitHeight: 26; radius: 4
                 color: "#141b24"; border.color: "#2a3142"
                 RowLayout {
                     anchors.fill: parent; spacing: 0
                     TonalButton {
                         text: "\u2212"; base: "#252d3a"; radius: 0
+                        visible: root.interactionEnabled
                         implicitWidth: 26; implicitHeight: 26
                         onClicked: {
                             var v = Math.round(root.snap.speed || 0) - 5
@@ -242,6 +243,7 @@ Rectangle {
                     }
                     TextInput {
                         id: speedInput
+                        visible: root.interactionEnabled
                         Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
                         horizontalAlignment: Text.AlignHCenter
                         color: t.textDim; font.pixelSize: 12; font.family: "Consolas"
@@ -251,8 +253,17 @@ Rectangle {
                             root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, Math.min(400, v)) })
                         }
                     }
+                    Text {
+                        visible: !root.interactionEnabled
+                        Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter
+                        horizontalAlignment: Text.AlignHCenter
+                        text: Math.round(root.snap.speed || 0)
+                        color: t.textDim; font.pixelSize: 12; font.family: "Consolas"
+                        renderType: Text.NativeRendering
+                    }
                     TonalButton {
                         text: "+"; base: "#252d3a"; radius: 0
+                        visible: root.interactionEnabled
                         implicitWidth: 26; implicitHeight: 26
                         onClicked: {
                             var v = Math.round(root.snap.speed || 0) + 5
@@ -335,6 +346,7 @@ Rectangle {
             Layout.fillWidth: true
             spacing: 4
             visible: root.snap.alive && root.controller !== null
+                     && !root.controller.isObserver
                      && root.controller.currentSeatType !== "commander"
                      && root.controller.chatMessages !== undefined
             property var latestCommandMessage: {

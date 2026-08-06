@@ -31,12 +31,87 @@ QJsonObject welcome(quint64 sequence) {
                     {QStringLiteral("role"), QStringLiteral("red")}});
 }
 
+QJsonObject observerUnit(const QString& id, const QString& side, double hp) {
+    return {{QStringLiteral("id"), id},
+            {QStringLiteral("callsign"), id},
+            {QStringLiteral("kind"), QStringLiteral("groundscout")},
+            {QStringLiteral("side"), side},
+            {QStringLiteral("movable"), true},
+            {QStringLiteral("position"), QJsonArray{1.0, 2.0, 0.0}},
+            {QStringLiteral("detectRange"), 5000.0},
+            {QStringLiteral("attackRange"), 0.0},
+            {QStringLiteral("commRange"), 15000.0},
+            {QStringLiteral("speed"), 10.0},
+            {QStringLiteral("baseSpeed"), 10.0},
+            {QStringLiteral("maxHp"), 100.0},
+            {QStringLiteral("attackPower"), 0.0},
+            {QStringLiteral("hp"), hp},
+            {QStringLiteral("alive"), hp > 0.0},
+            {QStringLiteral("armor"), 0.0},
+            {QStringLiteral("subsystems"),
+             QJsonObject{{QStringLiteral("sensor"), 1.0},
+                         {QStringLiteral("comms"), 1.0},
+                         {QStringLiteral("mobility"), 1.0},
+                         {QStringLiteral("weapon"), 1.0}}},
+            {QStringLiteral("serviceRequested"), false},
+            {QStringLiteral("serviceProgress"), 0.0}};
+}
+
+QJsonObject observerScenarioUnit(const QString& id, const QString& side) {
+    return {{QStringLiteral("id"), id},
+            {QStringLiteral("callsign"), id},
+            {QStringLiteral("kind"), QStringLiteral("groundscout")},
+            {QStringLiteral("side"), side},
+            {QStringLiteral("x"), 1.0},
+            {QStringLiteral("y"), 2.0},
+            {QStringLiteral("alt"), 0.0},
+            {QStringLiteral("detectRange"), 5000.0},
+            {QStringLiteral("attackRange"), 0.0},
+            {QStringLiteral("commRange"), 15000.0},
+            {QStringLiteral("speed"), 10.0},
+            {QStringLiteral("maxHp"), 100.0},
+            {QStringLiteral("attackPower"), 0.0},
+            {QStringLiteral("armor"), 0.0},
+            {QStringLiteral("ammoCapacity"), 0},
+            {QStringLiteral("initialAmmo"), 0},
+            {QStringLiteral("cooldownSec"), 0.0},
+            {QStringLiteral("fuelCapacitySec"), 1.0},
+            {QStringLiteral("initialFuelSec"), 0.0}};
+}
+
+QJsonObject observerSnapshot(qint64 revision, bool observer = true) {
+    const QJsonArray units{observerUnit(QStringLiteral("blue_r1"), QStringLiteral("blue"), 100.0),
+                           observerUnit(QStringLiteral("red_r1"), QStringLiteral("red"), 100.0)};
+    const QJsonArray scenarioUnits{
+        observerScenarioUnit(QStringLiteral("blue_r1"), QStringLiteral("blue")),
+        observerScenarioUnit(QStringLiteral("red_r1"), QStringLiteral("red"))};
+    return {{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+            {QStringLiteral("stateRevision"), revision},
+            {QStringLiteral("scenario"),
+             QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                         {QStringLiteral("map"),
+                          QJsonObject{{QStringLiteral("name"), QStringLiteral("default")},
+                                      {QStringLiteral("widthMeters"), 40000.0},
+                                      {QStringLiteral("heightMeters"), 30000.0},
+                                      {QStringLiteral("backgroundResource"), QStringLiteral("")}}},
+                         {QStringLiteral("units"), scenarioUnits}}},
+            {QStringLiteral("units"), units},
+            {QStringLiteral("roomState"),
+             QJsonObject{{QStringLiteral("observer"), observer},
+                         {QStringLiteral("scenarioRevision"), 1},
+                         {QStringLiteral("stateRevision"), revision},
+                         {QStringLiteral("simTime"), 0.0}}}};
+}
+
 void expectSameLifecycle(const Protocol::RoomLifecycleProjection& actual,
                          const Protocol::RoomLifecycleProjection& expected) {
     EXPECT_EQ(actual.phase, expected.phase);
     EXPECT_EQ(actual.roomId, expected.roomId);
     EXPECT_EQ(actual.roomName, expected.roomName);
     EXPECT_EQ(actual.roomStatus, expected.roomStatus);
+    EXPECT_EQ(actual.roomMode, expected.roomMode);
+    EXPECT_EQ(actual.aiDifficulty, expected.aiDifficulty);
+    EXPECT_EQ(actual.configVersion, expected.configVersion);
     EXPECT_EQ(actual.redReady, expected.redReady);
     EXPECT_EQ(actual.blueReady, expected.blueReady);
     EXPECT_EQ(actual.running, expected.running);
@@ -65,7 +140,98 @@ void expectSameLifecycle(const Protocol::RoomLifecycleProjection& actual,
         EXPECT_EQ(actualSeat.unitId, expectedSeat.unitId);
         EXPECT_EQ(actualSeat.selectedTemplate, expectedSeat.selectedTemplate);
         EXPECT_EQ(actualSeat.unitName, expectedSeat.unitName);
+        EXPECT_EQ(actualSeat.controllerType, expectedSeat.controllerType);
     }
+}
+
+TEST(ClientStateStoreTest, ProjectsPveConfigurationAndAiSeatsAcrossDelta) {
+    ClientStateStore store;
+    store.beginConnection();
+    ASSERT_EQ(store.applyEnvelope(welcome(1)).disposition,
+              ClientStateStore::Disposition::Accepted);
+
+    QJsonObject base = snapshot(10);
+    base[QStringLiteral("roomState")] =
+        QJsonObject{{QStringLiteral("roomId"), QStringLiteral("main")},
+                    {QStringLiteral("roomMode"), QStringLiteral("pve")},
+                    {QStringLiteral("aiDifficulty"), QStringLiteral("hard")},
+                    {QStringLiteral("configVersion"), 3},
+                    {QStringLiteral("scenarioRevision"), 1},
+                    {QStringLiteral("simTime"), 0.0},
+                    {QStringLiteral("seats"), QJsonArray{QJsonObject{
+                        {QStringLiteral("seatId"), QStringLiteral("blue_commander")},
+                        {QStringLiteral("seatType"), QStringLiteral("commander")},
+                        {QStringLiteral("side"), QStringLiteral("blue")},
+                        {QStringLiteral("occupied"), true},
+                        {QStringLiteral("controllerType"), QStringLiteral("ai")}}}}};
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("snapshot"), 2, base)).disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+    EXPECT_EQ(store.lifecycle().roomMode, QStringLiteral("pve"));
+    EXPECT_EQ(store.lifecycle().aiDifficulty, QStringLiteral("hard"));
+    EXPECT_EQ(store.lifecycle().configVersion, 3);
+    ASSERT_EQ(store.lifecycle().seats.size(), 1);
+    EXPECT_EQ(store.lifecycle().seats.front().controllerType, QStringLiteral("ai"));
+
+    QJsonObject current = base;
+    current[QStringLiteral("stateRevision")] = 11;
+    QJsonObject currentRoomState = current.value(QStringLiteral("roomState")).toObject();
+    currentRoomState[QStringLiteral("configVersion")] = 4;
+    current[QStringLiteral("roomState")] = currentRoomState;
+    const QJsonObject delta = StateDelta::create(base, current);
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("delta"), 3, delta)).disposition,
+              ClientStateStore::Disposition::DeltaApplied);
+    EXPECT_EQ(store.lifecycle().configVersion, 4);
+    EXPECT_EQ(store.lifecycle().seats.front().controllerType, QStringLiteral("ai"));
+}
+
+TEST(ClientStateStoreTest, ObserverSnapshotDeltaAndResyncRemainContiguous) {
+    ClientStateStore store;
+    store.beginConnection();
+    ASSERT_EQ(store.applyEnvelope(welcome(1)).disposition,
+              ClientStateStore::Disposition::Accepted);
+
+    const QJsonObject base = observerSnapshot(10);
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("snapshot"), 2, base)).disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+    EXPECT_TRUE(store.lifecycle().observer);
+    EXPECT_FALSE(store.snapshot().contains(QStringLiteral("messages")));
+
+    QJsonObject current = observerSnapshot(11);
+    current[QStringLiteral("units")] = QJsonArray{
+        observerUnit(QStringLiteral("blue_r1"), QStringLiteral("blue"), 75.0),
+        observerUnit(QStringLiteral("red_r1"), QStringLiteral("red"), 100.0)};
+    const QJsonObject delta = StateDelta::create(base, current);
+    ASSERT_FALSE(delta.isEmpty());
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("delta"), 3, delta)).disposition,
+              ClientStateStore::Disposition::DeltaApplied);
+    EXPECT_TRUE(store.lifecycle().observer);
+    EXPECT_EQ(store.snapshot(), current);
+    EXPECT_DOUBLE_EQ(store.snapshot().value(QStringLiteral("units")).toArray().at(0)
+                         .toObject()
+                         .value(QStringLiteral("hp"))
+                         .toDouble(),
+                     75.0);
+
+    const QJsonObject futureDelta = StateDelta::create(current, observerSnapshot(12));
+    EXPECT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("delta"), 5, futureDelta)).disposition,
+              ClientStateStore::Disposition::ResyncRequired);
+    EXPECT_TRUE(store.waitingForResync());
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("snapshot"), 7, observerSnapshot(20))).disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+    EXPECT_TRUE(store.lifecycle().observer);
+    EXPECT_FALSE(store.waitingForResync());
+    const QJsonArray recoveredUnits = store.snapshot().value(QStringLiteral("units")).toArray();
+    ASSERT_EQ(recoveredUnits.size(), 2);
+    EXPECT_EQ(recoveredUnits.at(0).toObject().value(QStringLiteral("side")).toString(),
+              QStringLiteral("blue"));
+    EXPECT_EQ(recoveredUnits.at(1).toObject().value(QStringLiteral("side")).toString(),
+              QStringLiteral("red"));
 }
 
 } // namespace

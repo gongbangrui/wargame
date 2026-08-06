@@ -138,6 +138,66 @@ docker compose --project-name wargame --env-file .env -f deploy/compose.yml up -
 登录、房间目录、聊天、地图标记、snapshot、delta、command 和 resync 均通过已认证的
 HTTPS/WebSocket 管线传输；DDS 未启用。
 
+### PVE AI 与 Ollama（可选）
+
+PVE 默认使用 `AI_PROVIDER=auto`：规则 AI 立即可用；服务器会尝试使用 Ollama 生成指挥计划，
+遇到模型缺失、连接失败、超时、超大响应或 schema 错误时回退到规则 AI。连续两次失败后，
+当前对局会固定使用规则 AI，避免推演被模型服务阻塞。`AI_PROVIDER=rules` 可完全关闭模型请求；
+`AI_PROVIDER=ollama` 会优先请求 Ollama，但同样保留规则回退。三种模式都不会把未裁剪的敌方状态发送给模型。
+
+Ollama 不由 Compose 管理，也不会新增服务、端口或持久卷。先在宿主机单独安装并启动 Ollama，
+再手动拉取固定模型（不要在镜像构建或启动脚本中执行拉取）：
+
+```bash
+ollama serve
+ollama pull qwen3.5:2b
+```
+
+原生运行 `game-server` 时使用 `OLLAMA_BASE_URL=http://127.0.0.1:11434`。Compose 中的
+`game-server` 通过 `host.docker.internal` 访问宿主机，复制 `.env.example` 后将 URL 改为：
+
+```dotenv
+AI_PROVIDER=auto
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_MODEL=auto
+OLLAMA_CONNECT_TIMEOUT_MS=1500
+OLLAMA_TIMEOUT_MS=15000
+OLLAMA_MAX_RESPONSE_BYTES=65536
+```
+
+`deploy/compose.yml` 已将 `host.docker.internal` 映射到 Docker host gateway，且不会启动
+Ollama 容器。Linux 宿主机上的 Ollama 必须监听 Docker 网桥可达的地址（例如仅监听 Docker
+网桥/受防火墙保护的地址），不要把 `11434` 直接暴露到公网；桌面 Docker 环境可直接使用该
+主机名。先运行 `docker compose ... config --quiet`，再启动服务：
+
+```bash
+docker compose --project-name wargame --env-file .env -f deploy/compose.yml config --quiet
+docker compose --project-name wargame --env-file .env -f deploy/compose.yml up -d --build
+```
+
+连接、请求和响应上限分别由 `OLLAMA_CONNECT_TIMEOUT_MS`、`OLLAMA_TIMEOUT_MS` 和
+`OLLAMA_MAX_RESPONSE_BYTES` 控制；保持有限值，避免 PVE 请求拖住权威 tick。管理员可在
+“服务器监控”查看 `provider`、`model`、`effectiveEngine`、请求成功/失败数、延迟、最近
+失败类别和 `stickyRules`。故障排查时查看 `docker compose ... logs --tail=100 game-server`
+和监控页；不要把请求正文、凭据或完整响应写入日志。
+
+#### AI 检查点回滚与重置
+
+AI 运行态（计划、代次、失败计数和请求统计）随房间检查点写入 `/data/room-checkpoint.json`。
+切换模型或 provider 只需编辑安装根 `.env`，然后执行
+`docker compose ... up -d --force-recreate game-server`；不要为配置回滚删除数据卷。若模型变更后需要从干净对局开始，先停止推演，
+使用带备份的房间重置：
+
+```bash
+sudo "$HOME/wargame/current/deploy/reset-room.sh" --yes
+```
+
+脚本会先备份整个 `/data`，再删除该房间的检查点、事件日志和状态文件并恢复准备阶段；账号、
+管理员和场景数据库不受影响。若检查点损坏或 Compose 更新中断，先保留脚本生成的备份目录，
+确认 `docker compose ... ps` 和 `logs` 后再重试。需要回滚到旧版本时，恢复经验证的 `current/`
+和 `.env`，保留数据卷并重新创建 `game-server`；只有明确要清空整套账号/场景时才使用
+`down -v`，并应先完成卷备份。
+
 容器会创建持久卷 `wargame-data`，保存：
 
 - `/data/wargame.db`：管理员、兵棋账号和登录会话。

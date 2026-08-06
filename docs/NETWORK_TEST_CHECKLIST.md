@@ -37,6 +37,12 @@ ADMIN_PASSWORD='管理员密码' node tools/network-smoke.mjs
 - [ ] `./deploy/reset-admin.sh` 可交互重置管理员密码，且不影响兵棋账号。
 - [ ] 容器重启后账号、管理员密码和联网场景仍从持久卷恢复。
 - [ ] 推演运行中重启 `game-server` 后，时间、HP、FSM、航点、攻击目标和双方就绪/阶段从检查点恢复。
+- [ ] PVE 使用 `AI_PROVIDER=rules` 时不产生 Ollama 请求；使用 `AI_PROVIDER=auto` 且宿主机
+  已执行 `ollama pull qwen3.5:2b` 时，监控页显示 `effectiveEngine=ollama` 或可解释的规则回退。
+- [ ] 停止/阻断宿主机 Ollama 后，`auto` 在有限超时内回退规则，监控记录失败类别和
+  `stickyRules`，推演 tick 与 WebSocket 仍保持可用。
+- [ ] Compose 配置包含 `host.docker.internal` 主机映射但没有 `ollama` 服务；容器能访问宿主机
+  Ollama，宿主机 `11434` 未对公网开放。
 - [ ] 重复提交同一用户的同一 `commandId`（包括断线重连后）只执行一次，并返回相同结果。
 - [ ] 宿主机除 `127.0.0.1:8080` 与 `127.0.0.1:8090` 外无额外服务端口暴露。
 
@@ -81,6 +87,18 @@ ADMIN_PASSWORD='管理员密码' node tools/network-smoke.mjs
 - [ ] 管理员可在“服务器监控”查看兵棋服务状态、连接日志和消息流；普通兵棋账号无此接口权限。
 - [ ] 弱网或压力测试时，管理员监控中的累计连接、断连、重同步和服务运行时长与测试记录一致。
 - [ ] 容器运维终端需要再次验证管理员密码；验证后可在 `account-web` 容器的非特权 `wargame` 用户 Shell 中执行命令，不能访问宿主机、Docker 套接字或 `game-server` 容器。
+
+## PVE AI 运维与恢复
+
+- [ ] 在宿主机手动执行 `ollama serve` 与 `ollama pull qwen3.5:2b`；不得通过 Compose 拉取模型或
+  添加 Ollama 服务。
+- [ ] 原生运行使用 `http://127.0.0.1:11434`，Compose `.env` 使用
+  `http://host.docker.internal:11434`；`docker compose ... config --quiet` 展开后值正确。
+- [ ] 修改 `AI_PROVIDER`、模型或超时后只重建 `game-server`，不删除命名卷；监控页显示新 provider/model。
+- [ ] AI 检查点回滚前保留 `reset-room.sh` 自动生成的 `/data` 备份；重置后房间回到 preparing，
+  AI 计划/失败计数清零，账号和管理员仍可登录。
+- [ ] 模拟响应超大、schema 错误、模型缺失和 Compose 配置语法错误，确认服务输出可诊断失败而
+  不报告误导性的“启动成功”。
 
 ## 原有功能回归
 

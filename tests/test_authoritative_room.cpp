@@ -18,6 +18,7 @@
 #include <QWebSocket>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -123,6 +124,31 @@ private:
     QTcpServer m_server;
     QByteArray m_responseBody;
     QList<QByteArray> m_requests;
+};
+
+class HeldHttpReceiver final : public QObject {
+public:
+    explicit HeldHttpReceiver(QObject* parent = nullptr) : QObject(parent) {
+        connect(&m_server, &QTcpServer::newConnection, this, [this]() {
+            while (QTcpSocket* socket = m_server.nextPendingConnection()) {
+                ++m_connectionCount;
+                connect(socket, &QTcpSocket::disconnected, this, [this, socket]() {
+                    ++m_disconnectionCount;
+                    socket->deleteLater();
+                });
+            }
+        });
+    }
+
+    bool listen() { return m_server.listen(QHostAddress::LocalHost); }
+    quint16 port() const { return m_server.serverPort(); }
+    int connectionCount() const { return m_connectionCount; }
+    int disconnectionCount() const { return m_disconnectionCount; }
+
+private:
+    QTcpServer m_server;
+    int m_connectionCount = 0;
+    int m_disconnectionCount = 0;
 };
 
 class AuthenticationReceiver final : public QObject {
@@ -251,6 +277,7 @@ void sendClientEnvelope(QWebSocket& socket, const QString& type, const QString& 
 }
 
 void configureGameServerEnvironment(const QTemporaryDir& temporary) {
+    qputenv("AI_PROVIDER", QByteArray("rules"));
     qputenv("INTERNAL_API_KEY", QByteArray(32, 'k'));
     qputenv("AUTH_SERVICE_URL", QByteArray("http://127.0.0.1:1"));
     qputenv("SCENARIO_PATH", temporary.filePath(QStringLiteral("scenario.json")).toUtf8());
@@ -1884,6 +1911,8 @@ TEST(GameServerRoomOperationTest, ResetAndRedeployPersistRuntimeThenAcknowledgeE
                     2, QStringLiteral("blue_commander"), GeoPos{20.0, 20.0, 0.0}).ok);
     ASSERT_TRUE(server.applyDeployedScenario());
 
+    server.m_aiStickyRules = true;
+    const quint64 generationBeforeRedeploy = server.m_matchGeneration;
     const quint64 redeployRevision = server.m_authoritativeRoom.revision();
     server.processRoomOperation(QJsonObject{{QStringLiteral("operationId"), QStringLiteral("redeploy-1")},
                                              {QStringLiteral("action"), QStringLiteral("redeploy")},
@@ -1906,6 +1935,9 @@ TEST(GameServerRoomOperationTest, ResetAndRedeployPersistRuntimeThenAcknowledgeE
     EXPECT_TRUE(server.m_authoritativeRoom.runtimeUnits().isEmpty());
     EXPECT_TRUE(server.m_engine.scenario().units.empty());
     EXPECT_EQ(server.m_phase, QStringLiteral("preparing"));
+    EXPECT_EQ(server.m_matchGeneration, generationBeforeRedeploy + 1);
+    EXPECT_FALSE(server.m_aiStickyRules);
+    EXPECT_FALSE(server.m_aiPlanRequestInFlight);
     EXPECT_TRUE(QFile::exists(temporary.filePath(QStringLiteral("checkpoint.json"))));
     EXPECT_TRUE(acknowledgements.requests().at(0).contains("/operations/redeploy-1/ack"));
     EXPECT_TRUE(acknowledgements.requests().at(0).contains("\"state\":\"acknowledged\""));
@@ -1923,6 +1955,8 @@ TEST(GameServerRoomOperationTest, ResetAndRedeployPersistRuntimeThenAcknowledgeE
         EXPECT_EQ(restored.m_phase, QStringLiteral("preparing"));
     }
 
+    server.m_aiStickyRules = true;
+    const quint64 generationBeforeReset = server.m_matchGeneration;
     const quint64 resetRevision = server.m_authoritativeRoom.revision();
     server.processRoomOperation(QJsonObject{{QStringLiteral("operationId"), QStringLiteral("reset-1")},
                                              {QStringLiteral("action"), QStringLiteral("reset")},
@@ -1931,6 +1965,9 @@ TEST(GameServerRoomOperationTest, ResetAndRedeployPersistRuntimeThenAcknowledgeE
     ASSERT_TRUE(waitFor([&acknowledgements]() { return acknowledgements.requests().size() == 2; }));
     EXPECT_TRUE(server.m_authoritativeRoom.seats().isEmpty());
     EXPECT_TRUE(server.m_engine.scenario().units.empty());
+    EXPECT_EQ(server.m_matchGeneration, generationBeforeReset + 1);
+    EXPECT_FALSE(server.m_aiStickyRules);
+    EXPECT_FALSE(server.m_aiPlanRequestInFlight);
     EXPECT_TRUE(acknowledgements.requests().at(1).contains("/operations/reset-1/ack"));
     EXPECT_TRUE(acknowledgements.requests().at(1).contains("\"revision\":"
                                                             + QByteArray::number(resetRevision + 1)));
@@ -2275,7 +2312,7 @@ TEST(GameServerReconnectTest, AuthenticatedParticipantReconnectDoesNotReclaimRel
     ASSERT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
 }
 
-TEST(GameServerObserverTest, PlayerCannotSelectObserverRoleOverWebSocket) {
+TEST(GameServerObserverTest, AuthenticatedPlayerCanSelectObserverRoleOverWebSocket) {
     int argc = 1;
     char applicationName[] = "observer_websocket_tests";
     char* argv[] = {applicationName, nullptr};
@@ -2296,6 +2333,11 @@ TEST(GameServerObserverTest, PlayerCannotSelectObserverRoleOverWebSocket) {
     qputenv("MONITOR_STATUS_PATH", temporary.filePath(QStringLiteral("status.json")).toUtf8());
     qputenv("CHECKPOINT_PATH", temporary.filePath(QStringLiteral("checkpoint.json")).toUtf8());
     qputenv("COMMAND_LOG_PATH", temporary.filePath(QStringLiteral("events.jsonl")).toUtf8());
+    authentication.setRoomControlResponse(
+        QByteArrayLiteral(
+            R"({"rooms":[{"roomId":"main","name":"Observer Room","status":"running",
+"enabled":true,"hostedByGameServer":true,"mode":"pvp","aiDifficulty":"normal",
+"configVersion":1}],"kickRequests":[],"logoutRequests":[]})"));
 
     GameServer server;
     ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
@@ -2330,21 +2372,50 @@ TEST(GameServerObserverTest, PlayerCannotSelectObserverRoleOverWebSocket) {
     sendClientEnvelope(client, QStringLiteral("joinRoom"), QStringLiteral("observer-join"),
                        QJsonObject{{QStringLiteral("roomId"), server.m_roomId},
                                    {QStringLiteral("asObserver"), true}});
-    const bool observerDenied = waitFor([&messages]() {
+    const bool observerJoined = waitFor([&server, socket, &messages]() {
+        if (!server.m_clients.contains(socket)) return false;
+        const GameServer::ClientSession& session = server.m_clients.value(socket);
+        if (!session.observer || session.roomId != server.m_roomId || !session.seatId.isEmpty()
+            || session.role != QLatin1String("observer")) {
+            return false;
+        }
         return std::any_of(messages.cbegin(), messages.cend(), [](const QJsonObject& envelope) {
-            if (envelope.value(QStringLiteral("type")).toString() != QLatin1String("error")) return false;
-            const QJsonObject payload = envelope.value(QStringLiteral("payload")).toObject();
-            return payload.value(QStringLiteral("code")).toString()
-                == QLatin1String("OBSERVER_NOT_AUTHORIZED");
+            if (envelope.value(QStringLiteral("type")).toString() != QLatin1String("snapshot")) {
+                return false;
+            }
+            return envelope.value(QStringLiteral("payload")).toObject()
+                .value(QStringLiteral("roomState")).toObject()
+                .value(QStringLiteral("observer")).toBool();
         });
     });
-    const QString joinedRoom = server.m_clients.value(socket).roomId;
-    const QString assignedRole = server.m_clients.value(socket).role;
+    ASSERT_TRUE(observerJoined);
+    EXPECT_TRUE(server.m_clients.value(socket).observer);
+    EXPECT_EQ(server.m_clients.value(socket).roomId, server.m_roomId);
+    EXPECT_TRUE(server.m_clients.value(socket).seatId.isEmpty());
+    EXPECT_EQ(server.m_clients.value(socket).role, QStringLiteral("observer"));
+    EXPECT_FALSE(server.m_authoritativeRoom.hasUser(3));
+
+    messages.clear();
+    sendClientEnvelope(client, QStringLiteral("claimSeat"), QStringLiteral("observer-escalation"),
+                       QJsonObject{{QStringLiteral("seatId"), QStringLiteral("red_commander")}});
+    ASSERT_TRUE(waitFor([&messages]() {
+        return std::any_of(messages.cbegin(), messages.cend(), [](const QJsonObject& envelope) {
+            if (envelope.value(QStringLiteral("type")).toString() != QLatin1String("error")) {
+                return false;
+            }
+            const QJsonObject payload = envelope.value(QStringLiteral("payload")).toObject();
+            return payload.value(QStringLiteral("code")).toString()
+                == QLatin1String("OBSERVER_READ_ONLY")
+                && payload.value(QStringLiteral("requestId")).toString()
+                    == QLatin1String("observer-escalation");
+        });
+    }));
+    EXPECT_TRUE(server.m_clients.value(socket).observer);
+    EXPECT_TRUE(server.m_clients.value(socket).seatId.isEmpty());
+    EXPECT_FALSE(server.m_authoritativeRoom.hasUser(3));
+
     client.close();
     ASSERT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
-    EXPECT_TRUE(observerDenied);
-    EXPECT_TRUE(joinedRoom.isEmpty());
-    EXPECT_EQ(assignedRole, QStringLiteral("player"));
 }
 
 TEST(GameServerJoinRoomTest, SeatedPlayerCannotRejoinAndRetainsAuthoritativeSeat) {
@@ -2965,4 +3036,757 @@ TEST(GameServerMapMarkTest, RateLimitIsSharedBySeatAcrossConnections) {
                                  return value.toObject().value(QStringLiteral("label"))
                                      == QLatin1String("blocked");
                              }));
+}
+
+TEST(AuthoritativeRoomPveTest, ReservesBlueSeatsAndMirrorsRedRoster) {
+    auto room = configuredRoom();
+    ASSERT_TRUE(room.setMode(QStringLiteral("pve")).ok);
+    EXPECT_EQ(room.mode(), QStringLiteral("pve"));
+    ASSERT_TRUE(room.hasSeat(QStringLiteral("blue_commander")));
+    EXPECT_EQ(room.seat(QStringLiteral("blue_commander")).controllerType,
+              QStringLiteral("ai"));
+    EXPECT_EQ(room.seat(QStringLiteral("blue_commander")).controllerId,
+              QStringLiteral("ai:blue_commander"));
+
+    ASSERT_TRUE(room.claimSeat(1, QStringLiteral("red"), QStringLiteral("red_commander"),
+                               QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(room.claimSeat(2, QStringLiteral("pilot"), QStringLiteral("red_attack_1"),
+                               QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(room.syncAiRoster().ok);
+    EXPECT_TRUE(room.hasSeat(QStringLiteral("blue_attack_1")));
+    EXPECT_EQ(room.seat(QStringLiteral("blue_attack_1")).controllerType,
+              QStringLiteral("ai"));
+    EXPECT_EQ(room.seat(QStringLiteral("blue_attack_1")).selectedTemplate,
+              QStringLiteral("attackuav"));
+
+    EXPECT_EQ(room.claimSeat(3, QStringLiteral("blue-human"), QStringLiteral("blue_attack_2"),
+                              QStringLiteral("attackuav")).code,
+              QStringLiteral("SIDE_RESERVED_FOR_AI"));
+}
+
+TEST(AuthoritativeRoomPveTest, AiDeploymentIsDeterministicAndRosterFreezesAfterStart) {
+    auto room = configuredRoom();
+    ASSERT_TRUE(room.setMode(QStringLiteral("pve")).ok);
+    ASSERT_TRUE(room.claimSeat(1, QStringLiteral("red"), QStringLiteral("red_commander"),
+                               QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(room.claimSeat(2, QStringLiteral("pilot"), QStringLiteral("red_attack_1"),
+                               QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(room.syncAiRoster().ok);
+    ASSERT_TRUE(room.deploy(1, QStringLiteral("red_commander"), GeoPos{100.0, 100.0, 0.0}).ok);
+    ASSERT_TRUE(room.deploy(1, QStringLiteral("red_attack_1"), GeoPos{200.0, 200.0, 20.0}).ok);
+    ASSERT_TRUE(room.setReady(2, true).ok);
+    ASSERT_TRUE(room.setReady(1, true).ok);
+    ASSERT_TRUE(room.deployAiSeats(1000.0, 800.0, 7).ok);
+    EXPECT_TRUE(room.seat(QStringLiteral("blue_commander")).deployed);
+    EXPECT_TRUE(room.seat(QStringLiteral("blue_commander")).ready);
+    ASSERT_TRUE(room.start().ok);
+
+    EXPECT_EQ(room.syncAiRoster().code, QStringLiteral("SEAT_LOCKED"));
+    const GeoPos position = room.seat(QStringLiteral("blue_commander")).position;
+    EXPECT_GE(position.x, 0.0);
+    EXPECT_LE(position.x, 1000.0);
+    EXPECT_GE(position.y, 0.0);
+    EXPECT_LE(position.y, 800.0);
+}
+
+TEST(GameServerPveLifecycleTest, DeploysAiBeforeRedCommanderReadiness) {
+    int argc = 1;
+    char applicationName[] = "game_server_pve_readiness_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) application = std::make_unique<QCoreApplication>(argc, argv);
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.setMode(QStringLiteral("pve")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red-player"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    server.m_roomMode = QStringLiteral("pve");
+    server.m_phase = QStringLiteral("preparing");
+    server.m_roomStatus = QStringLiteral("preparing");
+    server.syncAuthoritativeSeats();
+
+    QWebSocket socket;
+    auto& session = server.m_clients[&socket];
+    session.authenticated = true;
+    session.userId = 1;
+    session.roomId = server.m_roomId;
+    session.seatId = QStringLiteral("red_commander");
+    session.seatType = QStringLiteral("commander");
+    session.side = QStringLiteral("red");
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_commander"), GeoPos{1000.0, 1000.0, 0.0}).ok);
+    server.syncAuthoritativeSeats();
+
+    server.handleSeatReady(&socket, QJsonObject{{QStringLiteral("ready"), true}});
+
+    const auto blueCommander = server.m_authoritativeRoom.seat(QStringLiteral("blue_commander"));
+    EXPECT_TRUE(blueCommander.deployed);
+    EXPECT_TRUE(blueCommander.ready);
+    EXPECT_TRUE(server.m_authoritativeRoom.seat(QStringLiteral("red_commander")).ready);
+    EXPECT_TRUE(server.m_authoritativeRoom.readiness().value(QStringLiteral("ready")).toBool());
+    EXPECT_NE(server.m_engine.unit(QStringLiteral("blue_cp")), nullptr);
+}
+
+TEST(GameServerAiExecutionTest, AttackBudgetKeepsGeneratedMovementInAuthoritativeRoom) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_execution_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.setMode(QStringLiteral("pve")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red-commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        2, QStringLiteral("red-attack-1"), QStringLiteral("red_attack_1"),
+        QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        3, QStringLiteral("red-attack-2"), QStringLiteral("red_attack_2"),
+        QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        4, QStringLiteral("red-attack-3"), QStringLiteral("red_attack_3"),
+        QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        5, QStringLiteral("red-recon"), QStringLiteral("red_recon_1"),
+        QStringLiteral("reconuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.syncAiRoster().ok);
+
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_commander"), GeoPos{1000.0, 1000.0, 0.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_attack_1"), GeoPos{1500.0, 1000.0, 20.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_attack_2"), GeoPos{2000.0, 1000.0, 20.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_attack_3"), GeoPos{2500.0, 1000.0, 20.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_recon_1"), GeoPos{3000.0, 1000.0, 20.0}).ok);
+    for (const qint64 userId : {2, 3, 4, 5}) {
+        ASSERT_TRUE(server.m_authoritativeRoom.setReady(userId, true).ok);
+    }
+    ASSERT_TRUE(server.m_authoritativeRoom.setReady(1, true).ok);
+
+    const QJsonObject map = server.m_engine.mapInfo();
+    const double mapWidth = map.value(QStringLiteral("widthMeters")).toDouble();
+    const double mapHeight = map.value(QStringLiteral("heightMeters")).toDouble();
+    ASSERT_TRUE(server.m_authoritativeRoom.deployAiSeats(
+        mapWidth, mapHeight, server.m_matchGeneration).ok);
+    ASSERT_TRUE(server.applyDeployedScenario());
+    server.syncAuthoritativeSeats();
+    ASSERT_TRUE(server.m_authoritativeRoom.start().ok);
+    server.m_roomMode = QStringLiteral("pve");
+    server.m_roomStatus = QStringLiteral("running");
+    server.m_phase = QStringLiteral("running");
+    server.m_aiDifficulty = QStringLiteral("easy");
+
+    QList<AiSeatState> states = server.aiSeatStates();
+    ASSERT_EQ(states.size(), 4);
+    EXPECT_TRUE(std::all_of(states.cbegin(), states.cend(), [](const AiSeatState& state) {
+        return state.alive && state.movable && state.unitId != QLatin1String("blue_cp");
+    }));
+    const QString firstTarget = server.m_authoritativeRoom
+        .seat(QStringLiteral("red_attack_1")).unitId;
+    const QString secondTarget = server.m_authoritativeRoom
+        .seat(QStringLiteral("red_attack_2")).unitId;
+    for (AiSeatState& state : states) {
+        if (state.seatId == QLatin1String("blue_attack_1")
+            || state.seatId == QLatin1String("blue_attack_2")) {
+            state.targetVisible = true;
+            state.targetId = firstTarget;
+        } else if (state.seatId == QLatin1String("blue_attack_3")) {
+            state.targetVisible = true;
+            state.targetId = secondTarget;
+        }
+    }
+    server.m_sharedIntel[QStringLiteral("blue_attack_1")].insert(firstTarget);
+
+    const double now = server.m_engine.simTime();
+    server.m_aiPlan = RulesAi::makeCommanderPlan(
+        states, QStringLiteral("authoritative-budget"), server.m_matchGeneration,
+        server.m_stateRevision, now + 60.0, nullptr, 0.0,
+        mapWidth, mapHeight, 1);
+    server.m_aiNextDecisionAt = 0.0;
+    server.m_aiNextReplanAt = now + 60.0;
+    const QString reconId = server.m_authoritativeRoom
+        .seat(QStringLiteral("blue_recon_1")).unitId;
+    UnitBase* recon = server.m_engine.unit(reconId);
+    ASSERT_NE(recon, nullptr);
+    const GeoPos initial = recon->pos();
+
+    server.runAiDecision();
+
+    EXPECT_EQ(server.m_aiCommandSequence, 2U);
+    ASSERT_EQ(server.m_commandResults.size(), 2);
+    for (auto it = server.m_commandResults.cbegin(); it != server.m_commandResults.cend(); ++it) {
+        EXPECT_TRUE(it.value().value(QStringLiteral("accepted")).toBool());
+    }
+    server.m_engine.stepOnce(1.0);
+    const GeoPos final = recon->pos();
+    ::testing::Test::RecordProperty("initialX", QString::number(initial.x).toStdString());
+    ::testing::Test::RecordProperty("initialY", QString::number(initial.y).toStdString());
+    ::testing::Test::RecordProperty("finalX", QString::number(final.x).toStdString());
+    ::testing::Test::RecordProperty("finalY", QString::number(final.y).toStdString());
+    ::testing::Test::RecordProperty("executedCommands",
+                                    QString::number(server.m_aiCommandSequence).toStdString());
+    EXPECT_GT(std::hypot(final.x - initial.x, final.y - initial.y), 0.0);
+
+    UnitBase* destroyed = server.m_engine.unit(server.m_authoritativeRoom
+        .seat(QStringLiteral("blue_attack_3")).unitId);
+    ASSERT_NE(destroyed, nullptr);
+    destroyed->setHp(0.0);
+    const QList<AiSeatState> afterDamage = server.aiSeatStates();
+    EXPECT_TRUE(std::none_of(afterDamage.cbegin(), afterDamage.cend(),
+                             [](const AiSeatState& state) {
+                                 return state.seatId == QLatin1String("blue_attack_3");
+                             }));
+}
+
+TEST(GameServerPveReadinessTest, AiParameterReconciliationPreservesReadyRedSubordinates) {
+    int argc = 1;
+    char applicationName[] = "game_server_pve_readiness_reconciliation_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) application = std::make_unique<QCoreApplication>(argc, argv);
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.setMode(QStringLiteral("pve")).ok);
+    server.m_roomMode = QStringLiteral("pve");
+    server.m_phase = QStringLiteral("preparing");
+    server.m_roomStatus = QStringLiteral("preparing");
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red-commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        2, QStringLiteral("red-attack"), QStringLiteral("red_attack_1"),
+        QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_commander"), GeoPos{1000.0, 1000.0, 0.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_attack_1"), GeoPos{1500.0, 1000.0, 20.0}).ok);
+    ASSERT_TRUE(server.applyDeployedScenario());
+    server.syncAuthoritativeSeats();
+    server.m_seatParameters.insert(
+        QStringLiteral("blue_commander"),
+        QJsonObject{{QStringLiteral("communicationRange"), 1.0}});
+
+    QWebSocket commanderSocket;
+    QWebSocket attackSocket;
+    auto& commander = server.m_clients[&commanderSocket];
+    commander.authenticated = true;
+    commander.userId = 1;
+    commander.roomId = server.m_roomId;
+    commander.seatId = QStringLiteral("red_commander");
+    commander.seatType = QStringLiteral("commander");
+    commander.side = QStringLiteral("red");
+    auto& attack = server.m_clients[&attackSocket];
+    attack.authenticated = true;
+    attack.userId = 2;
+    attack.roomId = server.m_roomId;
+    attack.seatId = QStringLiteral("red_attack_1");
+    attack.seatType = QStringLiteral("attack");
+    attack.side = QStringLiteral("red");
+
+    server.handleSeatReady(&attackSocket, QJsonObject{{QStringLiteral("ready"), true}});
+    ASSERT_TRUE(server.m_authoritativeRoom.seat(QStringLiteral("red_attack_1")).ready);
+
+    const QJsonObject map = server.m_engine.mapInfo();
+    ASSERT_TRUE(server.m_authoritativeRoom.deployAiSeats(
+        map.value(QStringLiteral("widthMeters")).toDouble(),
+        map.value(QStringLiteral("heightMeters")).toDouble(), server.m_matchGeneration).ok);
+    ASSERT_TRUE(server.applyDeployedScenario());
+    server.syncAuthoritativeSeats();
+    ASSERT_TRUE(server.m_authoritativeRoom.seat(QStringLiteral("red_attack_1")).ready);
+
+    ASSERT_NE(server.seatUnit(QStringLiteral("blue_commander")), nullptr);
+    EXPECT_NE(server.seatUnit(QStringLiteral("blue_commander"))->commRange(), 1.0);
+    server.reconcileSeatConfiguration(false);
+    EXPECT_DOUBLE_EQ(server.seatUnit(QStringLiteral("blue_commander"))->commRange(), 1.0);
+
+    EXPECT_TRUE(server.m_authoritativeRoom.seat(QStringLiteral("red_attack_1")).ready)
+        << "AI parameter reconciliation cleared a ready red subordinate";
+    server.handleSeatReady(&commanderSocket, QJsonObject{{QStringLiteral("ready"), true}});
+    EXPECT_TRUE(server.m_authoritativeRoom.seat(QStringLiteral("red_commander")).ready)
+        << "red commander readiness was rejected after AI parameter reconciliation";
+}
+
+TEST(GameServerAiLifecycleTest, PauseFinishAndEndCancelProviderWithCorrectMatchScope) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_lifecycle_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    HeldHttpReceiver ollama;
+    ASSERT_TRUE(ollama.listen());
+    configureGameServerEnvironment(temporary);
+    qputenv("AI_PROVIDER", QByteArray("ollama"));
+    qputenv("OLLAMA_BASE_URL", QByteArray("http://127.0.0.1:")
+                                    + QByteArray::number(ollama.port()));
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    const auto startHeldRequest = [&server, &ollama]() {
+        const int expectedConnections = ollama.connectionCount() + 1;
+        server.m_aiPlanRequestInFlight = true;
+        server.m_aiPlanRequestGeneration = server.m_matchGeneration;
+        server.m_aiPlanRequestPlanningGeneration = server.m_aiPlanningGeneration;
+        server.m_ollamaProvider->requestPlan(
+            {}, QStringLiteral("lifecycle-request"), server.m_matchGeneration,
+            server.m_stateRevision, server.m_aiPlanningGeneration, [](OllamaResult) {});
+        ASSERT_TRUE(waitFor([&ollama, expectedConnections]() {
+            return ollama.connectionCount() == expectedConnections;
+        }));
+        ASSERT_TRUE(server.m_ollamaProvider->inFlight());
+    };
+
+    server.m_phase = QStringLiteral("running");
+    server.m_aiStickyRules = true;
+    const quint64 pausedGeneration = server.m_matchGeneration;
+    startHeldRequest();
+    QString error;
+    ASSERT_TRUE(server.applyDurableEvent(
+        QStringLiteral("control"),
+        QJsonObject{{QStringLiteral("action"), QStringLiteral("pause")}}, &error))
+        << error.toStdString();
+    EXPECT_EQ(server.m_phase, QStringLiteral("paused"));
+    EXPECT_FALSE(server.m_ollamaProvider->inFlight());
+    EXPECT_FALSE(server.m_aiPlanRequestInFlight);
+    EXPECT_TRUE(server.m_aiStickyRules);
+    EXPECT_EQ(server.m_matchGeneration, pausedGeneration);
+
+    server.m_runInitialScenario = server.m_engine.scenario();
+    startHeldRequest();
+    const quint64 endedGeneration = server.m_matchGeneration;
+    ASSERT_TRUE(server.applyDurableEvent(
+        QStringLiteral("control"),
+        QJsonObject{{QStringLiteral("action"), QStringLiteral("end")}}, &error))
+        << error.toStdString();
+    EXPECT_EQ(server.m_phase, QStringLiteral("preparing"));
+    EXPECT_FALSE(server.m_ollamaProvider->inFlight());
+    EXPECT_FALSE(server.m_aiPlanRequestInFlight);
+    EXPECT_FALSE(server.m_aiStickyRules);
+    EXPECT_EQ(server.m_matchGeneration, endedGeneration + 1);
+
+    server.m_aiStickyRules = true;
+    startHeldRequest();
+    const quint64 finishedGeneration = server.m_matchGeneration;
+    ASSERT_TRUE(QMetaObject::invokeMethod(
+        &server.m_engine, "simulationEnded", Qt::DirectConnection,
+        Q_ARG(QString, QStringLiteral("red")), Q_ARG(QString, QStringLiteral("blue"))));
+    EXPECT_EQ(server.m_phase, QStringLiteral("finished"));
+    EXPECT_FALSE(server.m_ollamaProvider->inFlight());
+    EXPECT_FALSE(server.m_aiPlanRequestInFlight);
+    EXPECT_TRUE(server.m_aiStickyRules);
+    EXPECT_EQ(server.m_matchGeneration, finishedGeneration);
+
+    qunsetenv("OLLAMA_BASE_URL");
+    qputenv("AI_PROVIDER", QByteArray("rules"));
+}
+
+TEST(GameServerAiLifecycleTest, DestructionCancelsOwnedProviderRequest) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_destruction_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    HeldHttpReceiver ollama;
+    ASSERT_TRUE(ollama.listen());
+    configureGameServerEnvironment(temporary);
+    qputenv("AI_PROVIDER", QByteArray("ollama"));
+    qputenv("OLLAMA_BASE_URL", QByteArray("http://127.0.0.1:")
+                                    + QByteArray::number(ollama.port()));
+    bool callbackCalled = false;
+
+    {
+        auto server = std::make_unique<GameServer>();
+        ASSERT_TRUE(server->m_recoveryError.isEmpty())
+            << server->m_recoveryError.toStdString();
+        server->m_aiPlanRequestInFlight = true;
+        server->m_ollamaProvider->requestPlan(
+            {}, QStringLiteral("destruction-request"), server->m_matchGeneration,
+            server->m_stateRevision, server->m_aiPlanningGeneration,
+            [&callbackCalled](OllamaResult) { callbackCalled = true; });
+        ASSERT_TRUE(waitFor([&ollama]() { return ollama.connectionCount() == 1; }));
+        ASSERT_TRUE(server->m_ollamaProvider->inFlight());
+    }
+
+    EXPECT_TRUE(waitFor([&ollama]() { return ollama.disconnectionCount() == 1; }));
+    EXPECT_FALSE(callbackCalled);
+    qunsetenv("OLLAMA_BASE_URL");
+    qputenv("AI_PROVIDER", QByteArray("rules"));
+}
+
+TEST(GameServerAiConversationTest, RecordsCompletedRejectedFailedAndCancelledAttempts) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_conversation_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    HeldHttpReceiver ollama;
+    ASSERT_TRUE(ollama.listen());
+    configureGameServerEnvironment(temporary);
+    qputenv("AI_PROVIDER", QByteArray("ollama"));
+    qputenv("OLLAMA_MODEL", QByteArray("auto"));
+    qputenv("OLLAMA_BASE_URL", QByteArray("http://127.0.0.1:")
+                                    + QByteArray::number(ollama.port()));
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    const auto arm = [&server](quint64 planningGeneration) {
+        server.m_aiPlanningGeneration = planningGeneration;
+        server.m_aiPlanRequestInFlight = true;
+        server.m_aiPlanRequestGeneration = server.m_matchGeneration;
+        server.m_aiPlanRequestPlanningGeneration = planningGeneration;
+    };
+    const auto resultFor = [](const QString& requestId, const QString& configured,
+                              const QString& resolved) {
+        OllamaResult result;
+        result.requestId = requestId;
+        result.configuredModel = configured;
+        result.resolvedModel = resolved;
+        result.messages = QJsonArray{QJsonObject{{QStringLiteral("role"), QStringLiteral("user")},
+                                                 {QStringLiteral("password"),
+                                                  QStringLiteral("do-not-store")}}};
+        result.rawResponse = QStringLiteral("Authorization: Bearer should-not-store");
+        result.latencyMs = 7;
+        return result;
+    };
+
+    AiPlanV1 fallback;
+    fallback.requestId = QStringLiteral("rules-fallback");
+    fallback.matchGeneration = server.m_matchGeneration;
+    fallback.sourceStateRevision = server.m_stateRevision;
+    fallback.planningGeneration = 1;
+    server.m_aiPlan = fallback;
+
+    arm(1);
+    OllamaResult completed = resultFor(QStringLiteral("ai-plan:1:1"),
+                                       QStringLiteral("auto"),
+                                       QStringLiteral("qwen3.5:2b"));
+    completed.ok = true;
+    completed.plan.requestId = completed.requestId;
+    completed.plan.matchGeneration = server.m_matchGeneration;
+    completed.plan.sourceStateRevision = server.m_stateRevision;
+    completed.plan.planningGeneration = 1;
+    server.handleAiPlanResult(
+        GameServer::AiPlanRequestContext{server.m_matchGeneration, 1, server.m_stateRevision},
+        std::move(completed));
+
+    server.m_aiPlan = fallback;
+    arm(2);
+    OllamaResult rejected = resultFor(QStringLiteral("ai-plan:1:2"),
+                                      QStringLiteral("auto"),
+                                      QStringLiteral("qwen3.5:2b"));
+    rejected.failureClass = QStringLiteral("stale_response");
+    server.handleAiPlanResult(
+        GameServer::AiPlanRequestContext{server.m_matchGeneration, 2, server.m_stateRevision},
+        std::move(rejected));
+
+    server.m_aiPlan = fallback;
+    arm(3);
+    OllamaResult failed = resultFor(QStringLiteral("ai-plan:1:3"),
+                                    QStringLiteral("auto"), QString());
+    failed.failureClass = QStringLiteral("timeout");
+    server.handleAiPlanResult(
+        GameServer::AiPlanRequestContext{server.m_matchGeneration, 3, server.m_stateRevision},
+        std::move(failed));
+
+    server.m_aiPlan = fallback;
+    arm(4);
+    server.m_ollamaProvider->requestPlan(
+        {}, QStringLiteral("ai-plan:1:4"), server.m_matchGeneration,
+        server.m_stateRevision, 4, [](OllamaResult) {});
+    ASSERT_TRUE(waitFor([&ollama]() { return ollama.connectionCount() == 1; }));
+    server.cancelAiPlanRequest();
+
+    QString error;
+    const QVector<QJsonObject> records = server.m_aiConversationStore.readRecords(&error);
+    ASSERT_TRUE(error.isEmpty()) << error.toStdString();
+    ASSERT_EQ(records.size(), 4);
+    QHash<QString, QJsonObject> byStatus;
+    for (const QJsonObject& record : records) {
+        byStatus.insert(record.value(QStringLiteral("status")).toString(), record);
+    }
+    ASSERT_TRUE(byStatus.contains(QStringLiteral("completed")));
+    ASSERT_TRUE(byStatus.contains(QStringLiteral("rejected")));
+    ASSERT_TRUE(byStatus.contains(QStringLiteral("failed")));
+    ASSERT_TRUE(byStatus.contains(QStringLiteral("cancelled")));
+    const QJsonObject completedRecord = byStatus.value(QStringLiteral("completed"));
+    EXPECT_EQ(completedRecord.value(QStringLiteral("configuredModel")).toString(),
+              QStringLiteral("auto"));
+    EXPECT_EQ(completedRecord.value(QStringLiteral("resolvedModel")).toString(),
+              QStringLiteral("qwen3.5:2b"));
+    EXPECT_EQ(completedRecord.value(QStringLiteral("final")).toObject()
+                  .value(QStringLiteral("engine")).toString(), QStringLiteral("ollama"));
+    EXPECT_EQ(completedRecord.value(QStringLiteral("messages")).toArray().at(0).toObject()
+                  .value(QStringLiteral("password")).toString(), QStringLiteral("[REDACTED]"));
+    EXPECT_FALSE(QJsonDocument(completedRecord).toJson().contains("Bearer should-not-store"));
+    for (const QString& status : {QStringLiteral("rejected"), QStringLiteral("failed"),
+                                  QStringLiteral("cancelled")}) {
+        const QJsonObject record = byStatus.value(status);
+        EXPECT_EQ(record.value(QStringLiteral("final")).toObject()
+                      .value(QStringLiteral("engine")).toString(), QStringLiteral("rules"));
+        EXPECT_EQ(record.value(QStringLiteral("fallback")).toObject()
+                      .value(QStringLiteral("engine")).toString(), QStringLiteral("rules"));
+        EXPECT_EQ(record.value(QStringLiteral("final")).toObject()
+                      .value(QStringLiteral("plan")).toObject()
+                      .value(QStringLiteral("requestId")).toString(),
+                  QStringLiteral("rules-fallback"));
+    }
+    server.writeMonitorStatus();
+    QFile statusFile(temporary.filePath(QStringLiteral("status.json")));
+    ASSERT_TRUE(statusFile.open(QIODevice::ReadOnly));
+    const QJsonObject aiStatus = QJsonDocument::fromJson(statusFile.readAll())
+                                     .object().value(QStringLiteral("ai")).toObject();
+    EXPECT_EQ(aiStatus.value(QStringLiteral("configuredModel")).toString(),
+              QStringLiteral("auto"));
+    EXPECT_EQ(aiStatus.value(QStringLiteral("resolvedModel")).toString(),
+              QString());
+
+    qunsetenv("OLLAMA_BASE_URL");
+    qunsetenv("OLLAMA_MODEL");
+    qputenv("AI_PROVIDER", QByteArray("rules"));
+}
+
+TEST(GameServerAiLifecycleTest, TwoFailuresAreStickyOnlyUntilNextMatch) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_sticky_fallback_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    QTcpServer reservation;
+    ASSERT_TRUE(reservation.listen(QHostAddress::LocalHost, 0));
+    const quint16 refusedPort = reservation.serverPort();
+    reservation.close();
+    configureGameServerEnvironment(temporary);
+    qputenv("AI_PROVIDER", QByteArray("ollama"));
+    qputenv("OLLAMA_BASE_URL", QByteArray("http://127.0.0.1:")
+                                    + QByteArray::number(refusedPort));
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.setMode(QStringLiteral("pve")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red-commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        2, QStringLiteral("red-attack"), QStringLiteral("red_attack_1"),
+        QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.syncAiRoster().ok);
+    const QJsonObject map = server.m_engine.mapInfo();
+    ASSERT_TRUE(server.m_authoritativeRoom.deployAiSeats(
+        map.value(QStringLiteral("widthMeters")).toDouble(),
+        map.value(QStringLiteral("heightMeters")).toDouble(),
+        server.m_matchGeneration).ok);
+    ASSERT_TRUE(server.applyDeployedScenario());
+    server.m_roomMode = QStringLiteral("pve");
+    server.m_phase = QStringLiteral("running");
+
+    for (quint64 expectedFailures = 1; expectedFailures <= 2; ++expectedFailures) {
+        server.m_aiNextDecisionAt = 0.0;
+        server.m_aiNextReplanAt = 0.0;
+        server.m_aiPlan = {};
+        server.runAiDecision();
+        ASSERT_TRUE(waitFor([&server, expectedFailures]() {
+            return server.m_aiProviderFailures == expectedFailures;
+        }));
+    }
+    EXPECT_TRUE(server.m_aiStickyRules);
+    EXPECT_EQ(server.m_aiConsecutiveFailures, 2);
+    EXPECT_EQ(server.m_aiEffectiveEngine, QStringLiteral("rules"));
+    const quint64 priorGeneration = server.m_matchGeneration;
+    const quint64 priorRequests = server.m_aiProviderRequests;
+
+    server.resetAiMatchState();
+    EXPECT_EQ(server.m_matchGeneration, priorGeneration + 1);
+    EXPECT_FALSE(server.m_aiStickyRules);
+    EXPECT_EQ(server.m_aiConsecutiveFailures, 0);
+    server.m_aiNextDecisionAt = 0.0;
+    server.runAiDecision();
+    ASSERT_TRUE(waitFor([&server, priorRequests]() {
+        return server.m_aiProviderRequests == priorRequests + 1;
+    }));
+
+    qunsetenv("OLLAMA_BASE_URL");
+    qputenv("AI_PROVIDER", QByteArray("rules"));
+}
+
+TEST(GameServerAiProviderTest, PauseCancelsTrackedProviderRequest) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_pause_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_phase = QStringLiteral("running");
+    server.m_aiPlanRequestInFlight = true;
+    server.m_aiPlanRequestGeneration = server.m_matchGeneration;
+    server.m_aiPlanRequestPlanningGeneration = 4;
+
+    QString error;
+    ASSERT_TRUE(server.applyDurableEvent(
+        QStringLiteral("control"),
+        QJsonObject{{QStringLiteral("action"), QStringLiteral("pause")}}, &error))
+        << error.toStdString();
+
+    EXPECT_FALSE(server.m_aiPlanRequestInFlight);
+    EXPECT_EQ(server.m_aiPlanRequestGeneration, 0U);
+    EXPECT_EQ(server.m_aiPlanRequestPlanningGeneration, 0U);
+}
+
+TEST(GameServerAiProviderTest, CancelTrackedProbeClearsProbeState) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_probe_cancel_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_aiProbeInFlight = true;
+
+    server.cancelAiPlanRequest();
+
+    EXPECT_FALSE(server.m_aiProbeInFlight);
+}
+
+TEST(GameServerAiProviderTest, StaleResponseDoesNotClearNewerTrackedRequest) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_stale_response_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_matchGeneration = 7;
+    server.m_aiPlanningGeneration = 4;
+    server.m_aiPlanRequestInFlight = true;
+    server.m_aiPlanRequestGeneration = 7;
+    server.m_aiPlanRequestPlanningGeneration = 4;
+    const quint64 failuresBefore = server.m_aiProviderFailures;
+
+    OllamaResult staleResult;
+    staleResult.failureClass = QStringLiteral("stale-response-test");
+    server.handleAiPlanResult(GameServer::AiPlanRequestContext{6, 3, server.m_stateRevision},
+                              std::move(staleResult));
+
+    EXPECT_TRUE(server.m_aiPlanRequestInFlight);
+    EXPECT_EQ(server.m_aiPlanRequestGeneration, 7U);
+    EXPECT_EQ(server.m_aiPlanRequestPlanningGeneration, 4U);
+    EXPECT_EQ(server.m_aiProviderFailures, failuresBefore);
+}
+
+TEST(GameServerAiProviderTest, TwoFailuresStickForMatchAndResetReprobesModel) {
+    int argc = 1;
+    char applicationName[] = "game_server_ai_provider_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    const QByteArray tagsBody = QJsonDocument(QJsonObject{
+        {QStringLiteral("models"),
+         QJsonArray{QJsonObject{{QStringLiteral("name"), QStringLiteral("other-model")}}}}})
+        .toJson(QJsonDocument::Compact);
+    RoomControlReceiver ollama(tagsBody);
+    ASSERT_TRUE(ollama.listen());
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+    qputenv("AI_PROVIDER", QByteArray("ollama"));
+    qputenv("OLLAMA_MODEL", QByteArray("test-model"));
+    qputenv("OLLAMA_BASE_URL", QByteArray("http://127.0.0.1:")
+                                    + QByteArray::number(ollama.port()));
+    GameServer server;
+    qputenv("AI_PROVIDER", QByteArray("rules"));
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+
+    const auto requestFailure = [&server](quint64 planningGeneration) {
+        const GameServer::AiPlanRequestContext context{
+            server.m_matchGeneration, planningGeneration, server.m_stateRevision};
+        server.m_aiPlanningGeneration = planningGeneration;
+        server.m_aiPlanRequestInFlight = true;
+        server.m_aiPlanRequestGeneration = context.matchGeneration;
+        server.m_aiPlanRequestPlanningGeneration = context.planningGeneration;
+        bool completed = false;
+        server.m_ollamaProvider->requestPlan(
+            {}, QStringLiteral("ai-plan:%1:%2")
+                    .arg(context.matchGeneration).arg(context.planningGeneration),
+            context.matchGeneration, context.sourceStateRevision, context.planningGeneration,
+            [&server, context, &completed](OllamaResult result) {
+                server.handleAiPlanResult(context, std::move(result));
+                completed = true;
+            });
+        EXPECT_TRUE(waitFor([&completed]() { return completed; }));
+    };
+
+    requestFailure(1);
+    EXPECT_EQ(ollama.requestCount(), 1);
+    EXPECT_FALSE(server.m_aiStickyRules);
+    requestFailure(2);
+    EXPECT_EQ(ollama.requestCount(), 1);
+    EXPECT_TRUE(server.m_aiStickyRules);
+    EXPECT_EQ(server.m_aiConsecutiveFailures, 2);
+    EXPECT_EQ(server.m_aiEffectiveEngine, QStringLiteral("rules"));
+
+    const quint64 previousMatchGeneration = server.m_matchGeneration;
+    server.resetAiMatchState();
+    EXPECT_EQ(server.m_matchGeneration, previousMatchGeneration + 1);
+    EXPECT_FALSE(server.m_aiStickyRules);
+    EXPECT_EQ(server.m_aiConsecutiveFailures, 0);
+    bool reprobeCompleted = false;
+    server.m_ollamaProvider->requestPlan(
+        {}, QStringLiteral("ai-plan:%1:1").arg(server.m_matchGeneration),
+        server.m_matchGeneration, server.m_stateRevision, 1,
+        [&reprobeCompleted](OllamaResult) { reprobeCompleted = true; });
+    EXPECT_TRUE(waitFor([&reprobeCompleted]() { return reprobeCompleted; }));
+    EXPECT_EQ(ollama.requestCount(), 2);
 }

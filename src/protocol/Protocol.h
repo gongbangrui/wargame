@@ -48,6 +48,7 @@ struct SeatProjection {
     QString unitId;
     QString selectedTemplate;
     QString unitName;
+    QString controllerType = QStringLiteral("human");
 };
 
 struct RoomLifecycleProjection {
@@ -55,6 +56,10 @@ struct RoomLifecycleProjection {
     QString roomId;
     QString roomName;
     QString roomStatus;
+    QString roomMode = QStringLiteral("pvp");
+    QString aiDifficulty = QStringLiteral("normal");
+    qint64 configVersion = 1;
+    bool observer = false;
     bool redReady = false;
     bool blueReady = false;
     bool running = false;

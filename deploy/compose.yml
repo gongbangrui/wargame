@@ -22,6 +22,7 @@ services:
       - "${WARGAME_RUNTIME_ENV_FILE:-../.env}"
     environment:
       DATA_DIR: /data
+      WARGAME_SOURCE_DIGEST: "${WARGAME_SOURCE_DIGEST:-dev}"
       SESSION_HOURS: "${SESSION_HOURS:-12}"
       WEB_SHELL_ENABLED: "${WEB_SHELL_ENABLED:-false}"
       WEB_SHELL_TICKET_SECONDS: "${WEB_SHELL_TICKET_SECONDS:-120}"
@@ -63,6 +64,8 @@ services:
       - ALL
     env_file:
       - "${WARGAME_RUNTIME_ENV_FILE:-../.env}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       GAME_PORT: 8090
       AUTH_SERVICE_URL: http://account-web:8080
@@ -73,6 +76,12 @@ services:
       ADMIN_PASSWORD: ""
       WARGAME_SOURCE_DIGEST: "${WARGAME_SOURCE_DIGEST:-dev}"
       WARGAME_ALLOW_RECOVERY_RESET: "${WARGAME_ALLOW_RECOVERY_RESET:-0}"
+      AI_PROVIDER: "${AI_PROVIDER:-auto}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-auto}"
+      OLLAMA_CONNECT_TIMEOUT_MS: "${OLLAMA_CONNECT_TIMEOUT_MS:-1500}"
+      OLLAMA_TIMEOUT_MS: "${OLLAMA_TIMEOUT_MS:-15000}"
+      OLLAMA_MAX_RESPONSE_BYTES: "${OLLAMA_MAX_RESPONSE_BYTES:-65536}"
       WARGAME_FASTDDS_MODE: "${WARGAME_FASTDDS_MODE:-disabled}"
       FASTDDS_DOMAIN_ID: "${FASTDDS_DOMAIN_ID:-0}"
       FASTDDS_DISCOVERY_TIMEOUT_MS: "${FASTDDS_DISCOVERY_TIMEOUT_MS:-5000}"
