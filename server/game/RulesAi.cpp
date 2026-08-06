@@ -1,5 +1,7 @@
 #include "RulesAi.h"
 
+#include "core/SimulationEngine.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -8,6 +10,9 @@ namespace {
 
 constexpr double kDefaultMapWidth = 20000.0;
 constexpr double kDefaultMapHeight = 15000.0;
+constexpr double kMinimumCommandDisplacement = 50.0;
+constexpr double kSpeedChangeThreshold = 0.5;
+constexpr double kSpeedSettlingSeconds = 8.0;
 
 double clampCoordinate(double value, double extent) {
     if (!std::isfinite(value)) return 0.0;
@@ -48,18 +53,75 @@ double distance2(double ax, double ay, double bx, double by) {
     return dx * dx + dy * dy;
 }
 
+bool hasVisibleTarget(const gbr::AiSeatState& seat) {
+    return seat.targetVisible && !seat.targetId.isEmpty();
+}
+
+bool hasVisibleTargetPosition(const gbr::AiSeatState& seat) {
+    return hasVisibleTarget(seat) && std::isfinite(seat.targetX)
+        && std::isfinite(seat.targetY);
+}
+
+bool targetsRedCommandPost(const gbr::AiSeatState& seat) {
+    return hasVisibleTarget(seat)
+        && (seat.targetId == QLatin1String("red_cp")
+            || seat.targetKind == QLatin1String("commandpost"));
+}
+
+int planningTargetRank(const gbr::AiSeatState& seat) {
+    if (seat.kind == QLatin1String("attackuav") && targetsRedCommandPost(seat)) return 0;
+    if (targetsRedCommandPost(seat)) return 1;
+    if (seat.kind == QLatin1String("attackuav") && hasVisibleTarget(seat)) return 2;
+    return 3;
+}
+
+QPair<double, double> advanceTowardLiveTarget(const gbr::AiSeatState& seat,
+                                               double mapWidth, double mapHeight) {
+    return {clampCoordinate(seat.x + (seat.targetX - seat.x) * 0.60, mapWidth),
+            clampCoordinate(seat.y + (seat.targetY - seat.y) * 0.60, mapHeight)};
+}
+
+double preferredSpeed(const gbr::AiSeatState& seat, double destinationX,
+                      double destinationY) {
+    const double cruise = std::clamp(
+        std::isfinite(seat.cruiseSpeed) && seat.cruiseSpeed > 0.0
+            ? seat.cruiseSpeed
+            : (std::isfinite(seat.commandedSpeed) && seat.commandedSpeed > 0.0
+                   ? seat.commandedSpeed : seat.speed),
+        0.0, gbr::SimulationEngine::kMaximumCommandedUnitSpeedMps);
+    if (cruise <= 0.0) return 0.0;
+    const double distance = std::sqrt(distance2(destinationX, destinationY, seat.x, seat.y));
+    const double minimum = std::min(cruise, std::max(1.0, cruise * 0.10));
+    return std::clamp(distance / kSpeedSettlingSeconds, minimum, cruise);
+}
+
+void appendSpeedCommand(QList<gbr::AiCommand>* commands, const gbr::AiSeatState& seat,
+                        double destinationX, double destinationY, int priority) {
+    if (!commands) return;
+    const double desired = preferredSpeed(seat, destinationX, destinationY);
+    const double current = std::isfinite(seat.commandedSpeed) && seat.commandedSpeed > 0.0
+        ? seat.commandedSpeed : seat.speed;
+    if (desired <= 0.0 || !std::isfinite(current)
+        || std::abs(desired - current) < kSpeedChangeThreshold) {
+        return;
+    }
+    commands->append(gbr::AiCommand{seat.seatId, QStringLiteral("setSpeed"),
+                                    {{QStringLiteral("unitId"), seat.unitId},
+                                     {QStringLiteral("speed"), desired}}, priority});
+}
+
 }
 
 namespace gbr {
 
 AiDifficultyParameters RulesAi::parameters(const QString& difficulty) {
     if (difficulty == QLatin1String("easy")) {
-        return {4000, 60000, 1, 1, 0.20};
+        return {2000, 90000, 1, 1, 0.20};
     }
     if (difficulty == QLatin1String("hard")) {
-        return {1000, 15000, 4, 4, 0.0};
+        return {500, 30000, 4, 4, 0.0};
     }
-    return {2000, 30000, 2, 2, 0.08};
+    return {1000, 45000, 2, 2, 0.08};
 }
 
 quint64 RulesAi::nextRandom(quint64* state) {
@@ -96,6 +158,9 @@ AiPlanV1 RulesAi::makeCommanderPlan(const QList<AiSeatState>& seats,
     QList<AiSeatState> candidates = seats;
     std::sort(candidates.begin(), candidates.end(), [](const AiSeatState& left,
                                                        const AiSeatState& right) {
+        const int leftRank = planningTargetRank(left);
+        const int rightRank = planningTargetRank(right);
+        if (leftRank != rightRank) return leftRank < rightRank;
         return left.seatId < right.seatId;
     });
     candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [](const AiSeatState& seat) {
@@ -171,8 +236,12 @@ AiPlanV1 RulesAi::makeCommanderPlan(const QList<AiSeatState>& seats,
 
 QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
                                           const QList<AiSeatState>& seats,
-                                          double now) {
+                                          double now,
+                                          double mapWidth,
+                                          double mapHeight) {
     QList<AiCommand> commands;
+    if (!std::isfinite(mapWidth) || mapWidth <= 0.0) mapWidth = kDefaultMapWidth;
+    if (!std::isfinite(mapHeight) || mapHeight <= 0.0) mapHeight = kDefaultMapHeight;
     QList<AiObjectiveV1> objectives = plan.objectives;
     std::stable_sort(objectives.begin(), objectives.end(), [](const AiObjectiveV1& left,
                                                                const AiObjectiveV1& right) {
@@ -193,16 +262,31 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
         AiCommand command;
         command.seatId = it->seatId;
         command.priority = objective.priority;
-        if (objective.action == QLatin1String("attack") && !objective.targetId.isEmpty()) {
+        const bool priorityAttack = it->kind == QLatin1String("attackuav")
+            && targetsRedCommandPost(*it);
+        if (priorityAttack || (objective.action == QLatin1String("attack")
+                               && !objective.targetId.isEmpty())) {
             if (it->kind != QLatin1String("attackuav")) continue;
+            const QString targetId = hasVisibleTarget(*it) ? it->targetId : objective.targetId;
+            if (targetId.isEmpty()) continue;
+            if (hasVisibleTargetPosition(*it)) {
+                appendSpeedCommand(&commands, *it, it->targetX, it->targetY,
+                                   objective.priority);
+            }
             command.action = QStringLiteral("engageTarget");
             command.args = {{QStringLiteral("attackerId"), it->unitId},
-                            {QStringLiteral("targetId"), objective.targetId}};
+                            {QStringLiteral("targetId"), targetId}};
         } else if (objective.action == QLatin1String("search")
                    || objective.action == QLatin1String("patrol")
                    || objective.action == QLatin1String("guard")
                    || objective.action == QLatin1String("jam")) {
-            const QJsonObject region = objective.region;
+            QJsonObject region = objective.region;
+            if (hasVisibleTargetPosition(*it)) {
+                const QPair<double, double> destination = advanceTowardLiveTarget(
+                    *it, mapWidth, mapHeight);
+                region = QJsonObject{{QStringLiteral("x"), destination.first},
+                                     {QStringLiteral("y"), destination.second}};
+            }
             if (!region.contains(QStringLiteral("x")) || !region.contains(QStringLiteral("y"))
                 || !region.value(QStringLiteral("x")).isDouble()
                 || !region.value(QStringLiteral("y")).isDouble()) {
@@ -213,7 +297,11 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
             const double y = region.value(QStringLiteral("y")).toDouble(
                 std::numeric_limits<double>::quiet_NaN());
             if (!std::isfinite(x) || !std::isfinite(y)) continue;
-            if (distance2(x, y, it->x, it->y) < 2500.0) continue;
+            if (distance2(x, y, it->x, it->y)
+                < kMinimumCommandDisplacement * kMinimumCommandDisplacement) {
+                continue;
+            }
+            appendSpeedCommand(&commands, *it, x, y, objective.priority);
             command.action = QStringLiteral("moveTo");
             command.args = {{QStringLiteral("unitId"), it->unitId},
                             {QStringLiteral("pos"), QVariantMap{{QStringLiteral("x"), x},

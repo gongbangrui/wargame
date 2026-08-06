@@ -121,6 +121,12 @@ bool observerMessageIsReadOnly(const QString& type) {
     return allowed.contains(type);
 }
 
+bool isRedCommandPost(const UnitBase* unit) {
+    return unit && unit->sideStr() == QLatin1String("red")
+        && (unit->id() == QLatin1String("red_cp")
+            || unit->kind() == UnitKind::CommandPost);
+}
+
 QString commandCacheKey(const QString& controllerId, const QString& commandId) {
     return QStringLiteral("%1:%2").arg(controllerId, commandId);
 }
@@ -2947,9 +2953,12 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
     if (action == QLatin1String("setSpeed")) {
         bool ok = false;
         const double speed = args.value(QStringLiteral("speed")).toDouble(&ok);
-        if (!ok || !std::isfinite(speed) || speed <= 0.0 || speed > 1000.0) {
+        if (!ok || !std::isfinite(speed) || speed <= 0.0
+            || speed > SimulationEngine::kMaximumCommandedUnitSpeedMps) {
             return reject(QStringLiteral("INVALID_ARGUMENT"),
-                          QStringLiteral("速度必须大于 0 且不超过 1000"));
+                          QStringLiteral("速度必须大于 0 且不超过 %1")
+                              .arg(SimulationEngine::kMaximumCommandedUnitSpeedMps,
+                                   0, 'f', 0));
         }
     }
     if (action == QLatin1String("setSchedule")) {
@@ -3764,6 +3773,12 @@ void GameServer::acknowledgeRoomOperation(const QString& operationId, const QStr
 
 QList<AiSeatState> GameServer::aiSeatStates() const {
     QList<AiSeatState> states;
+    QHash<QString, double> cruiseSpeeds;
+    for (const ScenarioUnit& scenarioUnit : m_engine.scenario().units) {
+        if (std::isfinite(scenarioUnit.speed) && scenarioUnit.speed > 0.0) {
+            cruiseSpeeds.insert(scenarioUnit.id, scenarioUnit.speed);
+        }
+    }
     QStringList seatIds;
     for (const AuthoritativeRoom::Seat& seat : m_authoritativeRoom.seats()) {
         if (seat.controllerType == QLatin1String("ai") && seat.side == QLatin1String("blue")
@@ -3782,6 +3797,9 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
         state.movable = unit->movable();
         state.x = unit->pos().x;
         state.y = unit->pos().y;
+        state.speed = unit->speed();
+        state.commandedSpeed = unit->baseSpeed();
+        state.cruiseSpeed = cruiseSpeeds.value(seat.unitId, state.commandedSpeed);
         const QSet<QString> visible = StateProjector::visibleUnitIds(
             m_engine, seatId, {}, seat.unitId);
         QStringList targets;
@@ -3795,6 +3813,9 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
                                                                  const QString& right) {
             const UnitBase* leftUnit = m_engine.unit(left);
             const UnitBase* rightUnit = m_engine.unit(right);
+            const bool leftCommandPost = isRedCommandPost(leftUnit);
+            const bool rightCommandPost = isRedCommandPost(rightUnit);
+            if (leftCommandPost != rightCommandPost) return leftCommandPost;
             const double leftDistance = leftUnit ? unit->pos().distanceTo2D(leftUnit->pos())
                                                   : std::numeric_limits<double>::max();
             const double rightDistance = rightUnit ? unit->pos().distanceTo2D(rightUnit->pos())
@@ -3811,6 +3832,7 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
             if (target) {
                 state.targetX = target->pos().x;
                 state.targetY = target->pos().y;
+                state.targetKind = target->kindStr();
             }
         }
         states.append(state);
@@ -4157,6 +4179,9 @@ void GameServer::runAiDecision() {
     if (now + 1e-9 < m_aiNextDecisionAt) return;
     const QList<AiSeatState> states = aiSeatStates();
     if (states.isEmpty()) return;
+    const QJsonObject map = m_engine.mapInfo();
+    const double mapWidth = map.value(QStringLiteral("widthMeters")).toDouble();
+    const double mapHeight = map.value(QStringLiteral("heightMeters")).toDouble();
     if (now + 1e-9 >= m_aiNextReplanAt || m_aiPlan.objectives.isEmpty()) {
         ++m_aiPlanningGeneration;
         const QString requestId = QStringLiteral("ai-plan:%1:%2")
@@ -4165,9 +4190,11 @@ void GameServer::runAiDecision() {
             states, requestId, m_matchGeneration, m_stateRevision,
             now + parameters.commanderReplanIntervalMs / 1000.0, &m_aiRngState,
             parameters.suboptimalRate,
-            m_engine.mapInfo().value(QStringLiteral("widthMeters")).toDouble(),
-            m_engine.mapInfo().value(QStringLiteral("heightMeters")).toDouble(),
+            mapWidth, mapHeight,
             m_aiPlanningGeneration);
+        // The rules plan is immediately executable while an optional provider
+        // request is in flight. A successful provider result flips this back.
+        m_aiEffectiveEngine = QStringLiteral("rules");
         m_aiNextReplanAt = now + parameters.commanderReplanIntervalMs / 1000.0;
         if (m_ollamaProvider && !m_aiStickyRules
             && m_aiProviderMode != QLatin1String("rules") && !m_aiPlanRequestInFlight) {
@@ -4196,7 +4223,6 @@ void GameServer::runAiDecision() {
             request.sourceStateRevision = requestSourceRevision;
             request.planningGeneration = requestPlanningGeneration;
             request.validUntil = m_aiNextReplanAt;
-            const QJsonObject map = m_engine.mapInfo();
             request.mapWidth = map.value(QStringLiteral("widthMeters")).toDouble();
             request.mapHeight = map.value(QStringLiteral("heightMeters")).toDouble();
             for (const AiSeatState& state : states) {
@@ -4227,7 +4253,8 @@ void GameServer::runAiDecision() {
                 });
         }
     }
-    const QList<AiCommand> commands = RulesAi::commandsForPlan(m_aiPlan, states, now);
+    const QList<AiCommand> commands = RulesAi::commandsForPlan(
+        m_aiPlan, states, now, mapWidth, mapHeight);
     QHash<QString, int> attackUnitsPerTarget;
     QSet<QString> targeted;
     for (const AiCommand& command : commands) {
@@ -4301,6 +4328,7 @@ QJsonObject GameServer::roomState() const {
                        {QStringLiteral("roomStatus"), m_roomStatus},
                        {QStringLiteral("roomMode"), m_roomMode},
                        {QStringLiteral("aiDifficulty"), m_aiDifficulty},
+                       {QStringLiteral("aiEngine"), m_aiEffectiveEngine},
                        {QStringLiteral("configVersion"), static_cast<qint64>(m_configVersion)},
                        {QStringLiteral("redReady"), m_redReady},
                        {QStringLiteral("blueReady"), m_blueReady},
@@ -4540,7 +4568,12 @@ QJsonObject GameServer::snapshotFor(const ClientSession& session) const {
         scenario[QStringLiteral("units")] = QJsonArray{};
         snapshot[QStringLiteral("scenario")] = scenario;
     }
-    snapshot[QStringLiteral("mapMarks")] = filteredMapMarks(session);
+    // Observer snapshots use a strict, read-only wire shape. Map marks are
+    // participant-scoped and intentionally absent rather than represented by
+    // an empty field, so the projection remains valid under that contract.
+    if (!session.observer) {
+        snapshot[QStringLiteral("mapMarks")] = filteredMapMarks(session);
+    }
     return snapshot;
 }
 

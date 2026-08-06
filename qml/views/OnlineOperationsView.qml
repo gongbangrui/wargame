@@ -155,6 +155,13 @@ Item {
         return room && room.enabled !== false && room.hostedByGameServer === true
                 && ["preparing", "running", "paused", "finished"].indexOf(room.status) >= 0
     }
+    function roomModeLabel(room) {
+        if (room && room.mode === "pve") {
+            var labels = { easy: "简单", normal: "普通", hard: "困难" }
+            return "人机对抗 · " + (labels[room.aiDifficulty] || "普通")
+        }
+        return "人人对抗"
+    }
     function roomConfigurationLabel() {
         if (root.controller.roomMode === "pve") {
             var labels = { easy: "简单", normal: "普通", hard: "困难" }
@@ -174,6 +181,16 @@ Item {
             return String(a.name || a.roomId).localeCompare(String(b.name || b.roomId))
         })
         return rooms
+    }
+    function aiEngineLabel() {
+        var engine = root.controller && root.controller.aiEffectiveEngine
+        if (engine === "ollama") return "Ollama"
+        if (engine === "rules") return "规则 AI"
+        return "同步中"
+    }
+    function aiEngineColor() {
+        return root.controller && root.controller.aiEffectiveEngine === "ollama"
+             ? root.cyan : root.orange
     }
     function isRoomEmpty() {
         var seats = root.controller.onlineSeats || []
@@ -326,14 +343,14 @@ Item {
         if (root.unitSpeedDraftUnitId !== unitId) {
             root.unitSpeedDraftUnitId = unitId
             root.unitSpeedDirty = false
-            root.unitSpeedDraft = Math.max(1, Math.min(1000, speed))
+            root.unitSpeedDraft = Math.max(1, Math.min(240, speed))
             return
         }
         if (root.unitSpeedDirty) {
             if (speed !== root.unitSpeedDraft) return
             root.unitSpeedDirty = false
         }
-        root.unitSpeedDraft = Math.max(1, Math.min(1000, speed))
+        root.unitSpeedDraft = Math.max(1, Math.min(240, speed))
     }
     function dismissSelectedCommandMarker() {
         if (!root.selectedCommandMarkerId) return
@@ -834,18 +851,38 @@ Item {
                 }
                 Text {
                     text: root.controller.isObserver ? (root.controller.matchPhase === "running" ? "观战 · 推演执行中" : root.controller.matchPhase === "finished" ? "观战 · 推演已结束" : root.controller.matchPhase === "paused" ? "观战 · 推演暂停" : "观战 · 准备阶段") : root.controller.matchPhase === "running" ? "推演执行中" : root.controller.matchPhase === "finished" ? "推演已结束" : "部署准备阶段"
-                    color: root.ink; font.pixelSize: 11; font.bold: true
+                    Layout.fillWidth: true
+                    color: root.ink; font.pixelSize: 11; font.bold: true; elide: Text.ElideRight
                 }
-                Item { Layout.fillWidth: true }
+                Rectangle {
+                    visible: root.controller.roomMode === "pve"
+                             && root.controller.matchPhase === "running"
+                    Layout.preferredWidth: aiEngineText.implicitWidth + 16
+                    Layout.preferredHeight: 22
+                    color: root.panelAlt
+                    border.color: root.aiEngineColor()
+                    radius: 4
+                    Text {
+                        id: aiEngineText
+                        anchors.centerIn: parent
+                        text: "AI · " + root.aiEngineLabel()
+                        color: root.aiEngineColor()
+                        font.pixelSize: 10
+                        font.bold: true
+                    }
+                }
                 Text {
-                    visible: !root.controller.isObserver && root.isCommander && root.controller.matchPhase === "preparing"
+                    visible: !root.compactLayout && !root.controller.isObserver
+                             && root.isCommander && root.controller.matchPhase === "preparing"
                     text: "待部署 " + root.pendingDeploymentSeats().length
                     color: root.pendingDeploymentSeats().length > 0 ? root.orange : root.cyan
                     font.pixelSize: 10; font.bold: true
                 }
                 Text {
+                    visible: root.controller.isObserver || !root.compactLayout
                     text: root.controller.isObserver ? "只读观察" : "战位 " + root.controller.currentSeatId
                     color: root.dim; font.pixelSize: 10; font.family: "Consolas"
+                    elide: Text.ElideRight
                 }
             }
             Behavior on opacity { NumberAnimation { duration: 220 } }
@@ -855,31 +892,48 @@ Item {
             Item {
                 ColumnLayout { anchors.centerIn: parent; width: Math.min(parent.width - 40, 760); spacing: 14
                     Text { text: "可用推演室"; color: root.ink; font.pixelSize: 16; font.bold: true }
-                    ListView { id: roomList; Layout.fillWidth: true; Layout.preferredHeight: Math.min(430, Math.max(130, contentHeight)); spacing: 8; model: root.orderedRooms(); clip: true
-                    delegate: Rectangle { id: roomDelegate; required property var modelData; required property int index; width: roomList.width; height: 72; color: roomHover.hovered ? root.panelAlt : root.panel; border.color: roomHover.hovered ? root.cyan : root.line; radius: 6
+                    ListView { id: roomList; Layout.fillWidth: true; Layout.preferredHeight: Math.min(500, Math.max(130, contentHeight)); spacing: 8; model: root.orderedRooms(); clip: true
+                    delegate: Rectangle { id: roomDelegate; required property var modelData; required property int index; property bool compactActions: width < 620; property bool narrowActions: width < 410; property int actionWidth: compactActions ? (narrowActions ? 70 : 82) : 96; property int availableActionCount: (root.roomCanJoin(modelData) ? 1 : 0) + (root.roomCanObserve(modelData) ? 1 : 0); width: roomList.width; height: compactActions ? 112 : 78; color: roomHover.hovered ? root.panelAlt : root.panel; border.color: roomHover.hovered ? root.cyan : root.line; radius: 6
                             HoverHandler { id: roomHover }
-                            RowLayout { anchors.fill: parent; anchors.margins: 14; spacing: 14
-                                Rectangle { Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: 18; color: roomDelegate.modelData.status === "running" ? root.panelAlt : root.panel
-                                    Text { anchors.centerIn: parent; text: roomDelegate.modelData.status === "running" ? "战" : "室"; color: root.cyan; font.bold: true }
-                                }
-                                ColumnLayout { Layout.fillWidth: true; spacing: 2
-                                    Text { Layout.fillWidth: true; text: roomDelegate.modelData.name; color: root.ink; font.bold: true; font.pixelSize: 14; elide: Text.ElideRight }
-                                    Text { Layout.fillWidth: true; text: roomDelegate.modelData.roomId; color: root.dim; font.family: "Consolas"; font.pixelSize: 11; elide: Text.ElideRight }
-                                }
-                                ColumnLayout { Layout.preferredWidth: 112; spacing: 2
-                                    Text { text: root.roomStatusLabel(roomDelegate.modelData.status); color: root.roomStatusColor(roomDelegate.modelData.status); font.pixelSize: 11; font.bold: true }
-                                    Text { text: roomDelegate.modelData.hostedByGameServer === true ? (root.roomCanObserve(roomDelegate.modelData) ? "可加入或观战" : "不可用") : "未托管"; color: root.dim; font.pixelSize: 9 }
-                                }
-                                ColumnLayout { Layout.preferredWidth: 76; spacing: 4
-                                    Button { id: joinRoomButton; visible: root.roomCanJoin(roomDelegate.modelData); enabled: visible; text: "加入"; Accessible.name: "加入" + roomDelegate.modelData.name; onClicked: root.controller.joinOnlineRoom(roomDelegate.modelData.roomId)
-                                        contentItem: Text { text: joinRoomButton.text; color: joinRoomButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
-                                        background: Rectangle { color: joinRoomButton.enabled ? root.cyan : root.line; radius: 4 }
+                            ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: roomDelegate.compactActions ? 8 : 4
+                                RowLayout { Layout.fillWidth: true; spacing: 12
+                                    Rectangle { Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: 18; color: roomDelegate.modelData.status === "running" ? root.panelAlt : root.panel
+                                        Text { anchors.centerIn: parent; text: roomDelegate.modelData.status === "running" ? "战" : "室"; color: root.cyan; font.bold: true }
                                     }
-                                    Button { id: observeRoomButton; visible: root.roomCanObserve(roomDelegate.modelData); enabled: visible; text: "观战"; Accessible.name: "观战" + roomDelegate.modelData.name; onClicked: root.controller.observeOnlineRoom(roomDelegate.modelData.roomId)
-                                        contentItem: Text { text: observeRoomButton.text; color: observeRoomButton.enabled ? root.cyan : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
-                                        background: Rectangle { color: observeRoomButton.hovered ? root.panelAlt : "transparent"; border.color: observeRoomButton.enabled ? root.cyan : root.line; radius: 4 }
+                                    ColumnLayout { Layout.fillWidth: true; spacing: 2
+                                        Text { Layout.fillWidth: true; text: roomDelegate.modelData.name; color: root.ink; font.bold: true; font.pixelSize: 14; elide: Text.ElideRight }
+                                        Text { Layout.fillWidth: true; text: roomDelegate.modelData.roomId + " · " + root.roomModeLabel(roomDelegate.modelData); color: root.dim; font.family: "Consolas"; font.pixelSize: 10; elide: Text.ElideRight }
                                     }
-                                    Text { visible: !joinRoomButton.visible && !observeRoomButton.visible; text: "不可用"; color: root.dim; font.pixelSize: 9; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
+                                    ColumnLayout { visible: !roomDelegate.compactActions; Layout.preferredWidth: 112; spacing: 2
+                                        Text { text: root.roomStatusLabel(roomDelegate.modelData.status); color: root.roomStatusColor(roomDelegate.modelData.status); font.pixelSize: 11; font.bold: true }
+                                        Text { text: roomDelegate.modelData.hostedByGameServer === true ? (root.roomCanObserve(roomDelegate.modelData) ? "可进入或旁观" : "不可用") : "未托管"; color: root.dim; font.pixelSize: 9 }
+                                    }
+                                    Flow { visible: !roomDelegate.compactActions && roomDelegate.availableActionCount > 0; Layout.preferredWidth: roomDelegate.availableActionCount * roomDelegate.actionWidth + (roomDelegate.availableActionCount > 1 ? 6 : 0); spacing: 6
+                                        Button { id: joinRoomButton; visible: root.roomCanJoin(roomDelegate.modelData); enabled: visible; width: roomDelegate.actionWidth; height: 30; text: "进入房间"; Accessible.name: "进入房间 " + roomDelegate.modelData.name; onClicked: root.controller.joinOnlineRoom(roomDelegate.modelData.roomId)
+                                            contentItem: Text { text: joinRoomButton.text; color: joinRoomButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true; elide: Text.ElideRight }
+                                            background: Rectangle { color: joinRoomButton.enabled ? root.cyan : root.line; radius: 4 }
+                                        }
+                                        Button { id: observeRoomButton; visible: root.roomCanObserve(roomDelegate.modelData); enabled: visible; width: roomDelegate.actionWidth; height: 30; text: "旁观"; Accessible.name: "旁观 " + roomDelegate.modelData.name; onClicked: root.controller.observeOnlineRoom(roomDelegate.modelData.roomId)
+                                            contentItem: Text { text: observeRoomButton.text; color: observeRoomButton.enabled ? root.cyan : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; elide: Text.ElideRight }
+                                            background: Rectangle { color: observeRoomButton.hovered ? root.panelAlt : "transparent"; border.color: observeRoomButton.enabled ? root.cyan : root.line; radius: 4 }
+                                        }
+                                    }
+                                }
+                                RowLayout { visible: roomDelegate.compactActions; Layout.fillWidth: true; spacing: 8
+                                    ColumnLayout { Layout.fillWidth: true; spacing: 1
+                                        Text { text: root.roomStatusLabel(roomDelegate.modelData.status); color: root.roomStatusColor(roomDelegate.modelData.status); font.pixelSize: 11; font.bold: true }
+                                        Text { Layout.fillWidth: true; text: roomDelegate.modelData.hostedByGameServer === true ? (root.roomCanObserve(roomDelegate.modelData) ? "可进入或旁观" : "不可用") : "未托管"; color: root.dim; font.pixelSize: 9; elide: Text.ElideRight }
+                                    }
+                                    Flow { visible: roomDelegate.availableActionCount > 0; Layout.preferredWidth: roomDelegate.availableActionCount * roomDelegate.actionWidth + (roomDelegate.availableActionCount > 1 ? 6 : 0); spacing: 6
+                                        Button { id: compactJoinRoomButton; visible: root.roomCanJoin(roomDelegate.modelData); enabled: visible; width: roomDelegate.actionWidth; height: 30; text: roomDelegate.narrowActions ? "进入" : "进入房间"; Accessible.name: "进入房间 " + roomDelegate.modelData.name; onClicked: root.controller.joinOnlineRoom(roomDelegate.modelData.roomId)
+                                            contentItem: Text { text: compactJoinRoomButton.text; color: compactJoinRoomButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true; elide: Text.ElideRight }
+                                            background: Rectangle { color: compactJoinRoomButton.enabled ? root.cyan : root.line; radius: 4 }
+                                        }
+                                        Button { id: compactObserveRoomButton; visible: root.roomCanObserve(roomDelegate.modelData); enabled: visible; width: roomDelegate.actionWidth; height: 30; text: "旁观"; Accessible.name: "旁观 " + roomDelegate.modelData.name; onClicked: root.controller.observeOnlineRoom(roomDelegate.modelData.roomId)
+                                            contentItem: Text { text: compactObserveRoomButton.text; color: compactObserveRoomButton.enabled ? root.cyan : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; elide: Text.ElideRight }
+                                            background: Rectangle { color: compactObserveRoomButton.hovered ? root.panelAlt : "transparent"; border.color: compactObserveRoomButton.enabled ? root.cyan : root.line; radius: 4 }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1512,7 +1566,7 @@ Item {
                                     Slider {
                                         id: unitSpeedSlider
                                         Layout.fillWidth: true
-                                        from: 1; to: 1000; stepSize: 5
+                                        from: 1; to: 240; stepSize: 5
                                         value: root.unitSpeedDraft
                                         onMoved: {
                                             root.unitSpeedDraft = Math.round(value)

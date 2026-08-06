@@ -84,7 +84,7 @@ private:
     double m_cooldown = 0.0;
     int m_ammoCapacity = 4;
     int m_ammoRemaining = 4;
-    double m_hitProbability = 1.0;
+    double m_hitProbability = kDefaultAttackUavHitProbability;
     double m_optimalRange = 1500.0;
     double m_minAttackRange = 0.0;
     double m_cooldownSec = 4.0;

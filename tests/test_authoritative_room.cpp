@@ -965,6 +965,64 @@ TEST(GameServerCommandTest, FutureCommandResultIsStableForDuplicateCommandId) {
     EXPECT_EQ(server.m_commandResultOrder.count(cacheKey), 1);
 }
 
+TEST(GameServerCommandTest, SharedUnitSpeedLimitIsEnforcedByAuthority) {
+    int argc = 1;
+    char applicationName[] = "authoritative_speed_limit_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red-commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        3, QStringLiteral("blue-commander"), QStringLiteral("blue_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        2, QStringLiteral("red-pilot"), QStringLiteral("red_attack_1"),
+        QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_commander"), GeoPos{1000.0, 1000.0, 0.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_attack_1"), GeoPos{1200.0, 1000.0, 2000.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        3, QStringLiteral("blue_commander"), GeoPos{19000.0, 1000.0, 0.0}).ok);
+    server.syncAuthoritativeSeats();
+    QString scenarioError;
+    ASSERT_TRUE(server.applyDeployedScenario(&scenarioError)) << scenarioError.toStdString();
+
+    GameServer::ClientSession session;
+    session.authenticated = true;
+    session.userId = 2;
+    session.roomId = server.m_roomId;
+    session.seatId = QStringLiteral("red_attack_1");
+    session.seatType = QStringLiteral("attack");
+    session.side = QStringLiteral("red");
+    session.role = session.seatId;
+    const QString unitId = server.m_authoritativeRoom.seat(session.seatId).unitId;
+    ASSERT_FALSE(unitId.isEmpty());
+
+    QString code;
+    QString reason;
+    EXPECT_TRUE(server.validateCommandOwnership(
+        session, QStringLiteral("setSpeed"),
+        QVariantMap{{QStringLiteral("unitId"), unitId}, {QStringLiteral("speed"), 240.0}},
+        &code, &reason));
+    EXPECT_FALSE(server.validateCommandOwnership(
+        session, QStringLiteral("setSpeed"),
+        QVariantMap{{QStringLiteral("unitId"), unitId}, {QStringLiteral("speed"), 241.0}},
+        &code, &reason));
+    EXPECT_EQ(code, QStringLiteral("INVALID_ARGUMENT"));
+    EXPECT_EQ(reason, QStringLiteral("速度必须大于 0 且不超过 240"));
+}
+
 TEST(GameServerCommandTest, UnitNameRevisionChangesAndUnitOrderTargetsOwnedUnit) {
     int argc = 1;
     char applicationName[] = "authoritative_room_name_command_tests";
@@ -3191,6 +3249,39 @@ TEST(GameServerAiExecutionTest, AttackBudgetKeepsGeneratedMovementInAuthoritativ
     server.m_roomStatus = QStringLiteral("running");
     server.m_phase = QStringLiteral("running");
     server.m_aiDifficulty = QStringLiteral("easy");
+
+    const QString blueAttackId = server.m_authoritativeRoom
+        .seat(QStringLiteral("blue_attack_1")).unitId;
+    const QString redCommandPostId = server.m_authoritativeRoom
+        .seat(QStringLiteral("red_commander")).unitId;
+    const QString redAttackId = server.m_authoritativeRoom
+        .seat(QStringLiteral("red_attack_1")).unitId;
+    UnitBase* blueAttack = server.m_engine.unit(blueAttackId);
+    UnitBase* redCommandPost = server.m_engine.unit(redCommandPostId);
+    UnitBase* redAttack = server.m_engine.unit(redAttackId);
+    ASSERT_NE(blueAttack, nullptr);
+    ASSERT_NE(redCommandPost, nullptr);
+    ASSERT_NE(redAttack, nullptr);
+    const GeoPos blueAttackPosition = blueAttack->pos();
+    const GeoPos redCommandPostPosition = redCommandPost->pos();
+    const GeoPos redAttackPosition = redAttack->pos();
+    blueAttack->setPosition(GeoPos{1000.0, 1000.0, 20.0});
+    redAttack->setPosition(GeoPos{1050.0, 1000.0, 20.0});
+    redCommandPost->setPosition(GeoPos{1400.0, 1000.0, 0.0});
+    server.m_engine.stepOnce(0.01);
+    const QList<AiSeatState> prioritizedStates = server.aiSeatStates();
+    const auto prioritizedAttack = std::find_if(
+        prioritizedStates.cbegin(), prioritizedStates.cend(), [](const AiSeatState& state) {
+            return state.seatId == QLatin1String("blue_attack_1");
+        });
+    ASSERT_NE(prioritizedAttack, prioritizedStates.cend());
+    EXPECT_TRUE(prioritizedAttack->targetVisible);
+    EXPECT_EQ(prioritizedAttack->targetId, redCommandPostId);
+    EXPECT_EQ(prioritizedAttack->targetKind, QStringLiteral("commandpost"));
+    blueAttack->setPosition(blueAttackPosition);
+    redCommandPost->setPosition(redCommandPostPosition);
+    redAttack->setPosition(redAttackPosition);
+    server.m_engine.stepOnce(0.01);
 
     QList<AiSeatState> states = server.aiSeatStates();
     ASSERT_EQ(states.size(), 4);

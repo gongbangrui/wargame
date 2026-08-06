@@ -1089,9 +1089,11 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
     if (action == QLatin1String("setSpeed")) {
         bool ok = false;
         const double speed = args.value(QStringLiteral("speed")).toDouble(&ok);
-        if (!ok || !std::isfinite(speed) || speed <= 0.0 || speed > 1000.0) {
+        if (!ok || !std::isfinite(speed) || speed <= 0.0
+            || speed > kMaximumCommandedUnitSpeedMps) {
             return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
-                                         QStringLiteral("单元速度必须大于 0 且不超过 1000"));
+                                         QStringLiteral("单元速度必须大于 0 且不超过 %1")
+                                             .arg(kMaximumCommandedUnitSpeedMps, 0, 'f', 0));
         }
     }
     if (action == QLatin1String("setSchedule")) {
@@ -1299,9 +1301,7 @@ void SimulationEngine::cmdSetSpeed(const QVariantMap& args) {
     if (!u) return;
     if (!u->movable() || !u->alive()) return;
     if (!std::isfinite(v) || v <= 0.0) return;
-    // Clamp absurd speeds (>1km/s would let a unit teleport across the map).
-    constexpr double kMaxSpeed = 1000.0;
-    u->setSpeed(std::min(v, kMaxSpeed));
+    u->setSpeed(std::min(v, kMaximumCommandedUnitSpeedMps));
 }
 
 void SimulationEngine::cmdPursue(const QVariantMap& args) {

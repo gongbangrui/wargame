@@ -401,7 +401,8 @@ bool validObserverRoomState(const QJsonObject& roomState) {
     static const QSet<QString> allowed{
         QStringLiteral("phase"), QStringLiteral("roomId"), QStringLiteral("roomName"),
         QStringLiteral("roomStatus"), QStringLiteral("roomMode"),
-        QStringLiteral("aiDifficulty"), QStringLiteral("configVersion"),
+        QStringLiteral("aiDifficulty"), QStringLiteral("aiEngine"),
+        QStringLiteral("configVersion"),
         QStringLiteral("running"), QStringLiteral("simTime"), QStringLiteral("speed"),
         QStringLiteral("scenarioRevision"), QStringLiteral("stateRevision"),
         QStringLiteral("observer")};
@@ -465,6 +466,12 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
                        != QLatin1String("normal")
                     && roomState.value(QStringLiteral("aiDifficulty")).toString()
                        != QLatin1String("hard"))))
+        || (roomState.contains(QStringLiteral("aiEngine"))
+            && (!roomState.value(QStringLiteral("aiEngine")).isString()
+                || (roomState.value(QStringLiteral("aiEngine")).toString()
+                    != QLatin1String("rules")
+                    && roomState.value(QStringLiteral("aiEngine")).toString()
+                       != QLatin1String("ollama"))))
         || (roomState.contains(QStringLiteral("configVersion"))
             && !validNonNegativeInteger(roomState.value(QStringLiteral("configVersion"))))) {
         return invalid();
@@ -511,6 +518,9 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
     projection->aiDifficulty = roomState.contains(QStringLiteral("aiDifficulty"))
         ? roomState.value(QStringLiteral("aiDifficulty")).toString()
         : QStringLiteral("normal");
+    projection->aiEngine = roomState.contains(QStringLiteral("aiEngine"))
+        ? roomState.value(QStringLiteral("aiEngine")).toString()
+        : QStringLiteral("rules");
     projection->configVersion = roomState.value(QStringLiteral("configVersion")).toInteger(1);
     projection->observer = roomState.value(QStringLiteral("observer")).toBool(false);
     projection->redReady = roomState.value(QStringLiteral("redReady")).toBool();

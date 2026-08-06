@@ -176,10 +176,16 @@ QJsonObject joinObserver(GameServer& server, QWebSocket* socket, QWebSocket& cli
         })) {
         return {};
     }
-    return latestPayload(messages, QStringLiteral("snapshot"), [](const QJsonObject& payload) {
+    const QJsonObject snapshot = latestPayload(messages, QStringLiteral("snapshot"), [](const QJsonObject& payload) {
         return payload.value(QStringLiteral("roomState")).toObject()
             .value(QStringLiteral("observer")).toBool();
     });
+    EXPECT_FALSE(snapshot.contains(QStringLiteral("mapMarks")));
+    const Protocol::ValidationResult validation = Protocol::validateServerEnvelope(
+        Protocol::makeServerEnvelope(QStringLiteral("snapshot"), 1, snapshot));
+    EXPECT_TRUE(validation.valid) << validation.code.toStdString() << ": "
+                                  << validation.message.toStdString();
+    return snapshot;
 }
 
 struct ValidMessage {

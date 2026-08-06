@@ -194,7 +194,8 @@ Scenario ScenarioIo::fromJson(const QJsonObject& o, QString* err) {
         if (!readOptionalInteger(u, "ammoCapacity", 4, &su.ammoCapacity, &parseError, context)
             || !readOptionalInteger(u, "initialAmmo", su.ammoCapacity, &su.initialAmmo,
                                     &parseError, context)
-            || !readOptionalFiniteDouble(u, "hitProbability", 1.0, &su.hitProbability,
+            || !readOptionalFiniteDouble(u, "hitProbability", kDefaultAttackUavHitProbability,
+                                         &su.hitProbability,
                                          &parseError, context)
             || !readOptionalFiniteDouble(u, "optimalRange", su.attackRange, &su.optimalRange,
                                          &parseError, context)

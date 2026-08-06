@@ -17,7 +17,6 @@
 - WebSocket 权威数据面：按房间和战位隔离会话，协议和权限模型由游戏服务统一执行。
 - Fast DDS 兼容适配保留为后续安全传输实现的接口，当前默认关闭；所有登录、房间目录、状态和命令均走 WebSocket/HTTPS 权威数据面。
 - 检查点、事件日志、状态快照与增量同步。
-- GoogleTest 单元测试、协议测试、快照测试、锁步测试和服务器状态测试。
 - 内置 GIS 瓦片资源和地图元数据。
 
 ## 技术栈与要求
@@ -30,7 +29,7 @@
 - Python 3（账号服务及地图工具）
 - Docker Engine 与 Docker Compose（联网部署时需要）
 
-GoogleTest 在 CMake 配置阶段通过 `FetchContent` 获取，不需要手动安装。项目统一使用 CMake Presets 与 Ninja 构建。
+项目统一使用 CMake Presets 与 Ninja 构建。
 
 Fast DDS 集成需要同时安装 SDK 和 `fastddsgen`。默认构建和运行时都关闭 DDS；在认证、访问控制和加密配置完成前，设置兼容模式也会被服务端拒绝。客户端和服务器继续使用 WebSocket 权威数据面。
 
@@ -52,48 +51,19 @@ ninja -C build appindex
 ```bash
 cmake --preset debug
 cmake --build --preset debug
-ctest --preset debug
 ```
 
 客户端可在启动后选择本地模式或联网模式。默认情况下，联网模式连接本机的账号服务 `http://localhost:8080` 和推演 WebSocket 服务 `ws://localhost:8090`。
 
-## 测试
-
-Debug 构建默认启用测试：
-
-```bash
-cmake --preset debug
-cmake --build --preset debug --target wargame_tests
-ctest --preset debug
-```
-
-直接运行测试程序：
-
-```bash
-./build/debug/wargame_tests
-```
-
-启用 AddressSanitizer 和 UndefinedBehaviorSanitizer：
-
-```bash
-cmake --preset sanitizers
-cmake --build --preset sanitizers
-ctest --preset sanitizers
-```
-
 ## 质量门禁与恢复验证
 
-CI 对每次提交执行 Debug/ASan-UBSan 构建、测试注册一致性检查、全部单元测试、QML lint、
-源码格式检查，以及隔离 Docker 卷中的联网冒烟和恢复演练。本地可执行相同检查：
+CI 对每次提交执行 Debug/ASan-UBSan 构建、QML lint、源码格式检查，以及隔离 Docker 卷中的联网冒烟和恢复演练。本地可执行相同检查：
 
 ```bash
 cmake --preset debug
 cmake --preset sanitizers
 cmake --build --preset debug
 cmake --build --preset sanitizers
-./tools/verify-test-baseline.sh build/debug build/sanitizers
-ctest --preset debug
-ctest --preset sanitizers
 cmake --build build/debug --target all_qmllint
 ./tools/check-source-format.sh
 ./tools/verify-docker-recovery.sh

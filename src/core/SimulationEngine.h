@@ -44,6 +44,8 @@ class SimulationEngine : public QObject {
     Q_PROPERTY(QString lastError READ lastError NOTIFY errorOccurred)
     Q_PROPERTY(QVariantList timeline READ timelineForView NOTIFY timelineChanged)
 public:
+    static constexpr double kMaximumCommandedUnitSpeedMps = 240.0;
+
     explicit SimulationEngine(QObject* parent = nullptr);
     /// @brief 注入自定义推演域消息传输。
     /// @details When omitted, the engine creates a LocalTransport internally — same

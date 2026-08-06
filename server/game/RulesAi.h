@@ -21,10 +21,16 @@ struct AiSeatState {
     QString unitId;
     QString kind;
     QString targetId;
+    QString targetKind;
     double x = 0.0;
     double y = 0.0;
     double targetX = 0.0;
     double targetY = 0.0;
+    // Runtime speed is after damage effects. Commanded and cruise speeds stay
+    // local to the rules executor and are never part of AiPlanV1's wire shape.
+    double speed = 0.0;
+    double commandedSpeed = 0.0;
+    double cruiseSpeed = 0.0;
     bool targetVisible = false;
     bool alive = true;
     bool movable = true;
@@ -53,7 +59,9 @@ public:
                                        quint64 planningGeneration = 1);
     static QList<AiCommand> commandsForPlan(const AiPlanV1& plan,
                                              const QList<AiSeatState>& seats,
-                                             double now);
+                                             double now,
+                                             double mapWidth = 20000.0,
+                                             double mapHeight = 15000.0);
 };
 
 }

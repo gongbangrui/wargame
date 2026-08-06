@@ -63,6 +63,7 @@ class SimulationController : public QObject {
     Q_PROPERTY(bool blueReady READ blueReady NOTIFY roomStateChanged)
     Q_PROPERTY(QString roomMode READ roomMode NOTIFY roomStateChanged)
     Q_PROPERTY(QString aiDifficulty READ aiDifficulty NOTIFY roomStateChanged)
+    Q_PROPERTY(QString aiEffectiveEngine READ aiEffectiveEngine NOTIFY roomStateChanged)
     Q_PROPERTY(qint64 configVersion READ configVersion NOTIFY roomStateChanged)
     Q_PROPERTY(QString communicationState READ communicationState NOTIFY roomStateChanged)
     Q_PROPERTY(QVariantList chatMessages READ chatMessages NOTIFY chatMessagesChanged)
@@ -128,6 +129,7 @@ public:
     bool blueReady() const { return m_blueReady; }
     QString roomMode() const { return m_roomMode; }
     QString aiDifficulty() const { return m_aiDifficulty; }
+    QString aiEffectiveEngine() const { return m_aiEffectiveEngine; }
     qint64 configVersion() const { return m_configVersion; }
     QString communicationState() const { return m_communicationState; }
     QVariantList chatMessages() const { return m_chatMessages; }
@@ -322,6 +324,7 @@ private:
     bool m_blueReady = false;
     QString m_roomMode = QStringLiteral("pvp");
     QString m_aiDifficulty = QStringLiteral("normal");
+    QString m_aiEffectiveEngine = QStringLiteral("rules");
     qint64 m_configVersion = 1;
     QString m_communicationState = QStringLiteral("disconnected");
     qint64 m_remoteScenarioRevision = -1;

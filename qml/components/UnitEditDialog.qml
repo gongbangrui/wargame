@@ -35,7 +35,7 @@ Dialog {
         "commandpost": { detectRange: 5000, attackRange: 0,    commRange: 20000, speed: 0,    maxHp: 200, attackPower: 0,   alt: 50, armor: 0.2, repairRate: 3, subsystemRepairRate: 0.03 },
         "reconuav":    { detectRange: 8000, attackRange: 0,    commRange: 20000, speed: 80,   maxHp: 100, attackPower: 0,   alt: 3000, armor: 0.05, repairRate: 2, subsystemRepairRate: 0.02 },
         "attackuav":   { detectRange: 4000, attackRange: 2500, commRange: 15000, speed: 100,  maxHp: 120, attackPower: 100, alt: 2000,
-                          ammoCapacity: 4, initialAmmo: 4, hitProbability: 1.0, optimalRange: 1800,
+                          ammoCapacity: 4, initialAmmo: 4, hitProbability: 0.7, optimalRange: 1800,
                           minAttackRange: 0, cooldownSec: 4, damageMin: 80, damageMax: 120, rangeFalloff: 0.35,
                           armor: 0.1, repairRate: 2, subsystemRepairRate: 0.02,
                           fuelCapacitySec: 1800, initialFuelSec: 1800, rearmDurationSec: 12 },
@@ -290,7 +290,7 @@ Dialog {
                 Text { text: "海拔 (m)"; color: "#aebed1"; font.pixelSize: 11 }
                 SpinBox { id: altSpin; Layout.fillWidth: true; implicitHeight: 34; from: 0; to: 20000; stepSize: 50; editable: true }
                 Text { text: "速度 (m/s)"; color: dlg.isCp ? "#6f7f94" : "#aebed1"; font.pixelSize: 11 }
-                SpinBox { id: speedSpin; Layout.fillWidth: true; implicitHeight: 34; from: 0; to: 1000; editable: true; enabled: !dlg.isCp }
+                SpinBox { id: speedSpin; Layout.fillWidth: true; implicitHeight: 34; from: 0; to: 240; editable: true; enabled: !dlg.isCp }
                 Text { text: "探测半径 (m)"; color: "#aebed1"; font.pixelSize: 11 }
                 SpinBox { id: detectSpin; Layout.fillWidth: true; implicitHeight: 34; from: 0; to: 100000; stepSize: 100; editable: true }
                 Text { text: "通信半径 (m)"; color: "#aebed1"; font.pixelSize: 11 }

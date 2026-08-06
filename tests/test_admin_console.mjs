@@ -13,7 +13,7 @@ function loadHelpers() {
     sessionStorage: { getItem() { return null; } },
     module: { exports: {} },
   };
-  vm.runInNewContext(`${source}\nmodule.exports = { formatApiError, historyValueText, historyStatusLabel };`, sandbox, {
+  vm.runInNewContext(`${source}\nmodule.exports = { formatApiError, historyValueText, historyStatusLabel, retainedAiHistorySelection };`, sandbox, {
     filename: "server/account/static/app.js",
   });
   return sandbox.module.exports;
@@ -45,4 +45,12 @@ test("keeps AI history payloads as literal text and maps status labels", () => {
   assert.match(historyValueText({ prompt: hostile }), /__historyXss/);
   assert.equal(historyStatusLabel("failed"), "失败");
   assert.equal(historyStatusLabel("unexpected"), "未知状态");
+});
+
+test("keeps the selected AI conversation across a background history refresh", () => {
+  const { retainedAiHistorySelection } = loadHelpers();
+  const items = [{ conversationId: "ai-plan:1:4" }, { conversationId: "ai-plan:1:3" }];
+
+  assert.equal(retainedAiHistorySelection("ai-plan:1:3", items), "ai-plan:1:3");
+  assert.equal(retainedAiHistorySelection("ai-plan:1:2", items), "");
 });

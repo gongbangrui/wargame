@@ -11,6 +11,8 @@
 
 namespace gbr {
 
+inline constexpr double kDefaultAttackUavHitProbability = 0.70;
+
 class UnitBase;
 
 struct SchedulePoint {
@@ -42,7 +44,7 @@ struct ScenarioUnit {
     double attackPower = 100;
     int ammoCapacity = 4;
     int initialAmmo = 4;
-    double hitProbability = 1.0;
+    double hitProbability = kDefaultAttackUavHitProbability;
     double optimalRange = 1500.0;
     double minAttackRange = 0.0;
     double cooldownSec = 4.0;

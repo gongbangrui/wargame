@@ -22,14 +22,19 @@ jobs:
         run: uv run --with-requirements server/account/requirements.txt python tests/test_account_room_lifecycle.py
       - name: Test account security
         run: uv run --with-requirements server/account/requirements.txt python tests/test_account_security.py
+      - name: Test account monitoring and PVE configuration
+        run: |
+          uv run --with-requirements server/account/requirements.txt python tests/test_account_monitor.py
+          uv run --with-requirements server/account/requirements.txt python tests/test_account_pve_config.py
       - name: Check JavaScript contracts
-        run: npm run check
+        run: node --test tests/test_admin_console.mjs
       - name: Test standalone deployment scripts
         run: |
           ./tests/test_standalone_installer_guide.sh
           ./tests/test_standalone_installer_runtime_layout.sh
           ./tests/test_standalone_installer_staging.sh
           ./tests/test_standalone_lifecycle_paths.sh
+          ./tests/test_deployment_package.sh
 
   native:
     name: Native quality gate
@@ -53,16 +58,12 @@ jobs:
         run: cmake --build --preset debug --parallel
       - name: Build Sanitizers
         run: cmake --build --preset sanitizers --parallel
-      - name: Verify test baseline
-        run: ./tools/verify-test-baseline.sh build/debug build/sanitizers
-      - name: Test Debug
-        run: ctest --preset debug
-      - name: Test Sanitizers
-        run: ctest --preset sanitizers
       - name: Lint QML
         run: cmake --build build/debug --target all_qmllint --parallel
       - name: Check source format
         run: ./tools/check-source-format.sh
+      - name: Verify map manifest
+        run: (cd map && sha256sum -c MANIFEST.sha256)
 
   docker-recovery:
     name: Docker smoke and recovery

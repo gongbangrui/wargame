@@ -6,7 +6,7 @@
 namespace gbr {
 
 struct WeaponProfile {
-    double hitProbability = 1.0;
+    double hitProbability = 0.70;
     double minRange = 0.0;
     double optimalRange = 1500.0;
     double maxRange = 1500.0;

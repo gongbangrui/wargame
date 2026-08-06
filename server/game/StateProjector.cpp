@@ -250,7 +250,8 @@ QJsonObject observerRoomState(const QJsonObject& source, quint64 stateRevision) 
     static const QStringList fields{
         QStringLiteral("phase"), QStringLiteral("roomId"), QStringLiteral("roomName"),
         QStringLiteral("roomStatus"), QStringLiteral("roomMode"),
-        QStringLiteral("aiDifficulty"), QStringLiteral("configVersion"),
+        QStringLiteral("aiDifficulty"), QStringLiteral("aiEngine"),
+        QStringLiteral("configVersion"),
         QStringLiteral("running"), QStringLiteral("simTime"), QStringLiteral("speed"),
         QStringLiteral("scenarioRevision")};
     QJsonObject projected;

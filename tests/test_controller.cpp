@@ -91,6 +91,19 @@ public:
         emit controller.m_networkClient.commandRejected(QStringLiteral("leave rejected"));
     }
 
+    static void seedPendingObserverJoin(SimulationController& controller) {
+        controller.m_sessionMode = QStringLiteral("online");
+        controller.m_isObserver = true;
+        controller.m_observerJoinPending = true;
+        controller.m_currentRoomId = QStringLiteral("main");
+        controller.m_onlineStage = QStringLiteral("observer");
+    }
+
+    static void receiveSeatState(SimulationController& controller,
+                                 const QJsonObject& state) {
+        emit controller.m_networkClient.seatStateReceived(state);
+    }
+
     static void receiveTransferEvent(SimulationController& controller,
                                      const QString& kind, qint64 revision = 12) {
         QJsonObject event{{QStringLiteral("kind"), kind},
@@ -496,6 +509,7 @@ TEST(SimulationControllerTest, PveSnapshotPublishesAuthorizedConfigurationAndAiS
                      {QStringLiteral("roomId"), QStringLiteral("main")},
                      {QStringLiteral("roomMode"), QStringLiteral("pve")},
                      {QStringLiteral("aiDifficulty"), QStringLiteral("hard")},
+                     {QStringLiteral("aiEngine"), QStringLiteral("ollama")},
                      {QStringLiteral("configVersion"), 7},
                      {QStringLiteral("scenarioRevision"), 2},
                      {QStringLiteral("simTime"), 0.0},
@@ -517,6 +531,7 @@ TEST(SimulationControllerTest, PveSnapshotPublishesAuthorizedConfigurationAndAiS
 
     EXPECT_EQ(controller.property("roomMode").toString(), QStringLiteral("pve"));
     EXPECT_EQ(controller.property("aiDifficulty").toString(), QStringLiteral("hard"));
+    EXPECT_EQ(controller.property("aiEffectiveEngine").toString(), QStringLiteral("ollama"));
     EXPECT_EQ(controller.property("configVersion").toLongLong(), 7);
     const QVariantList seats = controller.onlineSeats();
     ASSERT_EQ(seats.size(), 2);
@@ -548,6 +563,39 @@ TEST(SimulationControllerTest, LeavePendingClearsWhenServerRejectsRequest) {
     SimulationControllerTestPeer::receiveCommandRejected(controller);
 
     EXPECT_FALSE(controller.leaveRoomPending());
+}
+
+TEST(SimulationControllerTest, RejectedObserverJoinRestoresSeatSelectionFlow) {
+    SimulationController controller;
+    SimulationControllerTestPeer::seedPendingObserverJoin(controller);
+
+    SimulationControllerTestPeer::receiveCommandRejected(controller);
+
+    EXPECT_FALSE(controller.isObserver());
+    EXPECT_TRUE(controller.currentRoomId().isEmpty());
+    EXPECT_EQ(controller.onlineStage(), QStringLiteral("roomSelect"));
+
+    const QJsonObject seatState{
+        {QStringLiteral("roomId"), QStringLiteral("main")},
+        {QStringLiteral("yourSeatId"), QString()},
+        {QStringLiteral("seats"), QJsonArray{QJsonObject{
+            {QStringLiteral("seatId"), QStringLiteral("red_commander")},
+            {QStringLiteral("seatType"), QStringLiteral("commander")},
+            {QStringLiteral("side"), QStringLiteral("red")},
+            {QStringLiteral("occupied"), false}}}}};
+    SimulationControllerTestPeer::receiveSeatState(controller, seatState);
+
+    EXPECT_EQ(controller.currentRoomId(), QStringLiteral("main"));
+    EXPECT_FALSE(controller.isObserver());
+    EXPECT_EQ(controller.onlineStage(), QStringLiteral("seatSelect"));
+
+    bool claimReachedNetworkClient = false;
+    QObject::connect(&controller, &SimulationController::errorForward,
+                     &controller, [&claimReachedNetworkClient](const QString&) {
+                         claimReachedNetworkClient = true;
+                     });
+    controller.claimOnlineSeat(QStringLiteral("red_commander"));
+    EXPECT_TRUE(claimReachedNetworkClient);
 }
 
 TEST(SimulationControllerTest, FriendlyCommanderCanApproveAndRejectPendingSeatTransfers) {

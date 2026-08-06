@@ -185,7 +185,7 @@ TEST(ScenarioTest, FromJsonRejectsMalformedSchedulePoints) {
     }
 }
 
-TEST(ScenarioTest, FromJsonPreservesLegacyOptionalWeaponDefaults) {
+TEST(ScenarioTest, FromJsonUsesCurrentOptionalWeaponDefaults) {
     const Scenario parsed = ScenarioIo::fromJson(
         QJsonObject{{QStringLiteral("schemaVersion"), 1},
                     {QStringLiteral("units"),
@@ -199,7 +199,7 @@ TEST(ScenarioTest, FromJsonPreservesLegacyOptionalWeaponDefaults) {
     const ScenarioUnit& unit = parsed.units.front();
     EXPECT_EQ(unit.ammoCapacity, 4);
     EXPECT_EQ(unit.initialAmmo, 4);
-    EXPECT_DOUBLE_EQ(unit.hitProbability, 1.0);
+    EXPECT_DOUBLE_EQ(unit.hitProbability, 0.70);
     EXPECT_DOUBLE_EQ(unit.optimalRange, 2000.0);
     EXPECT_DOUBLE_EQ(unit.minAttackRange, 0.0);
     EXPECT_DOUBLE_EQ(unit.cooldownSec, 4.0);

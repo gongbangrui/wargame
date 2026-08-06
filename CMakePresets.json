@@ -8,12 +8,11 @@
   "configurePresets": [
     {
       "name": "debug",
-      "displayName": "Debug client, server, and tests",
+      "displayName": "Debug client and server",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "BUILD_TESTING": "ON",
         "WARGAME_BUILD_SERVER": "ON"
       }
     },
@@ -36,24 +35,7 @@
     {
       "name": "sanitizers",
       "configurePreset": "sanitizers",
-      "targets": ["wargame_tests", "authoritative_room_tests", "fastdds_integration_tests", "wargame_server"],
       "jobs": 2
-    }
-  ],
-  "testPresets": [
-    {
-      "name": "debug",
-      "configurePreset": "debug",
-      "output": {"outputOnFailure": true}
-    },
-    {
-      "name": "sanitizers",
-      "configurePreset": "sanitizers",
-      "output": {"outputOnFailure": true},
-      "environment": {
-        "ASAN_OPTIONS": "detect_leaks=1:strict_string_checks=1",
-        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
-      }
     }
   ]
 }

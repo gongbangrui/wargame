@@ -58,6 +58,7 @@ struct RoomLifecycleProjection {
     QString roomStatus;
     QString roomMode = QStringLiteral("pvp");
     QString aiDifficulty = QStringLiteral("normal");
+    QString aiEngine = QStringLiteral("rules");
     qint64 configVersion = 1;
     bool observer = false;
     bool redReady = false;

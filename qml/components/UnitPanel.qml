@@ -238,7 +238,7 @@ Rectangle {
                         implicitWidth: 26; implicitHeight: 26
                         onClicked: {
                             var v = Math.round(root.snap.speed || 0) - 5
-                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, v) })
+                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, Math.min(240, v)) })
                         }
                     }
                     TextInput {
@@ -250,7 +250,7 @@ Rectangle {
                         text: Math.round(root.snap.speed || 0)
                         onEditingFinished: {
                             var v = parseInt(text) || 1
-                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, Math.min(400, v)) })
+                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, Math.min(240, v)) })
                         }
                     }
                     Text {
@@ -267,7 +267,7 @@ Rectangle {
                         implicitWidth: 26; implicitHeight: 26
                         onClicked: {
                             var v = Math.round(root.snap.speed || 0) + 5
-                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.min(400, v) })
+                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.min(240, v) })
                         }
                     }
                 }

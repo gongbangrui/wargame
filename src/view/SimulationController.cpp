@@ -1609,6 +1609,7 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_blueReady = false;
     m_roomMode = QStringLiteral("pvp");
     m_aiDifficulty = QStringLiteral("normal");
+    m_aiEffectiveEngine = QStringLiteral("rules");
     m_configVersion = 1;
     m_remoteReadyForSim = false;
     m_remoteCpIssues.clear();
@@ -1691,6 +1692,7 @@ void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
     m_blueReady = room.blueReady;
     m_roomMode = room.roomMode;
     m_aiDifficulty = room.aiDifficulty;
+    m_aiEffectiveEngine = room.aiEngine;
     m_configVersion = room.configVersion;
     const QString projectedCommunication = payload.value(QStringLiteral("roomState"))
                                                .toObject()

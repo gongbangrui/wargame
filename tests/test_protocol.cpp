@@ -505,6 +505,7 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
                            {QStringLiteral("selectedTemplate"), QStringLiteral("red-recon")}};
     const QJsonObject roomState{{QStringLiteral("phase"), QStringLiteral("preparing")},
                                 {QStringLiteral("roomId"), QStringLiteral("main")},
+                                {QStringLiteral("aiEngine"), QStringLiteral("ollama")},
                                 {QStringLiteral("running"), false},
                                 {QStringLiteral("simTime"), 12.5},
                                 {QStringLiteral("speed"), 2.0},
@@ -516,6 +517,7 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
     EXPECT_EQ(snapshot.lifecycle.roomId, QStringLiteral("main"));
     EXPECT_EQ(snapshot.lifecycle.roomMode, QStringLiteral("pvp"));
     EXPECT_EQ(snapshot.lifecycle.aiDifficulty, QStringLiteral("normal"));
+    EXPECT_EQ(snapshot.lifecycle.aiEngine, QStringLiteral("ollama"));
     EXPECT_EQ(snapshot.lifecycle.configVersion, 1);
     ASSERT_EQ(snapshot.lifecycle.seats.size(), 1);
     EXPECT_EQ(snapshot.lifecycle.seats.front().seatId, QStringLiteral("red_recon_1"));
@@ -663,6 +665,18 @@ TEST(ProtocolTest, ObserverFlagDefaultsFalseAndRequiresBooleanWhenPresent) {
 
     EXPECT_FALSE(Protocol::projectRoomLifecycle(
                      QJsonObject{{QStringLiteral("observer"), QStringLiteral("true")}},
+                     &projection).valid);
+}
+
+TEST(ProtocolTest, AiEngineIsConstrainedToPublicRuntimeValues) {
+    Protocol::RoomLifecycleProjection projection;
+    ASSERT_TRUE(Protocol::projectRoomLifecycle(
+                    QJsonObject{{QStringLiteral("aiEngine"), QStringLiteral("rules")}},
+                    &projection).valid);
+    EXPECT_EQ(projection.aiEngine, QStringLiteral("rules"));
+
+    EXPECT_FALSE(Protocol::projectRoomLifecycle(
+                     QJsonObject{{QStringLiteral("aiEngine"), QStringLiteral("unknown")}},
                      &projection).valid);
 }
 

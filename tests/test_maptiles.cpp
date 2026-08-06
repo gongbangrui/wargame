@@ -88,6 +88,10 @@ QGuiApplication* ensureGuiApplication() {
     static int argc = 1;
     static char applicationName[] = "wargame-tests";
     static char* argv[] = {applicationName, nullptr};
+    // Headless tests must not inherit a desktop theme or input-method plugin
+    // that can synchronously contact an unavailable DBus session.
+    qunsetenv("QT_QPA_PLATFORMTHEME");
+    qunsetenv("QT_IM_MODULE");
     qputenv("QT_QPA_PLATFORM", "offscreen");
     static QGuiApplication application(argc, argv);
     return &application;

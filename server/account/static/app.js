@@ -1081,6 +1081,12 @@ function renderAiHistory() {
   }
 }
 
+function retainedAiHistorySelection(conversationId, items) {
+  if (typeof conversationId !== "string" || !conversationId) return "";
+  return Array.isArray(items) && items.some((item) => item?.conversationId === conversationId)
+    ? conversationId : "";
+}
+
 async function selectAiConversation(conversationId) {
   if (!conversationId) return;
   const history = state.aiHistory;
@@ -1108,19 +1114,23 @@ async function selectAiConversation(conversationId) {
   }
 }
 
-async function loadAiHistory({ reset = false, showError = false } = {}) {
+async function loadAiHistory({ reset = false, preserveSelection = false, showError = false } = {}) {
   const history = state.aiHistory;
   const filter = $("aiHistoryStatusFilter")?.value || history.status || "all";
   if (reset) {
+    const retainedSelection = preserveSelection ? history.selectedId : "";
     history.status = filter;
     history.items = [];
     history.nextBefore = null;
     history.hasMore = false;
-    history.selectedId = "";
-    history.detail = null;
-    history.detailState = "empty";
-    history.detailError = "";
-    history.detailGeneration += 1;
+    if (!retainedSelection) {
+      history.selectedId = "";
+      history.detail = null;
+      history.detailState = "empty";
+      history.detailError = "";
+      history.activeTab = "prompts";
+      history.detailGeneration += 1;
+    }
   }
   const requestGeneration = ++history.requestGeneration;
   history.listState = "loading";
@@ -1140,8 +1150,21 @@ async function loadAiHistory({ reset = false, showError = false } = {}) {
     history.nextBefore = typeof data.nextBefore === "string" && data.nextBefore ? data.nextBefore : null;
     history.hasMore = data.hasMore === true && Boolean(history.nextBefore);
     history.listState = "ready";
+    if (reset) {
+      const retainedSelection = retainedAiHistorySelection(history.selectedId, history.items);
+      if (history.selectedId && !retainedSelection) {
+        history.selectedId = "";
+        history.detail = null;
+        history.detailState = "empty";
+        history.detailError = "";
+        history.activeTab = "prompts";
+        history.detailGeneration += 1;
+      }
+    }
     renderAiHistory();
-    if (reset && history.items.length) selectAiConversation(history.items[0].conversationId);
+    if (reset && !history.selectedId && history.items.length) {
+      selectAiConversation(history.items[0].conversationId);
+    }
   } catch (error) {
     if (!requestIsCurrent({ token: state.token, historyGeneration: requestGeneration })) return;
     history.listState = "error";
@@ -1170,11 +1193,23 @@ async function loadMonitor(showError = false) {
   }
 }
 
+function monitorPageIsVisible() {
+  return !$("monitorPage")?.classList.contains("hidden");
+}
+
+function refreshVisibleAiHistory() {
+  if (!monitorPageIsVisible() || state.aiHistory.listState === "loading") return;
+  loadAiHistory({ reset: true, preserveSelection: true });
+}
+
 function startMonitorRefresh() {
   window.clearInterval(state.monitorTimer);
   loadMonitor(true);
-  loadAiHistory({ reset: true, showError: true });
-  state.monitorTimer = window.setInterval(() => loadMonitor(false), 5000);
+  refreshVisibleAiHistory();
+  state.monitorTimer = window.setInterval(() => {
+    loadMonitor(false);
+    refreshVisibleAiHistory();
+  }, 5000);
 }
 
 function openUserModal(user = null) {
@@ -1281,7 +1316,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (page === "rooms") loadRooms().catch((error) => toast(error.message, true));
     if (page === "monitor") {
       loadMonitor(true);
-      if (state.aiHistory.listState === "idle") loadAiHistory({ reset: true, showError: true });
+      loadAiHistory({ reset: true, preserveSelection: true, showError: true });
     }
   }));
 
@@ -1290,7 +1325,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadAiHistory({ reset: true, showError: true });
   });
   $("monitorFilter").addEventListener("change", () => loadMonitor(true));
-  $("aiHistoryRefresh")?.addEventListener("click", () => loadAiHistory({ reset: true, showError: true }));
+  $("aiHistoryRefresh")?.addEventListener("click", () => loadAiHistory({ reset: true, preserveSelection: true, showError: true }));
   $("aiHistoryStatusFilter")?.addEventListener("change", () => loadAiHistory({ reset: true, showError: true }));
   $("aiHistoryLoadMore")?.addEventListener("click", () => loadAiHistory({ reset: false, showError: true }));
   ["aiProvider", "aiModel", "aiScheme", "aiHost", "aiPort"].forEach((id) => {
