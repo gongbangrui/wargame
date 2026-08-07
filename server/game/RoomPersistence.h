@@ -31,6 +31,11 @@ struct AiCheckpointState {
     quint64 providerFailures = 0;
     qint64 lastLatencyMs = 0;
     qint64 averageLatencyMs = 0;
+    QString strategyPhase = QStringLiteral("recon");
+    QString replanReason;
+    QJsonArray contactMemory;
+    double nextPrivilegedSampleAt = 0.0;
+    quint64 privilegedSampleSequence = 0;
 };
 
 struct RoomCheckpoint {

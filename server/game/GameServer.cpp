@@ -3,6 +3,7 @@
 
 #include "core/SnapshotCodec.h"
 #include "core/UnitBase.h"
+#include "units/AttackUAV.h"
 #include "protocol/Protocol.h"
 #include "protocol/StateDelta.h"
 
@@ -37,6 +38,12 @@ constexpr int kMaxMapMarksPerSecond = 8;
 constexpr qint64 kMaxPendingBytes = 1024 * 1024;
 constexpr qint64 kDdsTicketLifetimeMs = 120000;
 constexpr int kAiProviderPlanGraceMs = 1000;
+
+double planarDistance2(double ax, double ay, double bx, double by) {
+    const double dx = ax - bx;
+    const double dy = ay - by;
+    return dx * dx + dy * dy;
+}
 
 QString env(const char* name, const QString& fallback) {
     const QString value = qEnvironmentVariable(name).trimmed();
@@ -3255,6 +3262,15 @@ bool GameServer::persistRoomState(QString* error) {
         ai.providerFailures = m_aiProviderFailures;
         ai.lastLatencyMs = m_aiLastLatencyMs;
         ai.averageLatencyMs = m_aiAverageLatencyMs;
+        ai.strategyPhase = m_aiStrategyPhase;
+        ai.replanReason = m_aiReplanReason;
+        QStringList contactIds = m_aiContactMemory.keys();
+        contactIds.sort();
+        for (const QString& contactId : contactIds) {
+            ai.contactMemory.append(m_aiContactMemory.value(contactId).toJson());
+        }
+        ai.nextPrivilegedSampleAt = m_aiNextPrivilegedSampleAt;
+        ai.privilegedSampleSequence = m_aiPrivilegedSampleSequence;
         checkpoint.aiState = ai;
     }
     return m_persistence.saveCheckpoint(checkpoint, error);
@@ -3357,6 +3373,18 @@ bool GameServer::restoreRoomState(QString* error) {
         m_aiProviderFailures = ai.providerFailures;
         m_aiLastLatencyMs = ai.lastLatencyMs;
         m_aiAverageLatencyMs = ai.averageLatencyMs;
+        m_aiStrategyPhase = ai.strategyPhase;
+        m_aiReplanReason = ai.replanReason;
+        m_aiContactMemory.clear();
+        for (const QJsonValue& value : ai.contactMemory) {
+            AiObservedTarget contact;
+            QString contactError;
+            if (AiObservedTarget::fromJson(value.toObject(), &contact, &contactError)) {
+                m_aiContactMemory.insert(contact.targetId, contact);
+            }
+        }
+        m_aiNextPrivilegedSampleAt = ai.nextPrivilegedSampleAt;
+        m_aiPrivilegedSampleSequence = ai.privilegedSampleSequence;
     }
     if (!replayDurableEvents(error)) return false;
     if (!m_aiPlan.requestId.isEmpty()
@@ -3609,6 +3637,11 @@ GameServer::RoomStateBackup GameServer::captureRoomState() const {
     backup.aiPlan = m_aiPlan;
     backup.aiStickyRules = m_aiStickyRules;
     backup.aiConsecutiveFailures = m_aiConsecutiveFailures;
+    backup.aiContactMemory = m_aiContactMemory;
+    backup.aiStrategyPhase = m_aiStrategyPhase;
+    backup.aiReplanReason = m_aiReplanReason;
+    backup.aiNextPrivilegedSampleAt = m_aiNextPrivilegedSampleAt;
+    backup.aiPrivilegedSampleSequence = m_aiPrivilegedSampleSequence;
     return backup;
 }
 
@@ -3655,6 +3688,11 @@ bool GameServer::restoreRoomStateBackup(const RoomStateBackup& backup, QString* 
     m_aiPlan = backup.aiPlan;
     m_aiStickyRules = backup.aiStickyRules;
     m_aiConsecutiveFailures = backup.aiConsecutiveFailures;
+    m_aiContactMemory = backup.aiContactMemory;
+    m_aiStrategyPhase = backup.aiStrategyPhase;
+    m_aiReplanReason = backup.aiReplanReason;
+    m_aiNextPrivilegedSampleAt = backup.aiNextPrivilegedSampleAt;
+    m_aiPrivilegedSampleSequence = backup.aiPrivilegedSampleSequence;
     syncAuthoritativeSeats();
     return true;
 }
@@ -3786,6 +3824,10 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
             && seat.deployed) seatIds.append(seat.seatId);
     }
     std::sort(seatIds.begin(), seatIds.end());
+    const AuthoritativeRoom::Seat commanderSeat =
+        m_authoritativeRoom.seat(QStringLiteral("blue_commander"));
+    UnitBase* commandPost = commanderSeat.unitId.isEmpty()
+        ? nullptr : m_engine.unit(commanderSeat.unitId);
     for (const QString& seatId : seatIds) {
         const AuthoritativeRoom::Seat seat = m_authoritativeRoom.seat(seatId);
         UnitBase* unit = m_engine.unit(seat.unitId);
@@ -3801,6 +3843,24 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
         state.speed = unit->speed();
         state.commandedSpeed = unit->baseSpeed();
         state.cruiseSpeed = cruiseSpeeds.value(seat.unitId, state.commandedSpeed);
+        state.hpRatio = unit->maxHp() > 0.0
+            ? std::clamp(unit->hp() / unit->maxHp(), 0.0, 1.0) : 0.0;
+        state.sensorHealth = std::clamp(unit->sensorHealth(), 0.0, 1.0);
+        state.commsHealth = std::clamp(unit->commsHealth(), 0.0, 1.0);
+        state.mobilityHealth = std::clamp(unit->mobilityHealth(), 0.0, 1.0);
+        state.weaponHealth = std::clamp(unit->weaponHealth(), 0.0, 1.0);
+        state.detectRange = unit->detectRange();
+        state.commRange = unit->commRange();
+        state.communicationAvailable = commandPost && commandPost->alive()
+            && StateProjector::canTransmit(m_engine, commandPost->id(), unit->id())
+            && StateProjector::canTransmit(m_engine, unit->id(), commandPost->id());
+        if (const auto* attack = qobject_cast<const AttackUAV*>(unit)) {
+            state.ammoRemaining = attack->ammoRemaining();
+            state.ammoCapacity = attack->ammoCapacity();
+            state.cooldownRemaining = attack->cooldownRemaining();
+            state.fuelRemaining = attack->fuelRemaining();
+            state.fuelCapacity = attack->fuelCapacity();
+        }
         const QSet<QString> visible = StateProjector::visibleUnitIds(
             m_engine, seatId, {}, seat.unitId);
         QStringList targets;
@@ -3826,6 +3886,19 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
             }
             return left < right;
         });
+        for (const QString& targetId : targets) {
+            UnitBase* target = m_engine.unit(targetId);
+            if (!target) continue;
+            AiObservedTarget observed;
+            observed.targetId = target->id();
+            observed.targetKind = target->kindStr();
+            observed.x = target->pos().x;
+            observed.y = target->pos().y;
+            observed.confidence = 1.0;
+            observed.visible = true;
+            observed.commandPost = isRedCommandPost(target);
+            state.visibleTargets.append(observed);
+        }
         if (!targets.isEmpty()) {
             UnitBase* target = m_engine.unit(targets.first());
             state.targetId = targets.first();
@@ -3839,6 +3912,138 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
         states.append(state);
     }
     return states;
+}
+
+void GameServer::updateAiContactMemory(const QList<AiSeatState>& states, double now,
+                                       const AiDifficultyParameters& parameters,
+                                       double mapWidth, double mapHeight) {
+    QSet<QString> visibleIds;
+    for (const AiSeatState& state : states) {
+        for (const AiObservedTarget& observed : state.visibleTargets) {
+            if (observed.targetId.isEmpty()) continue;
+            visibleIds.insert(observed.targetId);
+            AiObservedTarget current = observed;
+            const AiObservedTarget previous = m_aiContactMemory.value(observed.targetId);
+            const double elapsed = now - previous.lastSeenAt;
+            if (previous.targetId == current.targetId && elapsed > 0.05 && elapsed < 30.0
+                && !previous.privileged) {
+                current.velocityX = std::clamp((current.x - previous.x) / elapsed, -500.0, 500.0);
+                current.velocityY = std::clamp((current.y - previous.y) / elapsed, -500.0, 500.0);
+            }
+            current.confidence = 1.0;
+            current.lastSeenAt = now;
+            current.visible = true;
+            current.privileged = false;
+            m_aiContactMemory.insert(current.targetId, current);
+        }
+    }
+    for (auto it = m_aiContactMemory.begin(); it != m_aiContactMemory.end();) {
+        if (visibleIds.contains(it.key())) {
+            ++it;
+            continue;
+        }
+        it->visible = false;
+        it->confidence = std::max(0.05, it->confidence * 0.94);
+        ++it;
+    }
+
+    // Hard mode receives sparse strategic reconnaissance only. Samples are
+    // delayed, spatially noisy, capped in confidence and never marked visible;
+    // the normal target-visibility gate therefore still blocks direct fire.
+    if (m_aiDifficulty == QLatin1String("hard")
+        && now + 1e-9 >= m_aiNextPrivilegedSampleAt) {
+        m_aiNextPrivilegedSampleAt = now + 12.0;
+        ++m_aiPrivilegedSampleSequence;
+        const double errorRadius = std::max(400.0, std::min(mapWidth, mapHeight) * 0.03);
+        for (const ScenarioUnit& scenarioUnit : m_engine.scenario().units) {
+            if (scenarioUnit.side != QLatin1String("red")) continue;
+            const UnitBase* target = m_engine.unit(scenarioUnit.id);
+            if (!target || !target->alive()) continue;
+            const double angle = static_cast<double>(RulesAi::nextRandom(&m_aiRngState)
+                                                     % 6283ULL) / 1000.0;
+            const double radius = errorRadius * (0.7
+                + static_cast<double>(RulesAi::nextRandom(&m_aiRngState) % 600ULL) / 1000.0);
+            AiObservedTarget contact;
+            contact.targetId = target->id();
+            contact.targetKind = target->kindStr();
+            contact.x = std::clamp(target->pos().x + std::cos(angle) * radius,
+                                   0.0, std::max(0.0, mapWidth));
+            contact.y = std::clamp(target->pos().y + std::sin(angle) * radius,
+                                   0.0, std::max(0.0, mapHeight));
+            contact.confidence = 0.65;
+            contact.lastSeenAt = std::max(0.0, now - 5.0);
+            contact.visible = false;
+            contact.privileged = true;
+            contact.commandPost = isRedCommandPost(target);
+            if (!visibleIds.contains(contact.targetId)) {
+                m_aiContactMemory.insert(contact.targetId, contact);
+            }
+        }
+    } else if (m_aiDifficulty != QLatin1String("hard")) {
+        for (auto it = m_aiContactMemory.begin(); it != m_aiContactMemory.end();) {
+            if (it->privileged) it = m_aiContactMemory.erase(it);
+            else ++it;
+        }
+        m_aiNextPrivilegedSampleAt = 0.0;
+    }
+
+    const double memoryLimit = std::max(8, parameters.contactMemorySeconds) + 5.0;
+    for (auto it = m_aiContactMemory.begin(); it != m_aiContactMemory.end();) {
+        if (now - it->lastSeenAt > memoryLimit || !std::isfinite(it->x)
+            || !std::isfinite(it->y)) {
+            it = m_aiContactMemory.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+AiKnowledgeState GameServer::buildAiKnowledge(const QList<AiSeatState>& states, double now,
+                                              const AiDifficultyParameters& parameters) const {
+    AiKnowledgeState knowledge;
+    knowledge.seats = states;
+    knowledge.now = now;
+    const QJsonObject map = m_engine.mapInfo();
+    knowledge.mapWidth = map.value(QStringLiteral("widthMeters")).toDouble(20000.0);
+    knowledge.mapHeight = map.value(QStringLiteral("heightMeters")).toDouble(15000.0);
+    knowledge.phase = m_aiStrategyPhase;
+    knowledge.commandPostAlive = false;
+    const AuthoritativeRoom::Seat commander =
+        m_authoritativeRoom.seat(QStringLiteral("blue_commander"));
+    const UnitBase* commandPost = commander.unitId.isEmpty()
+        ? nullptr : m_engine.unit(commander.unitId);
+    if (commandPost && commandPost->alive()) knowledge.commandPostAlive = true;
+
+    QStringList contactIds = m_aiContactMemory.keys();
+    contactIds.sort();
+    for (const QString& contactId : contactIds) {
+        const AiObservedTarget contact = m_aiContactMemory.value(contactId);
+        if (now - contact.lastSeenAt <= std::max(8, parameters.contactMemorySeconds)
+            && contact.confidence > 0.05) {
+            knowledge.contacts.append(contact);
+        }
+    }
+    if (commandPost) {
+        for (const AiObservedTarget& contact : knowledge.contacts) {
+            if (planarDistance2(commandPost->pos().x, commandPost->pos().y,
+                                contact.x, contact.y) < 4000.0 * 4000.0) {
+                knowledge.commandPostThreat = true;
+                break;
+            }
+        }
+    }
+    if (!knowledge.commandPostAlive) knowledge.phase = QStringLiteral("regroup");
+    else if (knowledge.commandPostThreat) knowledge.phase = QStringLiteral("defend_cp");
+    else if (knowledge.contacts.isEmpty()) knowledge.phase = QStringLiteral("recon");
+    else if (std::any_of(knowledge.contacts.cbegin(), knowledge.contacts.cend(),
+                         [](const AiObservedTarget& contact) { return contact.commandPost; })) {
+        knowledge.phase = QStringLiteral("strike");
+    } else if (now < 120.0) {
+        knowledge.phase = QStringLiteral("shape");
+    } else {
+        knowledge.phase = QStringLiteral("exploit");
+    }
+    return knowledge;
 }
 
 bool GameServer::executeAiCommand(const AiCommand& command) {
@@ -3860,6 +4065,7 @@ bool GameServer::executeAiCommand(const AiCommand& command) {
     QString code;
     QString reason;
     if (!validateCommandOwnership(session, command.action, command.args, &code, &reason)) {
+        ++m_aiCommandRejected;
         audit(QStringLiteral("ai"),
               QJsonObject{{QStringLiteral("event"), QStringLiteral("commandRejected")},
                           {QStringLiteral("controllerId"), seat.controllerId},
@@ -3878,6 +4084,7 @@ bool GameServer::executeAiCommand(const AiCommand& command) {
                                         {QStringLiteral("action"), command.action},
                                         {QStringLiteral("args"), args}},
                             &persistenceError)) {
+        ++m_aiCommandRejected;
         audit(QStringLiteral("ai"),
               QJsonObject{{QStringLiteral("event"), QStringLiteral("persistenceFailed")},
                           {QStringLiteral("controllerId"), seat.controllerId}});
@@ -3899,6 +4106,12 @@ bool GameServer::executeAiCommand(const AiCommand& command) {
                       {QStringLiteral("action"), command.action},
                       {QStringLiteral("accepted"), result.accepted},
                       {QStringLiteral("code"), result.code}});
+    if (result.accepted) {
+        ++m_aiCommandAccepted;
+        if (command.action == QLatin1String("withdraw")) ++m_aiResourceWithdrawals;
+    } else {
+        ++m_aiCommandRejected;
+    }
     return result.accepted;
 }
 
@@ -4047,6 +4260,11 @@ void GameServer::resetAiMatchState() {
     m_aiConsecutiveFailures = 0;
     m_aiEffectiveEngine = QStringLiteral("rules");
     m_aiLastFailureClass.clear();
+    m_aiContactMemory.clear();
+    m_aiStrategyPhase = QStringLiteral("recon");
+    m_aiReplanReason = QStringLiteral("match_start");
+    m_aiNextPrivilegedSampleAt = 0.0;
+    m_aiPrivilegedSampleSequence = 0;
 }
 
 void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
@@ -4211,20 +4429,31 @@ void GameServer::runAiDecision() {
     const QJsonObject map = m_engine.mapInfo();
     const double mapWidth = map.value(QStringLiteral("widthMeters")).toDouble();
     const double mapHeight = map.value(QStringLiteral("heightMeters")).toDouble();
-    if (now + 1e-9 >= m_aiNextReplanAt || m_aiPlan.objectives.isEmpty()) {
+    updateAiContactMemory(states, now, parameters, mapWidth, mapHeight);
+    const AiKnowledgeState knowledge = buildAiKnowledge(states, now, parameters);
+    const bool replanDue = now + 1e-9 >= m_aiNextReplanAt || m_aiPlan.objectives.isEmpty();
+    if (replanDue) {
+        if (knowledge.commandPostThreat) m_aiReplanReason = QStringLiteral("command_post_threat");
+        else if (m_aiPlan.objectives.isEmpty()) m_aiReplanReason = QStringLiteral("initial_plan");
+        else if (knowledge.contacts.isEmpty()) m_aiReplanReason = QStringLiteral("contact_search");
+        else m_aiReplanReason = QStringLiteral("scheduled_replan");
+        m_aiStrategyPhase = knowledge.phase;
+    }
+    if (replanDue) {
         ++m_aiPlanningGeneration;
         const QString requestId = QStringLiteral("ai-plan:%1:%2")
             .arg(m_matchGeneration).arg(m_aiPlanningGeneration);
-        m_aiPlan = RulesAi::makeCommanderPlan(
-            states, requestId, m_matchGeneration, m_stateRevision,
-            now + parameters.commanderReplanIntervalMs / 1000.0, &m_aiRngState,
-            parameters.suboptimalRate,
-            mapWidth, mapHeight,
-            m_aiPlanningGeneration);
+        QElapsedTimer plannerTimer;
+        plannerTimer.start();
+        m_aiPlan = RulesAi::makeStrategicPlan(
+            knowledge, requestId, m_matchGeneration, m_stateRevision,
+            now + parameters.enhancedReplanIntervalMs / 1000.0, &m_aiRngState,
+            parameters, m_aiPlanningGeneration);
+        m_aiStrategyPlannerLatencyMs = plannerTimer.elapsed();
         // The rules plan is immediately executable while an optional provider
         // request is in flight. A successful provider result flips this back.
         m_aiEffectiveEngine = QStringLiteral("rules");
-        m_aiNextReplanAt = now + parameters.commanderReplanIntervalMs / 1000.0;
+        m_aiNextReplanAt = now + parameters.enhancedReplanIntervalMs / 1000.0;
         if (m_ollamaProvider && !m_aiStickyRules
             && m_aiProviderMode != QLatin1String("rules") && !m_aiPlanRequestInFlight) {
             const QJsonObject commanderSnapshot = StateProjector::snapshotFor(
@@ -4305,7 +4534,8 @@ void GameServer::runAiDecision() {
         }
         executeAiCommand(command);
     }
-    m_aiNextDecisionAt = now + parameters.unitDecisionIntervalMs / 1000.0;
+    m_aiNextDecisionAt = now + static_cast<double>(
+        parameters.enhancedDecisionIntervalMs + parameters.reactionDelayMs) / 1000.0;
 }
 
 QJsonObject GameServer::roomState() const {
@@ -4466,7 +4696,19 @@ void GameServer::writeMonitorStatus() {
         {QStringLiteral("lastFailureClass"), m_aiLastFailureClass},
         {QStringLiteral("consecutiveFailures"), m_aiConsecutiveFailures},
         {QStringLiteral("stickyRules"), m_aiStickyRules},
+        {QStringLiteral("strategyPhase"), m_aiStrategyPhase},
+        {QStringLiteral("replanReason"), m_aiReplanReason},
+        {QStringLiteral("planningGeneration"), static_cast<qint64>(m_aiPlanningGeneration)},
+        {QStringLiteral("knownContacts"), m_aiContactMemory.size()},
+        {QStringLiteral("privilegedContacts"), static_cast<int>(std::count_if(
+             m_aiContactMemory.cbegin(), m_aiContactMemory.cend(),
+             [](const AiObservedTarget& contact) { return contact.privileged; }))},
+        {QStringLiteral("commandAccepted"), static_cast<qint64>(m_aiCommandAccepted)},
+        {QStringLiteral("commandRejected"), static_cast<qint64>(m_aiCommandRejected)},
+        {QStringLiteral("resourceWithdrawals"), static_cast<qint64>(m_aiResourceWithdrawals)},
+        {QStringLiteral("strategyPlannerLatencyMs"), m_aiStrategyPlannerLatencyMs},
         {QStringLiteral("lastDecisionSimTime"), m_aiNextDecisionAt},
+        {QStringLiteral("missionCounts"), objectiveCounts},
         {QStringLiteral("objectiveCounts"), objectiveCounts}};
     const QJsonObject status{{QStringLiteral("status"), serviceStatus},
                              {QStringLiteral("version"), QStringLiteral(WARGAME_VERSION)},

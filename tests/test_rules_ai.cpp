@@ -370,3 +370,102 @@ TEST(RulesAiTest, RealEngineMovesBlueUnitFromGeneratedObjective) {
     ::testing::Test::RecordProperty("finalY", QString::number(unit->pos().y).toStdString());
     EXPECT_GT(std::hypot(unit->pos().x - initial.x, unit->pos().y - initial.y), 0.0);
 }
+
+TEST(RulesAiTest, StrategicPlannerScoresCommandPostAndUsesOnlyVisibleFireTargets) {
+    AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
+                                QStringLiteral("attackuav"), 100.0, 100.0);
+    attacker.ammoRemaining = 4;
+    attacker.weaponHealth = 1.0;
+    attacker.visibleTargets = {
+        AiObservedTarget{QStringLiteral("red_scout"), QStringLiteral("reconuav"),
+                         250.0, 100.0, 0.0, 0.0, 1.0, 10.0, true, false, false},
+        AiObservedTarget{QStringLiteral("red_cp"), QStringLiteral("commandpost"),
+                         400.0, 100.0, 0.0, 0.0, 1.0, 10.0, true, false, true}};
+    AiKnowledgeState knowledge;
+    knowledge.seats = {attacker};
+    knowledge.contacts = attacker.visibleTargets;
+    knowledge.now = 10.0;
+    knowledge.mapWidth = 1000.0;
+    knowledge.mapHeight = 800.0;
+    AiDifficultyParameters parameters = RulesAi::parameters(QStringLiteral("hard"));
+    parameters.suboptimalRate = 0.0;
+    const AiPlanV1 plan = RulesAi::makeStrategicPlan(
+        knowledge, QStringLiteral("strategic-cp"), 1, 2, 20.0, nullptr, parameters, 1);
+    ASSERT_EQ(plan.objectives.size(), 1);
+    EXPECT_EQ(plan.objectives.first().action, QStringLiteral("attack"));
+    EXPECT_EQ(plan.objectives.first().targetId, QStringLiteral("red_cp"));
+    const QList<AiCommand> commands = RulesAi::commandsForPlan(plan, {attacker}, 10.0,
+                                                                 1000.0, 800.0);
+    ASSERT_EQ(commands.size(), 1);
+    EXPECT_EQ(commands.first().action, QStringLiteral("engageTarget"));
+    EXPECT_EQ(commands.first().args.value(QStringLiteral("targetId")).toString(),
+              QStringLiteral("red_cp"));
+}
+
+TEST(RulesAiTest, StrategicMemoryContactCreatesSearchInsteadOfIllegalEngagement) {
+    AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
+                                QStringLiteral("attackuav"), 100.0, 100.0);
+    attacker.ammoRemaining = 4;
+    AiKnowledgeState knowledge;
+    knowledge.seats = {attacker};
+    knowledge.contacts = {AiObservedTarget{QStringLiteral("red_cp"), QStringLiteral("commandpost"),
+                                           700.0, 600.0, 0.0, 0.0, 0.65, 5.0,
+                                           false, true, true}};
+    knowledge.now = 10.0;
+    knowledge.mapWidth = 1000.0;
+    knowledge.mapHeight = 800.0;
+    AiDifficultyParameters parameters = RulesAi::parameters(QStringLiteral("hard"));
+    const AiPlanV1 plan = RulesAi::makeStrategicPlan(
+        knowledge, QStringLiteral("strategic-memory"), 1, 2, 20.0, nullptr, parameters, 1);
+    ASSERT_EQ(plan.objectives.size(), 1);
+    EXPECT_NE(plan.objectives.first().action, QStringLiteral("attack"));
+    const QList<AiCommand> commands = RulesAi::commandsForPlan(plan, {attacker}, 10.0,
+                                                                 1000.0, 800.0);
+    ASSERT_EQ(commands.size(), 1);
+    EXPECT_EQ(commands.first().action, QStringLiteral("moveTo"));
+}
+
+TEST(RulesAiTest, StrategicPlannerWithdrawsWhenAmmoIsExhausted) {
+    AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
+                                QStringLiteral("attackuav"), 100.0, 100.0);
+    attacker.ammoRemaining = 0;
+    attacker.ammoCapacity = 4;
+    AiKnowledgeState knowledge;
+    knowledge.seats = {attacker};
+    knowledge.now = 1.0;
+    AiDifficultyParameters parameters = RulesAi::parameters(QStringLiteral("normal"));
+    const AiPlanV1 plan = RulesAi::makeStrategicPlan(
+        knowledge, QStringLiteral("strategic-withdraw"), 1, 2, 20.0, nullptr, parameters, 1);
+    ASSERT_EQ(plan.objectives.size(), 1);
+    EXPECT_EQ(plan.objectives.first().action, QStringLiteral("withdraw"));
+    const QList<AiCommand> commands = RulesAi::commandsForPlan(plan, {attacker}, 1.0);
+    ASSERT_EQ(commands.size(), 1);
+    EXPECT_EQ(commands.first().action, QStringLiteral("withdraw"));
+}
+
+TEST(RulesAiTest, HardDifficultyUsesEnhancedStrategicCadence) {
+    const AiDifficultyParameters easy = RulesAi::parameters(QStringLiteral("easy"));
+    const AiDifficultyParameters normal = RulesAi::parameters(QStringLiteral("normal"));
+    const AiDifficultyParameters hard = RulesAi::parameters(QStringLiteral("hard"));
+    EXPECT_LT(hard.enhancedDecisionIntervalMs, normal.enhancedDecisionIntervalMs);
+    EXPECT_LT(normal.enhancedDecisionIntervalMs, easy.enhancedDecisionIntervalMs);
+    EXPECT_LT(hard.enhancedReplanIntervalMs, normal.enhancedReplanIntervalMs);
+    EXPECT_LT(normal.enhancedReplanIntervalMs, easy.enhancedReplanIntervalMs);
+    EXPECT_GT(hard.contactMemorySeconds, normal.contactMemorySeconds);
+    EXPECT_GT(normal.contactMemorySeconds, easy.contactMemorySeconds);
+    EXPECT_GT(hard.candidateRoutes, easy.candidateRoutes);
+}
+
+TEST(RulesAiTest, ContactMemoryCheckpointRoundTripPreservesConfidenceAndPrivilege) {
+    const AiObservedTarget original{QStringLiteral("red_cp"), QStringLiteral("commandpost"),
+                                    12.0, 34.0, 1.0, -2.0, 0.65, 9.0,
+                                    false, true, true};
+    QString error;
+    AiObservedTarget restored;
+    ASSERT_TRUE(AiObservedTarget::fromJson(original.toJson(), &restored, &error))
+        << error.toStdString();
+    EXPECT_EQ(restored.targetId, original.targetId);
+    EXPECT_DOUBLE_EQ(restored.confidence, original.confidence);
+    EXPECT_TRUE(restored.privileged);
+    EXPECT_TRUE(restored.commandPost);
+}

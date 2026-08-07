@@ -3,17 +3,42 @@
 #include "AiPlan.h"
 
 #include <QList>
+#include <QJsonObject>
 #include <QString>
 #include <QVariantMap>
 
 namespace gbr {
 
 struct AiDifficultyParameters {
-    int unitDecisionIntervalMs = 2000;
-    int commanderReplanIntervalMs = 30000;
+    int unitDecisionIntervalMs = 1000;
+    int commanderReplanIntervalMs = 45000;
     int maxTargets = 2;
     int coordinatedUnitsPerTarget = 2;
     double suboptimalRate = 0.08;
+    int enhancedDecisionIntervalMs = 750;
+    int enhancedReplanIntervalMs = 18000;
+    int contactMemorySeconds = 25;
+    int candidateRoutes = 6;
+    int lookaheadSeconds = 45;
+    int reactionDelayMs = 450;
+};
+
+struct AiObservedTarget {
+    QString targetId;
+    QString targetKind;
+    double x = 0.0;
+    double y = 0.0;
+    double velocityX = 0.0;
+    double velocityY = 0.0;
+    double confidence = 0.0;
+    double lastSeenAt = 0.0;
+    bool visible = false;
+    bool privileged = false;
+    bool commandPost = false;
+
+    QJsonObject toJson() const;
+    static bool fromJson(const QJsonObject& object, AiObservedTarget* target,
+                         QString* error = nullptr);
 };
 
 struct AiSeatState {
@@ -34,6 +59,31 @@ struct AiSeatState {
     bool targetVisible = false;
     bool alive = true;
     bool movable = true;
+    double hpRatio = 1.0;
+    double sensorHealth = 1.0;
+    double commsHealth = 1.0;
+    double mobilityHealth = 1.0;
+    double weaponHealth = 1.0;
+    double detectRange = 0.0;
+    double commRange = 0.0;
+    int ammoRemaining = -1;
+    int ammoCapacity = -1;
+    double cooldownRemaining = 0.0;
+    double fuelRemaining = -1.0;
+    double fuelCapacity = -1.0;
+    bool communicationAvailable = true;
+    QList<AiObservedTarget> visibleTargets;
+};
+
+struct AiKnowledgeState {
+    QList<AiSeatState> seats;
+    QList<AiObservedTarget> contacts;
+    double now = 0.0;
+    double mapWidth = 20000.0;
+    double mapHeight = 15000.0;
+    QString phase = QStringLiteral("recon");
+    bool commandPostThreat = false;
+    bool commandPostAlive = true;
 };
 
 struct AiCommand {
@@ -57,6 +107,14 @@ public:
                                        double mapWidth = 20000.0,
                                        double mapHeight = 15000.0,
                                        quint64 planningGeneration = 1);
+    static AiPlanV1 makeStrategicPlan(const AiKnowledgeState& knowledge,
+                                      const QString& requestId,
+                                      quint64 matchGeneration,
+                                      quint64 sourceStateRevision,
+                                      double validUntil,
+                                      quint64* rngState,
+                                      const AiDifficultyParameters& parameters,
+                                      quint64 planningGeneration = 1);
     static QList<AiCommand> commandsForPlan(const AiPlanV1& plan,
                                              const QList<AiSeatState>& seats,
                                              double now,

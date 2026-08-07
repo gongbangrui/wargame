@@ -113,6 +113,11 @@ private:
         AiPlanV1 aiPlan;
         bool aiStickyRules = false;
         int aiConsecutiveFailures = 0;
+        QHash<QString, AiObservedTarget> aiContactMemory;
+        QString aiStrategyPhase = QStringLiteral("recon");
+        QString aiReplanReason;
+        double aiNextPrivilegedSampleAt = 0.0;
+        quint64 aiPrivilegedSampleSequence = 0;
     };
 
     struct MapMarkRateWindow {
@@ -187,6 +192,11 @@ private:
     void recordAiConversation(const OllamaResult& result, quint64 planningGeneration,
                               const QString& status, const AiPlanV1& finalPlan,
                               const QString& fallbackReason = QString());
+    void updateAiContactMemory(const QList<AiSeatState>& states, double now,
+                               const AiDifficultyParameters& parameters,
+                               double mapWidth, double mapHeight);
+    AiKnowledgeState buildAiKnowledge(const QList<AiSeatState>& states, double now,
+                                      const AiDifficultyParameters& parameters) const;
 
     void sendEnvelope(QWebSocket* socket, const QString& type, const QJsonObject& payload);
     void sendError(QWebSocket* socket, const QString& code, const QString& message,
@@ -275,6 +285,11 @@ private:
     AiPlanV1 m_aiPlan;
     bool m_aiStickyRules = false;
     int m_aiConsecutiveFailures = 0;
+    QHash<QString, AiObservedTarget> m_aiContactMemory;
+    QString m_aiStrategyPhase = QStringLiteral("recon");
+    QString m_aiReplanReason = QStringLiteral("match_start");
+    double m_aiNextPrivilegedSampleAt = 0.0;
+    quint64 m_aiPrivilegedSampleSequence = 0;
     OllamaProvider* m_ollamaProvider = nullptr;
     QString m_aiProviderMode = QStringLiteral("auto");
     QString m_aiEffectiveEngine = QStringLiteral("rules");
@@ -293,6 +308,10 @@ private:
     quint64 m_aiProviderFailures = 0;
     qint64 m_aiLastLatencyMs = 0;
     qint64 m_aiAverageLatencyMs = 0;
+    quint64 m_aiCommandAccepted = 0;
+    quint64 m_aiCommandRejected = 0;
+    quint64 m_aiResourceWithdrawals = 0;
+    qint64 m_aiStrategyPlannerLatencyMs = 0;
     quint64 m_chatSequence = 0;
     QJsonArray m_chatHistory;
     QJsonArray m_mapMarks;

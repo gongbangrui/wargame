@@ -192,6 +192,12 @@ Item {
         return root.controller && root.controller.aiEffectiveEngine === "ollama"
              ? root.cyan : root.orange
     }
+    function aiDifficultyLabel() {
+        var difficulty = root.controller && root.controller.aiDifficulty
+        if (difficulty === "hard") return "困难 · 战略情报增强"
+        if (difficulty === "easy") return "简单 · 反应延迟"
+        return "普通 · 协同规划"
+    }
     function isRoomEmpty() {
         var seats = root.controller.onlineSeats || []
         for (var i = 0; i < seats.length; i++) if (seats[i].occupied) return false
@@ -865,7 +871,7 @@ Item {
                     Text {
                         id: aiEngineText
                         anchors.centerIn: parent
-                        text: "AI · " + root.aiEngineLabel()
+                        text: "AI · " + root.aiEngineLabel() + " · " + root.aiDifficultyLabel()
                         color: root.aiEngineColor()
                         font.pixelSize: 10
                         font.bold: true

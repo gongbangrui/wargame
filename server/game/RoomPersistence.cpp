@@ -1,5 +1,7 @@
 #include "RoomPersistence.h"
 
+#include "RulesAi.h"
+
 #include "protocol/Protocol.h"
 
 #include <QDateTime>
@@ -164,7 +166,13 @@ QJsonObject aiStateToJson(const AiCheckpointState& state) {
         {QStringLiteral("providerSuccesses"), QString::number(state.providerSuccesses)},
         {QStringLiteral("providerFailures"), QString::number(state.providerFailures)},
         {QStringLiteral("lastLatencyMs"), state.lastLatencyMs},
-        {QStringLiteral("averageLatencyMs"), state.averageLatencyMs}};
+        {QStringLiteral("averageLatencyMs"), state.averageLatencyMs},
+        {QStringLiteral("strategyPhase"), state.strategyPhase},
+        {QStringLiteral("replanReason"), state.replanReason},
+        {QStringLiteral("contactMemory"), state.contactMemory},
+        {QStringLiteral("nextPrivilegedSampleAt"), state.nextPrivilegedSampleAt},
+        {QStringLiteral("privilegedSampleSequence"),
+         QString::number(state.privilegedSampleSequence)}};
     if (state.currentPlan.has_value()) {
         object[QStringLiteral("currentPlan")] = state.currentPlan->toJson();
     }
@@ -224,6 +232,24 @@ bool aiStateFromJson(const QJsonObject& object, AiCheckpointState* state, QStrin
                               .toString(QStringLiteral("auto"));
     parsed.providerModel = object.value(QStringLiteral("providerModel"))
                                .toString(QStringLiteral("qwen3:4b"));
+    parsed.strategyPhase = object.value(QStringLiteral("strategyPhase"))
+                               .toString(QStringLiteral("recon"));
+    parsed.replanReason = object.value(QStringLiteral("replanReason")).toString();
+    parsed.nextPrivilegedSampleAt = object.value(QStringLiteral("nextPrivilegedSampleAt"))
+                                        .toDouble(0.0);
+    const QJsonValue privilegedSampleSequence = object.value(
+        QStringLiteral("privilegedSampleSequence"));
+    if (object.contains(QStringLiteral("privilegedSampleSequence"))) {
+        if (!privilegedSampleSequence.isString()) {
+            return fail(QStringLiteral("AI 战略采样序号无效"));
+        }
+        bool sequenceOk = false;
+        parsed.privilegedSampleSequence = privilegedSampleSequence.toString().toULongLong(&sequenceOk);
+        if (!sequenceOk || QString::number(parsed.privilegedSampleSequence)
+                               != privilegedSampleSequence.toString()) {
+            return fail(QStringLiteral("AI 战略采样序号无效"));
+        }
+    }
     if (!nextDecisionAt.isDouble() || !nextReplanAt.isDouble()
         || !std::isfinite(parsed.nextDecisionAt) || parsed.nextDecisionAt < 0.0
         || !std::isfinite(parsed.nextReplanAt) || parsed.nextReplanAt < 0.0
@@ -239,11 +265,30 @@ bool aiStateFromJson(const QJsonObject& object, AiCheckpointState* state, QStrin
             && parsed.providerMode != QLatin1String("auto")
             && parsed.providerMode != QLatin1String("ollama"))
         || parsed.providerModel.isEmpty() || parsed.providerModel.size() > 128
+        || parsed.strategyPhase.isEmpty() || parsed.strategyPhase.size() > 64
+        || parsed.replanReason.size() > 128
         || !lastLatencyMs.isDouble() || parsed.lastLatencyMs < 0
         || !averageLatencyMs.isDouble() || parsed.averageLatencyMs < 0
+        || !std::isfinite(parsed.nextPrivilegedSampleAt)
+        || parsed.nextPrivilegedSampleAt < 0.0
         || parsed.providerSuccesses > parsed.providerRequests
         || parsed.providerFailures > parsed.providerRequests - parsed.providerSuccesses) {
         return fail(QStringLiteral("AI 检查点状态无效"));
+    }
+    const QJsonValue contactMemory = object.value(QStringLiteral("contactMemory"));
+    if (!contactMemory.isUndefined()) {
+        if (!contactMemory.isArray() || contactMemory.toArray().size() > 256) {
+            return fail(QStringLiteral("AI 接触记忆结构无效"));
+        }
+        for (const QJsonValue& value : contactMemory.toArray()) {
+            if (!value.isObject()) return fail(QStringLiteral("AI 接触记忆项无效"));
+            AiObservedTarget parsedContact;
+            QString contactError;
+            if (!AiObservedTarget::fromJson(value.toObject(), &parsedContact, &contactError)) {
+                return fail(QStringLiteral("AI 接触记忆项无效: %1").arg(contactError));
+            }
+        }
+        parsed.contactMemory = contactMemory.toArray();
     }
     const QJsonValue currentPlan = object.value(QStringLiteral("currentPlan"));
     if (!currentPlan.isUndefined()) {
