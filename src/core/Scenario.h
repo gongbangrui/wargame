@@ -11,7 +11,7 @@
 
 namespace gbr {
 
-inline constexpr double kDefaultAttackUavHitProbability = 0.70;
+inline constexpr double kDefaultAttackUavHitProbability = 0.72;
 
 class UnitBase;
 
@@ -46,16 +46,16 @@ struct ScenarioUnit {
     int initialAmmo = 4;
     double hitProbability = kDefaultAttackUavHitProbability;
     double optimalRange = 1500.0;
-    double minAttackRange = 0.0;
-    double cooldownSec = 4.0;
-    double damageMin = 100.0;
-    double damageMax = 100.0;
+    double minAttackRange = 300.0;
+    double cooldownSec = 5.0;
+    double damageMin = 80.0;
+    double damageMax = 110.0;
     /// Probability loss across the interval from optimalRange to attackRange.
-    double rangeFalloff = 0.0;
+    double rangeFalloff = 0.25;
     /// Attack-UAV endurance and turnaround configuration.
     double fuelCapacitySec = 1800.0;
     double initialFuelSec = 1800.0;
-    double rearmDurationSec = 12.0;
+    double rearmDurationSec = 8.0;
     std::vector<SchedulePoint> schedule;
 };
 

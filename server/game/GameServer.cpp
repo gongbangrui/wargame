@@ -125,7 +125,8 @@ bool observerMessageIsReadOnly(const QString& type) {
     static const QSet<QString> allowed{
         QStringLiteral("roomList"), QStringLiteral("leaveRoom"),
         QStringLiteral("heartbeat"), QStringLiteral("resyncRequest"),
-        QStringLiteral("ping")};
+        QStringLiteral("ping"), QStringLiteral("setObserverTrajectories"),
+        QStringLiteral("setObserverTrails")};
     return allowed.contains(type);
 }
 
@@ -166,8 +167,13 @@ bool aiConfigurationFromJson(const QJsonObject& value, const OllamaConfig& curre
                              OllamaConfig* next, QString* error) {
     OllamaConfig candidate = current;
     candidate.deployment = value.value(QStringLiteral("provider")).toString().trimmed().toLower();
-    candidate.baseUrl = value.value(QStringLiteral("baseUrl")).toString().trimmed();
-    candidate.model = value.value(QStringLiteral("model")).toString().trimmed();
+    const QString configuredBaseUrl = value.value(QStringLiteral("baseUrl")).toString().trimmed();
+    const QString configuredModel = value.value(QStringLiteral("model")).toString().trimmed();
+    // Older account-service responses did not include the global Ollama
+    // endpoint. Preserve the provider's current endpoint/model in that case;
+    // an explicitly supplied value is still validated below.
+    if (!configuredBaseUrl.isEmpty()) candidate.baseUrl = configuredBaseUrl;
+    if (!configuredModel.isEmpty()) candidate.model = configuredModel;
     if (candidate.deployment != QLatin1String("rules")
         && candidate.deployment != QLatin1String("auto")
         && candidate.deployment != QLatin1String("ollama")) {
@@ -185,6 +191,39 @@ bool aiConfigurationFromJson(const QJsonObject& value, const OllamaConfig& curre
     candidate.baseUrl = normalizedBaseUrl;
     if (next) *next = candidate;
     return true;
+}
+
+QString roomAiProviderFromConfig(const QJsonObject& room) {
+    const QString provider = room.value(QStringLiteral("aiProvider")).toString()
+                                 .trimmed().toLower();
+    return provider == QLatin1String("ollama")
+        ? QStringLiteral("ollama") : QStringLiteral("rules");
+}
+
+QString roomAiModelFromConfig(const QJsonObject& room) {
+    const QString model = room.value(QStringLiteral("aiModel")).toString().trimmed();
+    return model.isEmpty() ? QStringLiteral("auto") : model.left(128);
+}
+
+quint64 roomAiConfigVersionFromConfig(const QJsonObject& room) {
+    const qint64 value = room.value(QStringLiteral("configVersion")).toInteger();
+    return value > 0 ? static_cast<quint64>(value) : 1;
+}
+
+QJsonObject roomAiConfiguration(const QJsonObject& room, const QJsonObject& global) {
+    QJsonObject result = global;
+    const QString provider = roomAiProviderFromConfig(room);
+    result[QStringLiteral("provider")] = provider;
+    result[QStringLiteral("model")] = roomAiModelFromConfig(room);
+    result[QStringLiteral("selectedProvider")] = provider;
+    result[QStringLiteral("selectedModel")] = room.value(QStringLiteral("aiModel")).toString();
+    result[QStringLiteral("resolvedModel")] =
+        room.value(QStringLiteral("aiResolvedModel")).toString();
+    result[QStringLiteral("roomConfigVersion")] =
+        static_cast<qint64>(roomAiConfigVersionFromConfig(room));
+    result[QStringLiteral("ollamaConfigVersion")] =
+        global.value(QStringLiteral("configVersion")).toInteger(1);
+    return result;
 }
 
 struct SeatDescriptor {
@@ -400,6 +439,8 @@ GameServer::GameServer(QObject* parent)
         m_blueReady = false;
         m_runInitialScenario = {};
         m_mapMarks = {};
+        m_observerTrajectories.clear();
+        m_nextObserverTrajectorySampleAt = 0.0;
         m_commandResults.clear();
         m_commandResultOrder.clear();
         m_scenarioRevision = 1;
@@ -414,6 +455,13 @@ GameServer::GameServer(QObject* parent)
         m_aiPlan = {};
         m_aiStickyRules = false;
         m_aiConsecutiveFailures = 0;
+        m_aiSelectedProvider = QStringLiteral("rules");
+        m_aiSelectedModel.clear();
+        m_aiResolvedModel.clear();
+        m_aiRoomConfigVersion = 1;
+        m_aiOllamaConfigVersion = 1;
+        m_aiFallbackReason.clear();
+        clearRoomOperationTracking();
 
         bool loaded = false;
         QString loadError;
@@ -547,7 +595,11 @@ GameServer::GameServer(QObject* parent)
 
     m_snapshotTimer.setInterval(100);
     connect(&m_snapshotTimer, &QTimer::timeout, this,
-            [this]() { broadcastSnapshots(); });
+            [this]() {
+                if (m_phase != QLatin1String("running") || !m_engine.running()) return;
+                sampleObserverTrajectories();
+                broadcastSnapshots();
+            });
     m_sessionValidationTimer.setInterval(30000);
     connect(&m_sessionValidationTimer, &QTimer::timeout,
             this, &GameServer::validateActiveSessions);
@@ -656,6 +708,11 @@ void GameServer::refreshRoomControlForJoin(QWebSocket* socket, const QJsonObject
             m_observerJoinAllowed = false;
         } else {
             m_observerJoinAllowed = observerRoomIsOpen(selected);
+            const QJsonObject globalAi =
+                document.object().value(QStringLiteral("aiConfig")).toObject();
+            if (!payload.value(QStringLiteral("asObserver")).toBool()) {
+                applyAiConfiguration(roomAiConfiguration(selected, globalAi));
+            }
             if (payload.value(QStringLiteral("asObserver")).toBool()) {
                 m_roomName = selected.value(QStringLiteral("name")).toString(m_roomName);
                 m_roomStatus = selected.value(QStringLiteral("status"))
@@ -983,6 +1040,10 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
     else if (type == QLatin1String("setUnitName")) handleSetUnitName(socket, payload);
     else if (type == QLatin1String("shareIntel")) handleShareIntel(socket, payload);
     else if (type == QLatin1String("mapMark")) handleMapMark(socket, payload);
+    else if (type == QLatin1String("setObserverTrajectories")
+             || type == QLatin1String("setObserverTrails")) {
+        handleSetObserverTrajectories(socket, payload);
+    }
     else if (type == QLatin1String("heartbeat")) sendEnvelope(socket, QStringLiteral("pong"), QJsonObject{{QStringLiteral("sessionAlive"), true}});
     else if (type == QLatin1String("command")) handleCommand(socket, payload);
     else if (type == QLatin1String("control")) handleControl(socket, payload);
@@ -1256,7 +1317,8 @@ void GameServer::syncRoomControl(QWebSocket* requester) {
             flushRoomListWaiters();
             return;
         }
-        applyAiConfiguration(document.object().value(QStringLiteral("aiConfig")).toObject());
+        const QJsonObject globalAiConfig =
+            document.object().value(QStringLiteral("aiConfig")).toObject();
         const QJsonArray rooms = document.object().value(QStringLiteral("rooms")).toArray();
         const bool roomDirectoryChanged = !m_roomDirectoryLoaded || m_roomDirectory != rooms;
         m_roomDirectory = rooms;
@@ -1294,6 +1356,8 @@ void GameServer::syncRoomControl(QWebSocket* requester) {
             flushRoomListWaiters();
             return;
         }
+        const QJsonObject selectedAiConfig = roomAiConfiguration(selected, globalAiConfig);
+        applyAiConfiguration(selectedAiConfig);
         m_observerJoinAllowed = observerRoomIsOpen(selected);
         bool roomHasParticipant = false;
         for (auto it = m_clients.cbegin(); it != m_clients.cend(); ++it) {
@@ -1385,14 +1449,28 @@ void GameServer::syncRoomControl(QWebSocket* requester) {
             && m_roomStatus != QLatin1String("stopped");
         m_lastRoomUpdate = updated;
         m_roomName = selected.value(QStringLiteral("name")).toString(m_roomName);
-        m_roomStatus = status;
         const QJsonObject latestOperation = selected.value(QStringLiteral("operation")).toObject();
         const QJsonObject pendingOperation = selected.value(QStringLiteral("pendingOperation")).toObject();
         const QString pendingAction = pendingOperation.value(QStringLiteral("action")).toString();
         const QString latestAction = latestOperation.value(QStringLiteral("action")).toString();
         const bool deploymentOperation = latestAction == QLatin1String("reset")
             || latestAction == QLatin1String("redeploy");
+        const bool operationPending = pendingOperation.value(QStringLiteral("state")).toString()
+            == QLatin1String("pending");
+        // A pending account operation describes a requested target status, not
+        // an authoritative state transition. Keep the locally committed status
+        // until the game server has applied and acknowledged the operation.
+        if (!operationPending) m_roomStatus = status;
         processRoomOperation(pendingOperation);
+        if (operationPending) {
+            // The account service deliberately keeps the previous status
+            // while an operation is pending.  Do not infer a transition from
+            // that stale status; processRoomOperation owns the commit.
+            if (roomDirectoryChanged) broadcastRoomDirectory();
+            broadcastSnapshots(true);
+            flushRoomListWaiters();
+            return;
+        }
         if ((changed || stoppedNow) && status == QLatin1String("stopped")) {
             closeRoomSessions(QStringLiteral("网页管理员已停止房间"));
         }
@@ -2069,6 +2147,14 @@ void GameServer::completeJoinRoom(QWebSocket* socket, const QJsonObject& payload
     session.observer = observerJoin;
     session.role = observerJoin ? QStringLiteral("observer") : QStringLiteral("player");
     if (observerJoin) {
+        session.observerTrajectorySelection = m_observerSelectionCache.value(session.userId);
+        for (auto it = session.observerTrajectorySelection.begin();
+             it != session.observerTrajectorySelection.end();) {
+            if (!m_engine.unit(*it)) it = session.observerTrajectorySelection.erase(it);
+            else ++it;
+        }
+        m_observerSelectionCache.insert(session.userId,
+                                        session.observerTrajectorySelection);
         sendFullSnapshot(socket);
         return;
     }
@@ -2081,6 +2167,8 @@ void GameServer::completeJoinRoom(QWebSocket* socket, const QJsonObject& payload
 void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload) {
     ClientSession& session = m_clients[socket];
     if (session.observer) {
+        m_observerSelectionCache.remove(session.userId);
+        session.observerTrajectorySelection.clear();
         session.roomId.clear();
         session.seatId.clear();
         session.seatType.clear();
@@ -2798,6 +2886,99 @@ void GameServer::handleMapMark(QWebSocket* socket, const QJsonObject& payload) {
     broadcastSnapshots();
 }
 
+void GameServer::handleSetObserverTrajectories(QWebSocket* socket,
+                                               const QJsonObject& payload) {
+    if (!m_clients.contains(socket)) return;
+    ClientSession& session = m_clients[socket];
+    if (!session.observer || session.roomId != m_roomId) {
+        sendError(socket, QStringLiteral("PERMISSION_DENIED"),
+                  QStringLiteral("只有旁观者可以选择单位轨迹"));
+        return;
+    }
+    const QJsonArray requested = payload.value(QStringLiteral("unitIds")).toArray();
+    if (requested.size() > Protocol::MaxObserverTrajectoryUnits) {
+        sendError(socket, QStringLiteral("INVALID_TRAJECTORY_SELECTION"),
+                  QStringLiteral("最多选择 8 个单位轨迹"));
+        return;
+    }
+    QSet<QString> selected;
+    for (const QJsonValue& value : requested) {
+        const QString unitId = value.toString();
+        if (selected.contains(unitId) || !m_engine.unit(unitId)) {
+            sendError(socket, QStringLiteral("INVALID_TRAJECTORY_SELECTION"),
+                      QStringLiteral("轨迹选择包含不存在或重复的单位"));
+            return;
+        }
+        selected.insert(unitId);
+    }
+    session.observerTrajectorySelection = selected;
+    if (session.userId > 0) m_observerSelectionCache.insert(session.userId, selected);
+    const double now = m_engine.simTime();
+    for (const QString& unitId : selected) {
+        if (!m_observerTrajectories.contains(unitId)) {
+            const UnitBase* unit = m_engine.unit(unitId);
+            if (!unit) continue;
+            m_observerTrajectories.insert(unitId, QJsonArray{QJsonObject{
+                {QStringLiteral("time"), now},
+                {QStringLiteral("x"), unit->pos().x},
+                {QStringLiteral("y"), unit->pos().y},
+                {QStringLiteral("alt"), unit->pos().alt}}});
+        }
+    }
+    broadcastSnapshots(true);
+}
+
+void GameServer::sampleObserverTrajectories() {
+    bool hasObserver = false;
+    QSet<QString> selected;
+    for (auto it = m_clients.cbegin(); it != m_clients.cend(); ++it) {
+        if (!it->authenticated || !it->observer || it->roomId != m_roomId) continue;
+        hasObserver = true;
+        selected.unite(it->observerTrajectorySelection);
+    }
+    if (!hasObserver || selected.isEmpty()) return;
+
+    const double now = m_engine.simTime();
+    if (!std::isfinite(now)) return;
+    if (m_nextObserverTrajectorySampleAt > 1.0
+        && now + 1e-9 < m_nextObserverTrajectorySampleAt - 1.0) {
+        m_observerTrajectories.clear();
+        m_nextObserverTrajectorySampleAt = 0.0;
+    }
+    if (now + 1e-9 < m_nextObserverTrajectorySampleAt) return;
+    m_nextObserverTrajectorySampleAt = now + 1.0;
+    for (const QString& unitId : selected) {
+        const UnitBase* unit = m_engine.unit(unitId);
+        if (!unit) continue;
+        QJsonArray points = m_observerTrajectories.value(unitId);
+        if (!points.isEmpty()
+            && points.last().toObject().value(QStringLiteral("time")).toDouble(-1.0)
+                >= now - 1e-9) continue;
+        points.append(QJsonObject{{QStringLiteral("time"), now},
+                                  {QStringLiteral("x"), unit->pos().x},
+                                  {QStringLiteral("y"), unit->pos().y},
+                                  {QStringLiteral("alt"), unit->pos().alt}});
+        while (points.size() > Protocol::MaxObserverTrajectoryPoints) points.removeFirst();
+        m_observerTrajectories.insert(unitId, points);
+    }
+}
+
+QJsonObject GameServer::observerTrajectoriesFor(const ClientSession& session) const {
+    if (!session.observer) return {};
+    QStringList ids = session.observerTrajectorySelection.values();
+    ids.sort();
+    QJsonArray selected;
+    QJsonArray trails;
+    for (const QString& id : ids) {
+        selected.append(id);
+        trails.append(QJsonObject{{QStringLiteral("unitId"), id},
+                                  {QStringLiteral("points"),
+                                   m_observerTrajectories.value(id)}});
+    }
+    return QJsonObject{{QStringLiteral("selectedUnitIds"), selected},
+                       {QStringLiteral("trails"), trails}};
+}
+
 QString GameServer::controlledUnitId(const QString& action, const QVariantMap& args) const {
     if (action == QLatin1String("guideAttack")) return args.value(QStringLiteral("guideId")).toString();
     if (action == QLatin1String("assignTarget") || action == QLatin1String("setFlightPlan")
@@ -2823,7 +3004,9 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
         QStringLiteral("pursue"), QStringLiteral("guideAttack"),
         QStringLiteral("setSchedule"), QStringLiteral("halt"),
         QStringLiteral("service"), QStringLiteral("cancelEngagement"),
-        QStringLiteral("setRoe")};
+        QStringLiteral("setRoe"), QStringLiteral("activateCountermeasure"),
+        QStringLiteral("activateScan"), QStringLiteral("attemptFieldRepair"),
+        QStringLiteral("cancelService")};
     if (!actions.contains(action)) {
         return reject(QStringLiteral("UNKNOWN_ACTION"), QStringLiteral("未知操作"));
     }
@@ -2841,7 +3024,10 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
     if (!unit->alive()) {
         return reject(QStringLiteral("UNIT_DESTROYED"), QStringLiteral("受控单元已摧毁"));
     }
-    if (action != QLatin1String("unitOrder") && !unit->movable()) {
+    const bool stationaryAction = action == QLatin1String("unitOrder")
+        || action == QLatin1String("activateCountermeasure")
+        || action == QLatin1String("attemptFieldRepair");
+    if (!stationaryAction && !unit->movable()) {
         return reject(QStringLiteral("UNIT_NOT_MOVABLE"),
                       QStringLiteral("该操作仅适用于可移动单元"));
     }
@@ -2885,6 +3071,53 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
             return reject(QStringLiteral("INVALID_ARGUMENT"),
                           QStringLiteral("交战规则无效"));
         }
+    }
+    if (action == QLatin1String("activateCountermeasure")) {
+        if (!unit->countermeasureState().supported()) {
+            return reject(QStringLiteral("INVALID_UNIT_KIND"),
+                          QStringLiteral("该单元不支持干扰弹"));
+        }
+        if (!unit->countermeasureState().available()) {
+            return reject(QStringLiteral("WEAPON_UNAVAILABLE"),
+                          QStringLiteral("干扰弹冷却中或次数已用尽"));
+        }
+    }
+    if (action == QLatin1String("activateScan")) {
+        if (unit->kind() != UnitKind::ReconUAV || !unit->scanState().supported()) {
+            return reject(QStringLiteral("INVALID_UNIT_KIND"),
+                          QStringLiteral("该操作仅适用于侦察无人机"));
+        }
+        if (!unit->scanState().available()) {
+            return reject(QStringLiteral("WEAPON_UNAVAILABLE"),
+                          QStringLiteral("扫描技能冷却中"));
+        }
+    }
+    if (action == QLatin1String("attemptFieldRepair")) {
+        const QJsonObject subsystems = unit->subsystemStateJson();
+        const bool damaged = subsystems.value(QStringLiteral("sensor")).toDouble() < 1.0 - 1e-9
+            || subsystems.value(QStringLiteral("comms")).toDouble() < 1.0 - 1e-9
+            || subsystems.value(QStringLiteral("mobility")).toDouble() < 1.0 - 1e-9
+            || subsystems.value(QStringLiteral("weapon")).toDouble() < 1.0 - 1e-9;
+        if (!damaged || unit->repairCooldownRemaining() > 1e-9) {
+            return reject(QStringLiteral("WEAPON_UNAVAILABLE"),
+                          damaged ? QStringLiteral("战场修理冷却中")
+                                  : QStringLiteral("没有可修复的受损部位"));
+        }
+    }
+    if (action == QLatin1String("service")) {
+        UnitBase* commandPost = m_engine.unit(unit->cpId());
+        if (!commandPost || !commandPost->alive()
+            || commandPost->kind() != UnitKind::CommandPost
+            || commandPost->side() != unit->side()
+            || unit->pos().distanceTo2D(commandPost->pos())
+                > SimulationEngine::kServiceRadiusMeters) {
+            return reject(QStringLiteral("INVALID_ARGUMENT"),
+                          QStringLiteral("单元必须在活指挥所 500 米内才能开始补充"));
+        }
+    }
+    if (action == QLatin1String("cancelService") && !unit->serviceRequested()) {
+        return reject(QStringLiteral("INVALID_ARGUMENT"),
+                      QStringLiteral("单元当前未在补充"));
     }
     if (action == QLatin1String("guideAttack")) {
         UnitBase* attacker = m_engine.unit(args.value(QStringLiteral("attackerId")).toString());
@@ -3224,6 +3457,8 @@ bool GameServer::persistRoomState(QString* error) {
     checkpoint.runInitialScenario = m_runInitialScenario;
     checkpoint.runtimeUnits = checkpoint.scenario.units.empty()
         ? QJsonArray{} : m_engine.collectCheckpointState();
+    checkpoint.engineState = checkpoint.scenario.units.empty()
+        ? QJsonObject{} : m_engine.collectGlobalCheckpointState();
     for (const QString& key : m_commandResultOrder) {
     checkpoint.commandHistory.append(
             QJsonObject{{QStringLiteral("key"), key},
@@ -3250,6 +3485,12 @@ bool GameServer::persistRoomState(QString* error) {
         ai.providerMode = m_aiProviderMode;
         ai.providerModel = m_ollamaProvider ? m_ollamaProvider->model()
                                              : QStringLiteral("qwen3:4b");
+        ai.selectedProvider = m_aiSelectedProvider;
+        ai.selectedModel = m_aiSelectedModel;
+        ai.resolvedModel = m_aiResolvedModel;
+        ai.roomConfigVersion = m_aiRoomConfigVersion;
+        ai.ollamaConfigVersion = m_aiOllamaConfigVersion;
+        ai.fallbackReason = m_aiFallbackReason;
         ai.nextDecisionAt = m_aiNextDecisionAt;
         ai.nextReplanAt = m_aiNextReplanAt;
         if (!m_aiPlan.requestId.isEmpty()) ai.currentPlan = m_aiPlan;
@@ -3284,6 +3525,47 @@ bool GameServer::restoreRoomState(QString* error) {
     }
     RoomCheckpoint checkpoint;
     if (!m_persistence.loadCheckpoint(&checkpoint, error)) return false;
+    if (checkpoint.sourceSchemaVersion == 2) {
+        QString eventError;
+        const QJsonArray tailEvents = m_persistence.eventsAfter(checkpoint.eventSequence,
+                                                                 &eventError);
+        if (!eventError.isEmpty()) {
+            if (error) *error = eventError;
+            return false;
+        }
+        const bool hasLegacyCommand = std::any_of(
+            tailEvents.cbegin(), tailEvents.cend(), [](const QJsonValue& value) {
+                return value.toObject().value(QStringLiteral("kind")).toString()
+                    == QLatin1String("command");
+            });
+        if (hasLegacyCommand) {
+            if (error) {
+                *error = QStringLiteral(
+                    "schema 2 检查点之后存在旧规则命令日志；请先用旧版本生成最新检查点再升级");
+            }
+            return false;
+        }
+
+        // Schema 2 used serviceRequested for an automatic return-to-base action.
+        // Schema 3 interprets it as an in-place, interruptible service timer, so
+        // carrying the old FSM state forward would silently change the result.
+        QJsonArray migratedRuntime;
+        for (const QJsonValue& value : checkpoint.runtimeUnits) {
+            QJsonObject state = value.toObject();
+            if (state.value(QStringLiteral("checkpointType")).toString()
+                != QLatin1String("engine")
+                && state.value(QStringLiteral("serviceRequested")).toBool()) {
+                state[QStringLiteral("serviceRequested")] = false;
+                QJsonObject behavior = state.value(QStringLiteral("behavior")).toObject();
+                behavior[QStringLiteral("fsmState")] = QStringLiteral("idle");
+                behavior[QStringLiteral("waypoints")] = QJsonArray{};
+                behavior[QStringLiteral("waypointIndex")] = 0;
+                state[QStringLiteral("behavior")] = behavior;
+            }
+            migratedRuntime.append(state);
+        }
+        checkpoint.runtimeUnits = migratedRuntime;
+    }
     if ((checkpoint.phase == QLatin1String("running")) != checkpoint.running) {
         if (error) *error = QStringLiteral("检查点阶段与运行状态冲突");
         return false;
@@ -3309,7 +3591,9 @@ bool GameServer::restoreRoomState(QString* error) {
         m_engine.setSpeedMul(checkpoint.speed);
     } else {
         QString runtimeError;
-        if (!m_engine.restoreCheckpointState(checkpoint.runtimeUnits, checkpoint.simTime,
+        if (!m_engine.restoreCheckpointState(checkpoint.runtimeUnits,
+                                             checkpoint.engineState,
+                                             checkpoint.simTime,
                                              checkpoint.running, checkpoint.speed,
                                              &runtimeError)) {
             if (error) *error = QStringLiteral("运行态恢复失败: %1").arg(runtimeError);
@@ -3361,6 +3645,15 @@ bool GameServer::restoreRoomState(QString* error) {
         m_aiRngState = ai.rngState;
         m_aiDifficulty = ai.aiDifficulty;
         m_aiProviderMode = ai.providerMode;
+        m_aiSelectedProvider = ai.selectedProvider.isEmpty()
+            ? (ai.providerMode == QLatin1String("rules")
+                   ? QStringLiteral("rules") : QStringLiteral("ollama"))
+            : ai.selectedProvider;
+        m_aiSelectedModel = ai.selectedModel;
+        m_aiResolvedModel = ai.resolvedModel;
+        m_aiRoomConfigVersion = ai.roomConfigVersion;
+        m_aiOllamaConfigVersion = ai.ollamaConfigVersion;
+        m_aiFallbackReason = ai.fallbackReason;
         m_aiNextDecisionAt = ai.nextDecisionAt;
         m_aiNextReplanAt = ai.nextReplanAt;
         m_aiPlan = ai.currentPlan.value_or(AiPlanV1{});
@@ -3612,6 +3905,8 @@ GameServer::RoomStateBackup GameServer::captureRoomState() const {
     backup.scenario = m_engine.scenario();
     backup.runtimeUnits = backup.scenario.units.empty()
         ? QJsonArray{} : m_engine.collectCheckpointState();
+    backup.engineState = backup.scenario.units.empty()
+        ? QJsonObject{} : m_engine.collectGlobalCheckpointState();
     backup.simTime = m_engine.simTime();
     backup.running = m_engine.running();
     backup.speed = m_engine.speedMul();
@@ -3642,6 +3937,12 @@ GameServer::RoomStateBackup GameServer::captureRoomState() const {
     backup.aiReplanReason = m_aiReplanReason;
     backup.aiNextPrivilegedSampleAt = m_aiNextPrivilegedSampleAt;
     backup.aiPrivilegedSampleSequence = m_aiPrivilegedSampleSequence;
+    backup.aiSelectedProvider = m_aiSelectedProvider;
+    backup.aiSelectedModel = m_aiSelectedModel;
+    backup.aiResolvedModel = m_aiResolvedModel;
+    backup.aiRoomConfigVersion = m_aiRoomConfigVersion;
+    backup.aiOllamaConfigVersion = m_aiOllamaConfigVersion;
+    backup.aiFallbackReason = m_aiFallbackReason;
     return backup;
 }
 
@@ -3661,8 +3962,8 @@ bool GameServer::restoreRoomStateBackup(const RoomStateBackup& backup, QString* 
         m_engine.setRunning(false);
         m_engine.setSpeedMul(backup.speed);
     } else if (!m_engine.restoreCheckpointState(
-                   backup.runtimeUnits, backup.simTime, backup.running, backup.speed,
-                   &localError)) {
+                   backup.runtimeUnits, backup.engineState, backup.simTime,
+                   backup.running, backup.speed, &localError)) {
         if (error) *error = localError;
         return false;
     }
@@ -3693,6 +3994,12 @@ bool GameServer::restoreRoomStateBackup(const RoomStateBackup& backup, QString* 
     m_aiReplanReason = backup.aiReplanReason;
     m_aiNextPrivilegedSampleAt = backup.aiNextPrivilegedSampleAt;
     m_aiPrivilegedSampleSequence = backup.aiPrivilegedSampleSequence;
+    m_aiSelectedProvider = backup.aiSelectedProvider;
+    m_aiSelectedModel = backup.aiSelectedModel;
+    m_aiResolvedModel = backup.aiResolvedModel;
+    m_aiRoomConfigVersion = backup.aiRoomConfigVersion;
+    m_aiOllamaConfigVersion = backup.aiOllamaConfigVersion;
+    m_aiFallbackReason = backup.aiFallbackReason;
     syncAuthoritativeSeats();
     return true;
 }
@@ -3712,6 +4019,8 @@ bool GameServer::resetAuthoritativeRuntime(const QString& operationId, QString* 
         m_mapMarks = {};
         m_mapMarkRateWindows.clear();
         m_sharedIntel.clear();
+        m_observerTrajectories.clear();
+        m_nextObserverTrajectorySampleAt = 0.0;
         m_chatHistory = {};
         m_chatSequence = 0;
         m_commandResults.clear();
@@ -3746,19 +4055,337 @@ bool GameServer::resetRoomIfEmpty(QString* error) {
     return true;
 }
 
+void GameServer::clearRoomOperationTracking() {
+    m_lifecycleOperationInFlight.clear();
+    m_lifecycleOperationAction.clear();
+    m_lifecycleOperationRequestedRevision = 0;
+    m_lifecycleOperationRequestedConfigVersion = 0;
+    m_lifecycleOperationRequestedOllamaVersion = 0;
+    m_lifecycleOperationAckState.clear();
+    m_lifecycleOperationAckCode.clear();
+    m_lifecycleOperationAckRevision = 0;
+    m_lifecycleOperationAckInFlight = false;
+}
+
 void GameServer::processRoomOperation(const QJsonObject& operation) {
     if (operation.isEmpty()
         || operation.value(QStringLiteral("state")).toString() != QLatin1String("pending")) return;
     const QString operationId = operation.value(QStringLiteral("operationId")).toString();
     const QString action = operation.value(QStringLiteral("action")).toString();
-    if (action != QLatin1String("reset") && action != QLatin1String("redeploy")) return;
+    if (operationId.isEmpty()) return;
     const qint64 requested = operation.value(QStringLiteral("requestedRevision")).toInteger();
     const quint64 currentRevision = m_authoritativeRoom.revision();
-    if (requested > 0 && static_cast<quint64>(requested) > currentRevision) {
-        acknowledgeRoomOperation(operationId, QStringLiteral("failed"), currentRevision,
-                                 QStringLiteral("STALE_REVISION"));
+    const qint64 requestedConfig = operation.value(QStringLiteral("requestedConfigVersion"))
+                                       .toInteger();
+    const qint64 requestedEndpoint = operation.value(
+        QStringLiteral("requestedOllamaConfigVersion")).toInteger();
+
+    const bool trackedOperation = m_lifecycleOperationInFlight == operationId;
+    if (!m_lifecycleOperationInFlight.isEmpty() && !trackedOperation) {
+        audit(QStringLiteral("lifecycle"),
+              QJsonObject{{QStringLiteral("event"),
+                           QStringLiteral("pendingOperationSuperseded")},
+                          {QStringLiteral("operationId"),
+                           m_lifecycleOperationInFlight},
+                          {QStringLiteral("replacementOperationId"), operationId}});
+        clearRoomOperationTracking();
+    }
+    if (trackedOperation && !m_lifecycleOperationAckState.isEmpty()) {
+        acknowledgeRoomOperation(operationId, m_lifecycleOperationAckState,
+                                 m_lifecycleOperationAckRevision,
+                                 m_lifecycleOperationAckCode);
         return;
     }
+    if (trackedOperation) {
+        // Only an open operation can legitimately be waiting without a final
+        // ACK: its model probe may have been started by the configuration sync.
+        if (action != QLatin1String("open") || m_aiProbeInFlight
+            || (m_ollamaProvider && m_ollamaProvider->inFlight())) {
+            return;
+        }
+    } else {
+        m_lifecycleOperationInFlight = operationId;
+        m_lifecycleOperationAction = action;
+        m_lifecycleOperationRequestedRevision = requested > 0
+            ? static_cast<quint64>(requested) : 0;
+        m_lifecycleOperationRequestedConfigVersion = requestedConfig > 0
+            ? static_cast<quint64>(requestedConfig) : 0;
+        m_lifecycleOperationRequestedOllamaVersion = requestedEndpoint > 0
+            ? static_cast<quint64>(requestedEndpoint) : 0;
+    }
+    const auto fail = [this, operationId](const QString& code) {
+        // The operation may have changed the authoritative room revision before
+        // a validation/persistence failure is detected. ACK the revision that
+        // is current at the point of failure rather than a stale entry snapshot.
+        acknowledgeRoomOperation(operationId, QStringLiteral("failed"),
+                                 m_authoritativeRoom.revision(), code);
+    };
+    if (requested > 0 && static_cast<quint64>(requested) > currentRevision) {
+        fail(QStringLiteral("STALE_REVISION"));
+        return;
+    }
+    if (requestedConfig > 0 && static_cast<quint64>(requestedConfig) != m_configVersion
+        && action != QLatin1String("stop") && action != QLatin1String("force-stop")) {
+        fail(QStringLiteral("STALE_CONFIG_VERSION"));
+        return;
+    }
+    if (requestedEndpoint > 0
+        && static_cast<quint64>(requestedEndpoint) != m_aiOllamaConfigVersion
+        && action == QLatin1String("open")) {
+        fail(QStringLiteral("STALE_AI_CONFIG_VERSION"));
+        return;
+    }
+
+    if (action == QLatin1String("open")) {
+        if (m_roomStatus != QLatin1String("stopped")
+            && m_roomStatus != QLatin1String("finished")) {
+            fail(QStringLiteral("INVALID_STATE"));
+            return;
+        }
+        if (!m_aiConfigApplied) {
+            m_roomStatus = QStringLiteral("stopped");
+            fail(QStringLiteral("AI_CONFIGURATION_INVALID"));
+            return;
+        }
+        if (m_aiSelectedProvider == QLatin1String("ollama")
+            && m_aiConnectionStatus != QLatin1String("connected")) {
+            if (m_aiProbeInFlight || m_ollamaProvider->inFlight()) {
+                return;
+            }
+            m_aiProbeInFlight = true;
+            m_aiConnectionStatus = QStringLiteral("checking");
+            writeMonitorStatus();
+            m_ollamaProvider->probe(m_matchGeneration,
+                [this, operation, operationId](OllamaResult result) {
+                    m_aiProbeInFlight = false;
+                    if (m_lifecycleOperationInFlight != operationId
+                        || !m_lifecycleOperationAckState.isEmpty()) {
+                        return;
+                    }
+                    m_aiLastProbeAt = QDateTime::currentDateTimeUtc()
+                                          .toString(Qt::ISODateWithMs);
+                    if (!result.ok) {
+                        m_aiConnectionStatus = result.failureClass.isEmpty()
+                            ? QStringLiteral("unavailable") : result.failureClass;
+                        m_aiProbeFailureClass = result.failureClass;
+                        m_aiResolvedModel.clear();
+                        m_aiFallbackReason = result.failureClass;
+                        acknowledgeRoomOperation(
+                            operationId, QStringLiteral("failed"),
+                            m_authoritativeRoom.revision(),
+                            result.failureClass.isEmpty()
+                                ? QStringLiteral("AI_PROBE_FAILED") : result.failureClass);
+                        m_roomStatus = QStringLiteral("stopped");
+                        writeMonitorStatus();
+                        broadcastSnapshots(true);
+                        return;
+                    }
+                    m_aiConnectionStatus = QStringLiteral("connected");
+                    m_aiProbeFailureClass.clear();
+                    m_aiResolvedModel = m_ollamaProvider
+                        ? (m_ollamaProvider->resolvedModel().isEmpty()
+                               ? m_ollamaProvider->configuredModel()
+                               : m_ollamaProvider->resolvedModel())
+                        : result.resolvedModel;
+                    processRoomOperation(operation);
+                });
+            return;
+        }
+        const RoomStateBackup backup = captureRoomState();
+        QString runtimeError;
+        if (!resetAuthoritativeRuntime(
+                QStringLiteral("internal-open-%1").arg(operationId), &runtimeError)) {
+            m_roomStatus = QStringLiteral("stopped");
+            fail(QStringLiteral("RUNTIME_RESET_FAILED"));
+            return;
+        }
+        m_phase = QStringLiteral("preparing");
+        m_roomStatus = QStringLiteral("preparing");
+        m_aiFallbackReason.clear();
+        syncAuthoritativeSeats();
+        if (!persistRoomState(&runtimeError)) {
+            QString rollbackError;
+            if (!restoreRoomStateBackup(backup, &rollbackError)) {
+                audit(QStringLiteral("persistence"),
+                      QJsonObject{{QStringLiteral("event"),
+                                   QStringLiteral("lifecycleRollbackFailed")},
+                                  {QStringLiteral("message"), rollbackError}});
+            }
+            m_roomStatus = QStringLiteral("stopped");
+            persistRoomState(nullptr);
+            fail(QStringLiteral("PERSISTENCE_FAILED"));
+            return;
+        }
+        const quint64 revision = m_authoritativeRoom.revision();
+        acknowledgeRoomOperation(operationId, QStringLiteral("acknowledged"), revision);
+        broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("matchReset")},
+                                   {QStringLiteral("message"), QStringLiteral("房间已锁定配置并进入准备阶段")}});
+        broadcastSnapshots(true);
+        return;
+    }
+
+    if (action == QLatin1String("start") || action == QLatin1String("resume")) {
+        const QString expectedPhase = action == QLatin1String("start")
+            ? QStringLiteral("preparing") : QStringLiteral("paused");
+        if (m_phase != expectedPhase) {
+            fail(QStringLiteral("INVALID_STATE"));
+            return;
+        }
+        const RoomStateBackup backup = captureRoomState();
+        const auto rollback = [this, &backup, &fail](const QString& code) {
+            QString rollbackError;
+            if (!restoreRoomStateBackup(backup, &rollbackError)) {
+                audit(QStringLiteral("persistence"),
+                      QJsonObject{{QStringLiteral("event"),
+                                   QStringLiteral("lifecycleRollbackFailed")},
+                                  {QStringLiteral("message"), rollbackError}});
+            }
+            fail(code);
+        };
+        if (m_roomMode == QLatin1String("pve")) {
+            bool aiDeploymentRequired = false;
+            for (const AuthoritativeRoom::Seat& seat : m_authoritativeRoom.seats()) {
+                if (seat.controllerType == QLatin1String("ai")
+                    && (!seat.deployed || !seat.ready)) {
+                    aiDeploymentRequired = true;
+                    break;
+                }
+            }
+            if (aiDeploymentRequired) {
+                const QJsonObject map = m_engine.mapInfo();
+                const auto deployed = m_authoritativeRoom.deployAiSeats(
+                    map.value(QStringLiteral("widthMeters")).toDouble(),
+                    map.value(QStringLiteral("heightMeters")).toDouble(), m_matchGeneration);
+                QString deploymentError;
+                if (!deployed.ok || !applyDeployedScenario(&deploymentError)) {
+                    rollback(deployed.ok ? QStringLiteral("AI_DEPLOYMENT_FAILED")
+                                         : deployed.code);
+                    return;
+                }
+                syncAuthoritativeSeats();
+            }
+        }
+        if (!m_engine.readyForSim()) {
+            rollback(QStringLiteral("ENGINE_NOT_READY"));
+            return;
+        }
+        const auto started = m_authoritativeRoom.start();
+        if (!started.ok) {
+            rollback(started.code);
+            return;
+        }
+        m_runInitialScenario = m_engine.scenario();
+        m_phase = QStringLiteral("running");
+        m_roomStatus = QStringLiteral("running");
+        m_engine.setRunning(true);
+        if (!persistRoomState()) {
+            rollback(QStringLiteral("PERSISTENCE_FAILED"));
+            return;
+        }
+        acknowledgeRoomOperation(operationId, QStringLiteral("acknowledged"),
+                                 started.revision);
+        broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("matchStarted")},
+                                   {QStringLiteral("message"), QStringLiteral("房间管理员已开启推演")}});
+        broadcastSnapshots(true);
+        return;
+    }
+
+    if (action == QLatin1String("pause")) {
+        if (m_phase != QLatin1String("running")) {
+            fail(QStringLiteral("INVALID_STATE"));
+            return;
+        }
+        const RoomStateBackup backup = captureRoomState();
+        const auto paused = m_authoritativeRoom.pause();
+        if (!paused.ok) {
+            fail(paused.code);
+            return;
+        }
+        m_engine.setRunning(false);
+        m_phase = QStringLiteral("paused");
+        m_roomStatus = QStringLiteral("paused");
+        cancelAiPlanRequest();
+        if (!persistRoomState()) {
+            QString rollbackError;
+            if (!restoreRoomStateBackup(backup, &rollbackError)) {
+                audit(QStringLiteral("persistence"),
+                      QJsonObject{{QStringLiteral("event"),
+                                   QStringLiteral("lifecycleRollbackFailed")},
+                                  {QStringLiteral("message"), rollbackError}});
+            }
+            fail(QStringLiteral("PERSISTENCE_FAILED"));
+            return;
+        }
+        acknowledgeRoomOperation(operationId, QStringLiteral("acknowledged"), paused.revision);
+        broadcastSnapshots(true);
+        return;
+    }
+
+    if (action == QLatin1String("finish")) {
+        if (m_phase != QLatin1String("running")
+            && m_phase != QLatin1String("preparing")
+            && m_phase != QLatin1String("paused")) {
+            fail(QStringLiteral("INVALID_STATE"));
+            return;
+        }
+        const RoomStateBackup backup = captureRoomState();
+        const auto finished = m_authoritativeRoom.finish(QStringLiteral("draw"));
+        if (!finished.ok) {
+            fail(finished.code);
+            return;
+        }
+        m_engine.setRunning(false);
+        m_phase = QStringLiteral("finished");
+        m_roomStatus = QStringLiteral("finished");
+        cancelAiPlanRequest();
+        if (!persistRoomState()) {
+            QString rollbackError;
+            if (!restoreRoomStateBackup(backup, &rollbackError)) {
+                audit(QStringLiteral("persistence"),
+                      QJsonObject{{QStringLiteral("event"),
+                                   QStringLiteral("lifecycleRollbackFailed")},
+                                  {QStringLiteral("message"), rollbackError}});
+            }
+            fail(QStringLiteral("PERSISTENCE_FAILED"));
+            return;
+        }
+        acknowledgeRoomOperation(operationId, QStringLiteral("acknowledged"), finished.revision);
+        broadcastSnapshots(true);
+        return;
+    }
+
+    if (action == QLatin1String("stop") || action == QLatin1String("force-stop")) {
+        const RoomStateBackup backup = captureRoomState();
+        QString runtimeError;
+        if (!resetAuthoritativeRuntime(
+                QStringLiteral("internal-stop-%1").arg(operationId), &runtimeError)) {
+            fail(QStringLiteral("RUNTIME_RESET_FAILED"));
+            return;
+        }
+        m_engine.setRunning(false);
+        m_phase = QStringLiteral("preparing");
+        m_roomStatus = QStringLiteral("stopped");
+        if (!persistRoomState()) {
+            QString rollbackError;
+            if (!restoreRoomStateBackup(backup, &rollbackError)) {
+                audit(QStringLiteral("persistence"),
+                      QJsonObject{{QStringLiteral("event"),
+                                   QStringLiteral("lifecycleRollbackFailed")},
+                                  {QStringLiteral("message"), rollbackError}});
+            } else {
+                persistRoomState(nullptr);
+            }
+            fail(QStringLiteral("PERSISTENCE_FAILED"));
+            return;
+        }
+        closeRoomSessions(QStringLiteral("房间已停止"));
+        acknowledgeRoomOperation(operationId, QStringLiteral("acknowledged"),
+                                 m_authoritativeRoom.revision());
+        broadcastSnapshots(true);
+        return;
+    }
+
+    if (action != QLatin1String("reset") && action != QLatin1String("redeploy")) return;
     const RoomStateBackup backup = captureRoomState();
     const AuthoritativeRoom::Result result = m_authoritativeRoom.applyOperation(
         operationId, action, currentRevision);
@@ -3778,6 +4405,8 @@ void GameServer::processRoomOperation(const QJsonObject& operation) {
     m_mapMarks = {};
     m_mapMarkRateWindows.clear();
     m_sharedIntel.clear();
+    m_observerTrajectories.clear();
+    m_nextObserverTrajectorySampleAt = 0.0;
     resetAiMatchState();
     syncAuthoritativeSeats();
     QString persistenceError;
@@ -3794,6 +4423,15 @@ void GameServer::processRoomOperation(const QJsonObject& operation) {
 void GameServer::acknowledgeRoomOperation(const QString& operationId, const QString& state,
                                           quint64 revision, const QString& code) {
     if (operationId.isEmpty()) return;
+    if (m_lifecycleOperationInFlight != operationId) {
+        clearRoomOperationTracking();
+        m_lifecycleOperationInFlight = operationId;
+    }
+    m_lifecycleOperationAckState = state;
+    m_lifecycleOperationAckRevision = revision;
+    m_lifecycleOperationAckCode = code;
+    if (m_lifecycleOperationAckInFlight) return;
+    m_lifecycleOperationAckInFlight = true;
     const QUrl url(m_authServiceUrl + QStringLiteral("/api/internal/rooms/%1/operations/%2/ack")
                        .arg(QUrl::toPercentEncoding(m_roomId),
                             QUrl::toPercentEncoding(operationId)));
@@ -3804,10 +4442,40 @@ void GameServer::acknowledgeRoomOperation(const QString& operationId, const QStr
         request, QJsonDocument(QJsonObject{{QStringLiteral("state"), state},
                                             {QStringLiteral("revision"),
                                              static_cast<qint64>(revision)},
-                                            {QStringLiteral("code"), code}})
+                                            {QStringLiteral("code"), code},
+                                            {QStringLiteral("ai_resolved_model"),
+                                             m_aiResolvedModel}})
                      .toJson(QJsonDocument::Compact));
     QTimer::singleShot(2500, reply, [reply]() { if (reply->isRunning()) reply->abort(); });
-    connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, operationId, state, revision, code]() {
+        const int statusCode = reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QNetworkReply::NetworkError networkError = reply->error();
+        const QByteArray responseBody = reply->readAll();
+        reply->deleteLater();
+        if (m_lifecycleOperationInFlight != operationId) return;
+        m_lifecycleOperationAckInFlight = false;
+        const bool accepted = networkError == QNetworkReply::NoError
+            && statusCode >= 200 && statusCode < 300;
+        if (!accepted) {
+            audit(QStringLiteral("lifecycle"),
+                  QJsonObject{{QStringLiteral("event"),
+                               QStringLiteral("operationAckFailed")},
+                              {QStringLiteral("operationId"), operationId},
+                              {QStringLiteral("state"), state},
+                              {QStringLiteral("revision"), static_cast<qint64>(revision)},
+                              {QStringLiteral("code"), code},
+                              {QStringLiteral("httpStatus"), statusCode},
+                              {QStringLiteral("networkError"),
+                               static_cast<int>(networkError)},
+                              {QStringLiteral("response"),
+                               QString::fromUtf8(responseBody).left(256)}});
+            return;
+        }
+        clearRoomOperationTracking();
+        QTimer::singleShot(0, this, [this]() { syncRoomControl(); });
+    });
 }
 
 QList<AiSeatState> GameServer::aiSeatStates() const {
@@ -3851,6 +4519,39 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
         state.weaponHealth = std::clamp(unit->weaponHealth(), 0.0, 1.0);
         state.detectRange = unit->detectRange();
         state.commRange = unit->commRange();
+        state.fuelRemaining = unit->fuelRemaining();
+        state.fuelCapacity = unit->fuelCapacity();
+        state.fuelBurnRate = unit->fuelBurnRate();
+        const double fuelEndurance = unit->estimatedFuelEndurance();
+        state.estimatedFuelEndurance = std::isfinite(fuelEndurance)
+            ? fuelEndurance : -1.0;
+        state.lowestSubsystemHealth = std::min(
+            {state.sensorHealth, state.commsHealth,
+             state.mobilityHealth, state.weaponHealth});
+        state.serviceRequested = unit->serviceRequested();
+        state.serviceProgress = unit->serviceProgress();
+        state.commandPostAlive = commandPost && commandPost->alive();
+        if (commandPost) {
+            state.commandPostX = commandPost->pos().x;
+            state.commandPostY = commandPost->pos().y;
+            state.serviceEligible = state.commandPostAlive
+                && unit->pos().distanceTo2D(commandPost->pos())
+                    <= SimulationEngine::kServiceRadiusMeters;
+        }
+        const UnitBase::AbilityState& countermeasure = unit->countermeasureState();
+        state.countermeasureSupported = countermeasure.supported();
+        state.countermeasureAvailable = countermeasure.available();
+        state.countermeasureRange = countermeasure.range;
+        state.countermeasureCooldownRemaining = countermeasure.cooldownRemaining;
+        state.countermeasureRemaining = countermeasure.remaining;
+        state.countermeasureCapacity = countermeasure.capacity;
+        const UnitBase::AbilityState& scan = unit->scanState();
+        state.scanSupported = scan.supported();
+        state.scanAvailable = scan.available();
+        state.scanCooldownRemaining = scan.cooldownRemaining;
+        state.repairCooldownRemaining = unit->repairCooldownRemaining();
+        state.repairAvailable = state.lowestSubsystemHealth < 1.0 - 1e-9
+            && state.repairCooldownRemaining <= 1e-9;
         state.communicationAvailable = commandPost && commandPost->alive()
             && StateProjector::canTransmit(m_engine, commandPost->id(), unit->id())
             && StateProjector::canTransmit(m_engine, unit->id(), commandPost->id());
@@ -3858,8 +4559,41 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
             state.ammoRemaining = attack->ammoRemaining();
             state.ammoCapacity = attack->ammoCapacity();
             state.cooldownRemaining = attack->cooldownRemaining();
-            state.fuelRemaining = attack->fuelRemaining();
-            state.fuelCapacity = attack->fuelCapacity();
+            state.minimumAttackRange = attack->minimumAttackRange();
+            state.optimalAttackRange = attack->optimalAttackRange();
+            state.maximumAttackRange = attack->attackRange();
+        }
+        const QJsonObject projected = StateProjector::snapshotFor(
+            m_engine, seatId, m_stateRevision, {}, {}, seat.unitId);
+        for (const QJsonValue& value : projected.value(QStringLiteral("projectiles")).toArray()) {
+            if (!value.isObject()) continue;
+            const QJsonObject projectile = value.toObject();
+            const QJsonArray position = projectile.value(QStringLiteral("position")).toArray();
+            if (position.size() < 2) continue;
+            AiObservedProjectile observedProjectile;
+            observedProjectile.projectileId = projectile.value(QStringLiteral("id")).toString();
+            observedProjectile.side = projectile.value(QStringLiteral("side")).toString();
+            observedProjectile.targetId = projectile.value(QStringLiteral("targetId")).toString();
+            observedProjectile.x = position.at(0).toDouble();
+            observedProjectile.y = position.at(1).toDouble();
+            observedProjectile.headingRad =
+                projectile.value(QStringLiteral("headingRad")).toDouble();
+            observedProjectile.speed = projectile.value(QStringLiteral("speed")).toDouble();
+            observedProjectile.age = projectile.value(QStringLiteral("age")).toDouble();
+            observedProjectile.lifetime = projectile.value(QStringLiteral("lifetime")).toDouble();
+            observedProjectile.active = projectile.value(QStringLiteral("active")).toBool(true);
+            const QString attackerId = projectile.value(QStringLiteral("attackerId")).toString();
+            const QJsonObject attackerRuntime = m_engine.unitSnapshot(attackerId);
+            const double averageDamage = (attackerRuntime.value(QStringLiteral("damageMin")).toDouble()
+                                          + attackerRuntime.value(QStringLiteral("damageMax")).toDouble())
+                * 0.5;
+            observedProjectile.expectedDamage = averageDamage
+                * attackerRuntime.value(QStringLiteral("hitProbability")).toDouble()
+                * std::clamp(attackerRuntime.value(QStringLiteral("jamFactor")).toDouble(1.0)
+                                 * attackerRuntime.value(QStringLiteral("subsystems")).toObject()
+                                       .value(QStringLiteral("weapon")).toDouble(1.0),
+                             0.0, 1.0);
+            state.visibleProjectiles.append(observedProjectile);
         }
         const QSet<QString> visible = StateProjector::visibleUnitIds(
             m_engine, seatId, {}, seat.unitId);
@@ -3895,6 +4629,9 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
             observed.x = target->pos().x;
             observed.y = target->pos().y;
             observed.confidence = 1.0;
+            observed.lastSeenAt = m_engine.simTime();
+            observed.hp = target->hp();
+            observed.maxHp = target->maxHp();
             observed.visible = true;
             observed.commandPost = isRedCommandPost(target);
             state.visibleTargets.append(observed);
@@ -4029,6 +4766,21 @@ AiKnowledgeState GameServer::buildAiKnowledge(const QList<AiSeatState>& states, 
                                 contact.x, contact.y) < 4000.0 * 4000.0) {
                 knowledge.commandPostThreat = true;
                 break;
+            }
+        }
+        if (!knowledge.commandPostThreat) {
+            for (const AiSeatState& state : states) {
+                const bool projectedIncoming = std::any_of(
+                    state.visibleProjectiles.cbegin(), state.visibleProjectiles.cend(),
+                    [commandPost](const AiObservedProjectile& projectile) {
+                        return projectile.active
+                            && projectile.side == QLatin1String("red")
+                            && projectile.targetId == commandPost->id();
+                    });
+                if (projectedIncoming) {
+                    knowledge.commandPostThreat = true;
+                    break;
+                }
             }
         }
     }
@@ -4173,9 +4925,34 @@ void GameServer::recordAiConversation(const OllamaResult& result,
 }
 
 void GameServer::applyAiConfiguration(const QJsonObject& config) {
-    const qint64 versionValue = config.value(QStringLiteral("configVersion")).toInteger();
+    const qint64 versionValue = config.value(QStringLiteral("roomConfigVersion")).toInteger(
+        config.value(QStringLiteral("configVersion")).toInteger());
     if (versionValue <= 0 || !m_ollamaProvider) return;
     const quint64 version = static_cast<quint64>(versionValue);
+    const QString selectedProvider = config.value(QStringLiteral("selectedProvider"))
+                                         .toString(config.value(QStringLiteral("provider"))
+                                                       .toString())
+                                         .trimmed().toLower();
+    const QString selectedModel = config.value(QStringLiteral("selectedModel"))
+                                      .toString(config.value(QStringLiteral("model")).toString())
+                                      .trimmed();
+    const quint64 endpointVersion = qMax<qint64>(
+        1, config.value(QStringLiteral("ollamaConfigVersion")).toInteger(
+               config.value(QStringLiteral("configVersion")).toInteger(1)));
+    const bool sameSelection = selectedProvider == m_aiSelectedProvider
+        && selectedModel == m_aiSelectedModel
+        && version == m_aiRoomConfigVersion
+        && endpointVersion == m_aiOllamaConfigVersion;
+    // Room AI is frozen once preparation has begun.  The account service
+    // rejects edits too, but this guard protects the authority if an internal
+    // caller or a stale response attempts a hot update.
+    if (m_roomStatus != QLatin1String("stopped") && !sameSelection) {
+        audit(QStringLiteral("security"),
+              QJsonObject{{QStringLiteral("event"), QStringLiteral("activeAiConfigurationChangeRejected")},
+                          {QStringLiteral("phase"), m_phase},
+                          {QStringLiteral("roomConfigVersion"), static_cast<qint64>(version)}});
+        return;
+    }
     OllamaConfig next;
     QString configurationError;
     if (!aiConfigurationFromJson(config, m_ollamaProvider->config(), &next,
@@ -4183,7 +4960,12 @@ void GameServer::applyAiConfiguration(const QJsonObject& config) {
         if (version == m_aiConfigVersion && !m_aiConfigApplied) return;
         m_aiConfigVersion = version;
         m_aiConfigApplied = false;
-        m_aiProviderMode = config.value(QStringLiteral("provider")).toString();
+        m_aiProviderMode = selectedProvider;
+        m_aiSelectedProvider = selectedProvider == QLatin1String("ollama")
+            ? QStringLiteral("ollama") : QStringLiteral("rules");
+        m_aiSelectedModel = selectedModel;
+        m_aiRoomConfigVersion = version;
+        m_aiOllamaConfigVersion = endpointVersion;
         m_aiConnectionStatus = QStringLiteral("configuration_error");
         m_aiProbeFailureClass = QStringLiteral("configuration_error");
         audit(QStringLiteral("ai"),
@@ -4193,12 +4975,22 @@ void GameServer::applyAiConfiguration(const QJsonObject& config) {
         writeMonitorStatus();
         return;
     }
-    const bool changed = version != m_aiConfigVersion
+    const bool changed = version != m_aiRoomConfigVersion
+        || endpointVersion != m_aiOllamaConfigVersion
+        || selectedProvider != m_aiSelectedProvider
+        || selectedModel != m_aiSelectedModel
         || next.deployment != m_ollamaProvider->deployment()
         || next.baseUrl != m_ollamaProvider->baseUrl()
         || next.model != m_ollamaProvider->model();
     if (!changed && m_aiConfigApplied) return;
     m_aiConfigVersion = version;
+    m_aiRoomConfigVersion = version;
+    m_aiOllamaConfigVersion = endpointVersion;
+    m_aiSelectedProvider = selectedProvider == QLatin1String("ollama")
+        ? QStringLiteral("ollama") : QStringLiteral("rules");
+    m_aiSelectedModel = selectedModel;
+    m_aiResolvedModel.clear();
+    m_aiFallbackReason.clear();
     m_aiConfigApplied = true;
     cancelAiPlanRequest();
     m_ollamaProvider->reconfigure(next);
@@ -4238,10 +5030,16 @@ void GameServer::probeAiProvider() {
         if (result.ok) {
             m_aiConnectionStatus = QStringLiteral("connected");
             m_aiProbeFailureClass.clear();
+            m_aiResolvedModel = m_ollamaProvider
+                ? (m_ollamaProvider->resolvedModel().isEmpty()
+                       ? m_ollamaProvider->configuredModel()
+                       : m_ollamaProvider->resolvedModel())
+                : QString();
         } else {
             m_aiConnectionStatus = result.failureClass.isEmpty()
                 ? QStringLiteral("unavailable") : result.failureClass;
             m_aiProbeFailureClass = result.failureClass;
+            m_aiResolvedModel.clear();
         }
         writeMonitorStatus();
     });
@@ -4385,6 +5183,7 @@ void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
             }
             m_aiEffectiveEngine = QStringLiteral("ollama");
             m_aiLastFailureClass.clear();
+            m_aiFallbackReason.clear();
             m_aiConsecutiveFailures = 0;
             ++m_aiProviderSuccesses;
             recordAiConversation(result, context.planningGeneration,
@@ -4407,7 +5206,11 @@ void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
     ++m_aiConsecutiveFailures;
     m_aiEffectiveEngine = QStringLiteral("rules");
     m_aiLastFailureClass = result.failureClass;
-    if (m_aiConsecutiveFailures >= 2) m_aiStickyRules = true;
+    if (m_aiConsecutiveFailures >= 2) {
+        m_aiStickyRules = true;
+        m_aiFallbackReason = result.failureClass.isEmpty()
+            ? QStringLiteral("连续两次规划失败") : result.failureClass;
+    }
     recordAiConversation(result, context.planningGeneration,
                          aiConversationStatus(result), m_aiPlan,
                          result.failureClass.isEmpty()
@@ -4464,7 +5267,9 @@ void GameServer::runAiDecision() {
             const QJsonObject projection{
                 {QStringLiteral("simTime"), now},
                 {QStringLiteral("stateRevision"), static_cast<qint64>(m_stateRevision)},
-                {QStringLiteral("units"), commanderSnapshot.value(QStringLiteral("units"))}};
+                {QStringLiteral("units"), commanderSnapshot.value(QStringLiteral("units"))},
+                {QStringLiteral("projectiles"),
+                 commanderSnapshot.value(QStringLiteral("projectiles"))}};
             const quint64 requestGeneration = m_matchGeneration;
             const quint64 requestPlanningGeneration = m_aiPlanningGeneration;
             const quint64 requestSourceRevision = m_stateRevision;
@@ -4515,12 +5320,17 @@ void GameServer::runAiDecision() {
         }
     }
     const QList<AiCommand> commands = RulesAi::commandsForPlan(
-        m_aiPlan, states, now, mapWidth, mapHeight);
+        m_aiPlan, states, now, mapWidth, mapHeight, &knowledge);
     QHash<QString, int> attackUnitsPerTarget;
     QSet<QString> targeted;
     for (const AiCommand& command : commands) {
-        if (command.action == QLatin1String("engageTarget")) {
-            const QString targetId = command.args.value(QStringLiteral("targetId")).toString();
+        const bool attackCommand = command.action == QLatin1String("engageTarget")
+            || (command.action == QLatin1String("moveTo")
+                && command.args.contains(QStringLiteral("attackTargetId")));
+        if (attackCommand) {
+            const QString targetId = command.action == QLatin1String("engageTarget")
+                ? command.args.value(QStringLiteral("targetId")).toString()
+                : command.args.value(QStringLiteral("attackTargetId")).toString();
             if (targetId.isEmpty()) continue;
             if (!targeted.contains(targetId) && targeted.size() >= parameters.maxTargets) continue;
             if (attackUnitsPerTarget.value(targetId) >= parameters.coordinatedUnitsPerTarget) {
@@ -4590,7 +5400,11 @@ QJsonObject GameServer::roomState() const {
                        {QStringLiteral("roomStatus"), m_roomStatus},
                        {QStringLiteral("roomMode"), m_roomMode},
                        {QStringLiteral("aiDifficulty"), m_aiDifficulty},
+                       {QStringLiteral("aiProvider"), m_aiSelectedProvider},
+                       {QStringLiteral("aiModel"), m_aiSelectedModel},
+                       {QStringLiteral("aiResolvedModel"), m_aiResolvedModel},
                        {QStringLiteral("aiEngine"), m_aiEffectiveEngine},
+                       {QStringLiteral("aiFallbackReason"), m_aiFallbackReason},
                        {QStringLiteral("configVersion"), static_cast<qint64>(m_configVersion)},
                        {QStringLiteral("redReady"), m_redReady},
                        {QStringLiteral("blueReady"), m_blueReady},
@@ -4673,6 +5487,8 @@ void GameServer::writeMonitorStatus() {
     }
     const QJsonObject aiStatus{
         {QStringLiteral("provider"), m_aiProviderMode},
+        {QStringLiteral("selectedProvider"), m_aiSelectedProvider},
+        {QStringLiteral("selectedModel"), m_aiSelectedModel},
         {QStringLiteral("model"), m_ollamaProvider
              ? (m_ollamaProvider->resolvedModel().isEmpty()
                     ? m_ollamaProvider->configuredModel()
@@ -4680,7 +5496,9 @@ void GameServer::writeMonitorStatus() {
         {QStringLiteral("configuredModel"),
          m_ollamaProvider ? m_ollamaProvider->configuredModel() : QString()},
         {QStringLiteral("resolvedModel"),
-         m_ollamaProvider ? m_ollamaProvider->resolvedModel() : QString()},
+         m_aiResolvedModel.isEmpty()
+             ? (m_ollamaProvider ? m_ollamaProvider->resolvedModel() : QString())
+             : m_aiResolvedModel},
         {QStringLiteral("baseUrl"), m_ollamaProvider ? m_ollamaProvider->baseUrl() : QString()},
         {QStringLiteral("connectionStatus"), m_aiConnectionStatus},
         {QStringLiteral("configVersion"), static_cast<qint64>(m_aiConfigVersion)},
@@ -4696,6 +5514,9 @@ void GameServer::writeMonitorStatus() {
         {QStringLiteral("lastFailureClass"), m_aiLastFailureClass},
         {QStringLiteral("consecutiveFailures"), m_aiConsecutiveFailures},
         {QStringLiteral("stickyRules"), m_aiStickyRules},
+        {QStringLiteral("fallbackReason"), m_aiFallbackReason},
+        {QStringLiteral("roomConfigVersion"), static_cast<qint64>(m_aiRoomConfigVersion)},
+        {QStringLiteral("ollamaConfigVersion"), static_cast<qint64>(m_aiOllamaConfigVersion)},
         {QStringLiteral("strategyPhase"), m_aiStrategyPhase},
         {QStringLiteral("replanReason"), m_aiReplanReason},
         {QStringLiteral("planningGeneration"), static_cast<qint64>(m_aiPlanningGeneration)},
@@ -4832,10 +5653,14 @@ void GameServer::removeParticipantMarksForUser(qint64 userId, const QString& leg
     m_mapMarks = retained;
 }
 
-QJsonObject GameServer::snapshotFor(const ClientSession& session) const {
+QJsonObject GameServer::snapshotFor(const ClientSession& session, quint64 projectedRevision) const {
+    const quint64 revision = projectedRevision > 0 ? projectedRevision : m_stateRevision;
+    QJsonObject projectedRoomState = roomState();
+    projectedRoomState[QStringLiteral("stateRevision")] = static_cast<qint64>(revision);
     QJsonObject snapshot = StateProjector::snapshotFor(
-        m_engine, normalizedRole(session), m_stateRevision, roomState(),
-        m_sharedIntel.value(session.seatId), m_authoritativeRoom.seat(session.seatId).unitId);
+        m_engine, normalizedRole(session), revision, projectedRoomState,
+        m_sharedIntel.value(session.seatId), m_authoritativeRoom.seat(session.seatId).unitId,
+        observerTrajectoriesFor(session));
     if (m_authoritativeRoom.runtimeUnits().isEmpty()) {
         snapshot[QStringLiteral("units")] = QJsonArray{};
         QJsonObject scenario = snapshot.value(QStringLiteral("scenario")).toObject();
@@ -4953,20 +5778,50 @@ void GameServer::closeRoomSessions(const QString& message) {
         it->side.clear();
         it->seatReady = false;
         it->observer = false;
+        it->observerTrajectorySelection.clear();
         it->role = QStringLiteral("player");
         sendSeatDirectory(it.key());
     }
     for (const auto& [socket, projected] : notifications) {
         if (m_clients.contains(socket)) sendEnvelope(socket, QStringLiteral("event"), projected);
     }
+    m_observerSelectionCache.clear();
+    m_observerTrajectories.clear();
+    m_nextObserverTrajectorySampleAt = 0.0;
 }
 
 void GameServer::broadcastSnapshots(bool forceFull) {
+    const quint64 candidateRevision = m_stateRevision + 1;
+    QHash<QString, QJsonObject> projectedByGroup;
     QHash<QWebSocket*, QJsonObject> currentSnapshots;
     bool projectionChanged = false;
+    const auto projectionGroupKey = [this](const ClientSession& session) {
+        QStringList shared = m_sharedIntel.value(session.seatId).values();
+        QStringList trajectories = session.observerTrajectorySelection.values();
+        std::sort(shared.begin(), shared.end());
+        std::sort(trajectories.begin(), trajectories.end());
+        QJsonArray sharedIds;
+        for (const QString& id : shared) sharedIds.append(id);
+        QJsonArray trajectoryIds;
+        for (const QString& id : trajectories) trajectoryIds.append(id);
+        const QJsonObject key{{QStringLiteral("role"), normalizedRole(session)},
+                              {QStringLiteral("userId"), session.userId},
+                              {QStringLiteral("seatId"), session.seatId},
+                              {QStringLiteral("side"), session.side},
+                              {QStringLiteral("ownedUnitId"),
+                               m_authoritativeRoom.seat(session.seatId).unitId},
+                              {QStringLiteral("sharedIntel"), sharedIds},
+                              {QStringLiteral("trajectories"), trajectoryIds}};
+        return QString::fromUtf8(QJsonDocument(key).toJson(QJsonDocument::Compact));
+    };
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it->authenticated) continue;
-        const QJsonObject current = snapshotFor(it.value());
+        const QString groupKey = projectionGroupKey(it.value());
+        QJsonObject current = projectedByGroup.value(groupKey);
+        if (current.isEmpty()) {
+            current = snapshotFor(it.value(), candidateRevision);
+            projectedByGroup.insert(groupKey, current);
+        }
         currentSnapshots.insert(it.key(), current);
         QJsonObject comparableCurrent = current;
         QJsonObject comparablePrevious = it->lastSnapshot;
@@ -4984,10 +5839,16 @@ void GameServer::broadcastSnapshots(bool forceFull) {
     }
     if (!projectionChanged && !forceFull) return;
     if (projectionChanged) {
-        ++m_stateRevision;
-        currentSnapshots.clear();
-        for (auto it = m_clients.cbegin(); it != m_clients.cend(); ++it) {
-            if (it->authenticated) currentSnapshots.insert(it.key(), snapshotFor(it.value()));
+        m_stateRevision = candidateRevision;
+    } else {
+        // The candidate revision was only needed to build a fresh projection.
+        // A forced full snapshot without a state change must keep the current
+        // contiguous revision expected by clients.
+        for (auto it = currentSnapshots.begin(); it != currentSnapshots.end(); ++it) {
+            it->insert(QStringLiteral("stateRevision"), static_cast<qint64>(m_stateRevision));
+            QJsonObject room = it->value(QStringLiteral("roomState")).toObject();
+            room.insert(QStringLiteral("stateRevision"), static_cast<qint64>(m_stateRevision));
+            it->insert(QStringLiteral("roomState"), room);
         }
     }
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {

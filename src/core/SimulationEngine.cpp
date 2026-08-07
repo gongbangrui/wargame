@@ -33,6 +33,10 @@ bool isKnownKind(const QString& kind) {
         || kind == QLatin1String("jammeruav");
 }
 
+bool finiteNonNegative(double value) {
+    return std::isfinite(value) && value >= 0.0;
+}
+
 QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map) {
     if (u.id.trimmed().isEmpty()) return QStringLiteral("单元ID不能为空");
     if (u.id.size() > kMaxUnitIdLength || u.callsign.size() > kMaxCallsignLength) {
@@ -58,6 +62,12 @@ QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map) {
         && std::isfinite(u.subsystemRepairRate) && u.subsystemRepairRate >= 0.0;
     if (!validPosition || !validParams) {
         return QStringLiteral("单元参数无效: %1").arg(u.id);
+    }
+    if (u.kind != QLatin1String("commandpost")
+        && (!std::isfinite(u.fuelCapacitySec) || u.fuelCapacitySec <= 0.0
+            || !std::isfinite(u.initialFuelSec) || u.initialFuelSec < 0.0
+            || u.initialFuelSec > u.fuelCapacitySec)) {
+        return QStringLiteral("移动单元燃油参数无效: %1").arg(u.id);
     }
     if (u.kind == QLatin1String("attackuav")) {
         const bool validWeapon = u.ammoCapacity >= 0 && u.ammoCapacity <= 100000
@@ -208,7 +218,10 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
     m_outcomeReported = false;
     m_destroyedReported.clear();
     m_cachedDetections.clear();
+    m_remoteRuntimeProjection.clear();
     m_pendingCombatRequests.clear();
+    m_projectiles.clear();
+    m_scanContacts.clear();
     m_unitIdentityCatalog = {};
     m_unitIdentityOrder.clear();
     do {
@@ -227,6 +240,7 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
         m_lastReplayCheckpointTime = 0.0;
         m_recordedDuration = 0.0;
         m_recordedFinalSnapshot = collectAllUnitsSnapshot();
+        m_recordedFinalProjectiles = projectilesSnapshot();
         captureReplayCheckpoint();
         appendTimeline(QStringLiteral("system"), QStringLiteral("场景已加载"),
                        QJsonObject{{QStringLiteral("unitCount"),
@@ -234,6 +248,8 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
     }
     emit mapChanged();
     emit unitsChanged();
+    emit projectilesChanged();
+    emit scanContactsChanged();
     emit messagesChanged();
     emit simTimeChanged();
     recomputeReadyForSim();
@@ -271,6 +287,8 @@ void SimulationEngine::connectUnitSignals(UnitBase* unit, const QString& id) {
         }
         markUnitsDirty();
     });
+    connect(unit, &UnitBase::runtimeStateChanged, this,
+            [this]() { markUnitsDirty(); });
 }
 
 void SimulationEngine::rememberUnitIdentity(const ScenarioUnit& unit) {
@@ -318,6 +336,11 @@ void SimulationEngine::createSingleUnit(const ScenarioUnit& u) {
     const bool isCp = (unit->kind() == UnitKind::CommandPost);
     unit->setCallsign(u.callsign);
     unit->setParams(p);
+    if (unit->movable()) {
+        unit->configureFuel(std::max(1.0, u.fuelCapacitySec),
+                            std::clamp(u.initialFuelSec, 0.0, u.fuelCapacitySec),
+                            std::max(1.0, u.speed));
+    }
     if (auto* attacker = qobject_cast<AttackUAV*>(unit.get())) attacker->configureWeapon(u);
     unit->setHp(p.maxHp);
     unit->setSchedule(u.schedule);
@@ -396,10 +419,15 @@ void SimulationEngine::onTickInternal(bool manual, double manualDt) {
     // winner. Otherwise unordered unit iteration can turn a simultaneous
     // command-post kill into an arbitrary red/blue victory.
     m_inTick = true;
+    QHash<QString, GeoPos> previousPositions;
+    for (const auto& [id, unit] : m_units) previousPositions.insert(id, unit->pos());
     applySchedules(m_clock->simTime(), dt);
-    tickUnits(dt);
+    tickUnits(dt, previousPositions);
     applyEcmJamming();
     resolveCombatRequests();
+    advanceProjectiles(dt, previousPositions);
+    advanceServices(dt);
+    expireScanContacts();
     scanReconDetections(dt);
     broadcastPositionReports(manual);
     refreshDetectionCache();
@@ -411,6 +439,7 @@ void SimulationEngine::onTickInternal(bool manual, double manualDt) {
         m_replaySteps.push_back(ReplayStep{simTime() - dt, dt});
         m_recordedDuration = std::max(m_recordedDuration, simTime());
         m_recordedFinalSnapshot = collectAllUnitsSnapshot();
+        m_recordedFinalProjectiles = projectilesSnapshot();
         if (simTime() - m_lastReplayCheckpointTime >= 10.0) captureReplayCheckpoint();
     }
 
@@ -418,7 +447,8 @@ void SimulationEngine::onTickInternal(bool manual, double manualDt) {
     markUnitsDirty();
 }
 
-void SimulationEngine::tickUnits(double dt) {
+void SimulationEngine::tickUnits(double dt,
+                                 const QHash<QString, GeoPos>& previousPositions) {
     for (auto& [id, u] : m_units) {
         // Remote-owned units are mirrored state; the local process does not
         // tick them — the peer does, and we receive the new state via the
@@ -430,6 +460,9 @@ void SimulationEngine::tickUnits(double dt) {
                 m_pendingCombatRequests.push_back(std::move(*request));
             }
         }
+        const GeoPos before = previousPositions.value(id, u->pos());
+        const double actualSpeed = dt > 0.0 ? before.distanceTo2D(u->pos()) / dt : 0.0;
+        u->advanceRuntimeState(dt, actualSpeed);
         // Don't sample path for dead units — they don't move and we'd be
         // pushing the same position into recentPath forever.
         if (u->alive()) u->sampleRecentPath(m_clock->simTime());
@@ -446,31 +479,200 @@ void SimulationEngine::resolveCombatRequests() {
                   return left.shotSequence < right.shotSequence;
               });
 
-    QHash<QString, double> initialHp;
-    QHash<QString, UnitBase::DamageDelta> accumulatedDamage;
-    struct ResolvedShot {
+    bool changed = false;
+    for (const CombatRequest& request : m_pendingCombatRequests) {
+        auto* attacker = qobject_cast<AttackUAV*>(unit(request.attackerId));
+        UnitBase* target = unit(request.targetId);
+        if (!attacker || !attacker->alive() || !isHostileTarget(attacker, target)) {
+            if (attacker) attacker->rejectProjectileLaunch(QStringLiteral("invalid_target"));
+            continue;
+        }
+        if (activeProjectileCount() >= kMaximumProjectiles) {
+            attacker->rejectProjectileLaunch(QStringLiteral("projectile_limit"));
+            continue;
+        }
+        ProjectileState projectile;
+        projectile.id = QStringLiteral("%1:%2").arg(request.attackerId)
+                            .arg(request.shotSequence);
+        projectile.attackerId = request.attackerId;
+        projectile.targetId = request.targetId;
+        projectile.side = attacker->side();
+        projectile.position = attacker->pos();
+        projectile.previousPosition = projectile.position;
+        projectile.headingRad = std::atan2(target->pos().y - attacker->pos().y,
+                                           target->pos().x - attacker->pos().x);
+        projectile.launchTime = simTime();
+        projectile.request = request;
+        const auto [_, inserted] = m_projectiles.emplace(projectile.id, projectile);
+        if (!inserted) {
+            attacker->rejectProjectileLaunch(QStringLiteral("duplicate_projectile"));
+            continue;
+        }
+        attacker->markProjectileLaunched(projectile.id);
+        appendTimeline(QStringLiteral("projectile"), QStringLiteral("导弹发射"),
+                       QJsonObject{{QStringLiteral("shotId"), projectile.id},
+                                   {QStringLiteral("attackerId"), projectile.attackerId},
+                                   {QStringLiteral("targetId"), projectile.targetId}});
+        changed = true;
+    }
+    m_pendingCombatRequests.clear();
+    if (changed) emit projectilesChanged();
+}
+
+void SimulationEngine::advanceProjectiles(
+    double dt, const QHash<QString, GeoPos>& previousPositions) {
+    if (!std::isfinite(dt) || dt <= 0.0 || m_projectiles.empty()) return;
+
+    bool changed = false;
+    QStringList terminalIds;
+    for (auto it = m_projectiles.begin(); it != m_projectiles.end();) {
+        if (!it->second.active()) {
+            if (!it->second.resultSettled) {
+                terminalIds.append(it->first);
+            } else {
+                it->second.terminalAge += dt;
+            }
+            if (it->second.resultSettled && it->second.terminalAge >= 0.75) {
+                it = m_projectiles.erase(it);
+                changed = true;
+                continue;
+            }
+        }
+        ++it;
+    }
+
+    auto normalizeAngle = [](double angle) {
+        constexpr double kPi = 3.14159265358979323846;
+        constexpr double kTwoPi = 2.0 * kPi;
+        while (angle > kPi) angle -= kTwoPi;
+        while (angle < -kPi) angle += kTwoPi;
+        return angle;
+    };
+    auto sweptDistance = [](const GeoPos& missileStart, const GeoPos& missileEnd,
+                            const GeoPos& targetStart, const GeoPos& targetEnd) {
+        const double rx = missileStart.x - targetStart.x;
+        const double ry = missileStart.y - targetStart.y;
+        const double vx = (missileEnd.x - missileStart.x)
+            - (targetEnd.x - targetStart.x);
+        const double vy = (missileEnd.y - missileStart.y)
+            - (targetEnd.y - targetStart.y);
+        const double vv = vx * vx + vy * vy;
+        const double t = vv > 1e-12
+            ? std::clamp(-(rx * vx + ry * vy) / vv, 0.0, 1.0) : 0.0;
+        return std::hypot(rx + vx * t, ry + vy * t);
+    };
+
+    for (auto& [id, projectile] : m_projectiles) {
+        if (!projectile.active()) continue;
+        UnitBase* target = unit(projectile.targetId);
+        if (!target || !target->alive() || target->side() == projectile.side) {
+            projectile.terminalReason = QStringLiteral("target_lost");
+            projectile.terminalAge = 0.0;
+            terminalIds.append(id);
+            changed = true;
+            continue;
+        }
+
+        projectile.previousPosition = projectile.position;
+        const double desiredHeading = std::atan2(target->pos().y - projectile.position.y,
+                                                 target->pos().x - projectile.position.x);
+        const double maxTurn = projectile.speed / kProjectileTurnRadiusMeters * dt;
+        projectile.headingRad += std::clamp(
+            normalizeAngle(desiredHeading - projectile.headingRad), -maxTurn, maxTurn);
+        projectile.headingRad = normalizeAngle(projectile.headingRad);
+        projectile.position.x += std::cos(projectile.headingRad) * projectile.speed * dt;
+        projectile.position.y += std::sin(projectile.headingRad) * projectile.speed * dt;
+        projectile.age += dt;
+
+        const bool launchedThisTick = std::abs(projectile.launchTime - simTime()) <= 1e-9;
+        const GeoPos targetStart = launchedThisTick
+            ? target->pos() : previousPositions.value(projectile.targetId, target->pos());
+        if (sweptDistance(projectile.previousPosition, projectile.position,
+                          targetStart, target->pos()) <= kProjectileCollisionRadiusMeters) {
+            projectile.terminalReason = QStringLiteral("contact");
+        } else if (projectile.position.x < 0.0 || projectile.position.y < 0.0
+                   || projectile.position.x > m_scenario.map.widthMeters
+                   || projectile.position.y > m_scenario.map.heightMeters) {
+            projectile.terminalReason = QStringLiteral("out_of_bounds");
+        } else if (projectile.age + 1e-9 >= projectile.lifetime) {
+            projectile.terminalReason = QStringLiteral("expired");
+        }
+        if (!projectile.active()) {
+            projectile.terminalAge = 0.0;
+            terminalIds.append(id);
+        }
+        changed = true;
+    }
+
+    settleTerminalProjectiles(terminalIds);
+    if (!terminalIds.isEmpty()) changed = true;
+    if (changed) emit projectilesChanged();
+}
+
+void SimulationEngine::settleTerminalProjectiles(const QStringList& projectileIds) {
+    if (projectileIds.isEmpty()) return;
+
+    QStringList orderedIds = projectileIds;
+    orderedIds.removeDuplicates();
+    orderedIds.sort();
+    struct ResolvedProjectile {
+        QString projectileId;
         AttackUAV* attacker = nullptr;
         CombatOutcome outcome;
         bool killCredit = false;
     };
-    std::vector<ResolvedShot> resolved;
-    resolved.reserve(m_pendingCombatRequests.size());
+    QHash<QString, double> initialHp;
+    QHash<QString, UnitBase::DamageDelta> accumulatedDamage;
+    std::vector<ResolvedProjectile> resolved;
+    resolved.reserve(orderedIds.size());
 
-    for (CombatRequest request : m_pendingCombatRequests) {
-        auto* attacker = qobject_cast<AttackUAV*>(unit(request.attackerId));
-        UnitBase* target = unit(request.targetId);
-        if (!attacker || !attacker->alive() || !isHostileTarget(attacker, target)) continue;
-        request.attackerEffectiveness = attacker->jamFactor() * attacker->weaponEffectiveness();
-        if (!initialHp.contains(request.targetId)) initialHp.insert(request.targetId, target->hp());
+    for (const QString& projectileId : orderedIds) {
+        auto projectileIt = m_projectiles.find(projectileId);
+        if (projectileIt == m_projectiles.end()) continue;
+        ProjectileState& projectile = projectileIt->second;
+        if (projectile.active() || projectile.resultSettled) continue;
+        auto* attacker = qobject_cast<AttackUAV*>(unit(projectile.attackerId));
+        CombatOutcome outcome;
+        outcome.shotId = projectile.id;
+        outcome.attackerId = projectile.attackerId;
+        outcome.targetId = projectile.targetId;
+        outcome.shotSequence = projectile.request.shotSequence;
+        outcome.distance = projectile.request.distance;
 
-        CombatOutcome outcome = CombatResolver::resolve(request, m_battleSeed);
-        UnitBase::DamageDelta& total = accumulatedDamage[request.targetId];
-        const double damageBefore = total.hullDamage;
-        outcome.hpBefore = std::max(0.0, initialHp.value(request.targetId) - damageBefore);
+        UnitBase* target = unit(projectile.targetId);
+        if (projectile.terminalReason != QLatin1String("contact")
+            || !target || !target->alive()) {
+            outcome.result = projectile.terminalReason == QLatin1String("contact")
+                ? QStringLiteral("target_lost") : projectile.terminalReason;
+            if (target) outcome.hpBefore = outcome.hpAfter = target->hp();
+            projectile.terminalReason = outcome.result;
+            projectile.resultSettled = true;
+            resolved.push_back({projectileId, attacker, outcome, false});
+            continue;
+        }
+
+        CombatRequest request = projectile.request;
+        outcome = CombatResolver::resolve(request, m_battleSeed);
+        projectile.terminalReason = outcome.result;
+        projectile.resultSettled = true;
+
+        if (!outcome.hit()) {
+            outcome.hpBefore = outcome.hpAfter = target->hp();
+            resolved.push_back({projectileId, attacker, outcome, false});
+            continue;
+        }
+
+        if (!initialHp.contains(projectile.targetId)) {
+            initialHp.insert(projectile.targetId, target->hp());
+        }
+        UnitBase::DamageDelta& total = accumulatedDamage[projectile.targetId];
+        outcome.hpBefore = std::max(0.0, initialHp.value(projectile.targetId)
+                                             - total.hullDamage);
         int subsystemIndex = static_cast<int>(request.shotSequence % 4ULL);
-        for (const char ch : request.attackerId.toUtf8()) subsystemIndex += static_cast<unsigned char>(ch);
-        UnitBase::DamageDelta delta = outcome.hit()
-            ? target->assessDamage(outcome.damage, subsystemIndex) : UnitBase::DamageDelta{};
+        for (const char ch : request.attackerId.toUtf8()) {
+            subsystemIndex += static_cast<unsigned char>(ch);
+        }
+        UnitBase::DamageDelta delta = target->assessDamage(outcome.damage, subsystemIndex);
         const double assessedHullDamage = delta.hullDamage;
         const double appliedDamage = std::min(assessedHullDamage, outcome.hpBefore);
         const double appliedFraction = assessedHullDamage > 0.0
@@ -498,43 +700,78 @@ void SimulationEngine::resolveCombatRequests() {
                                    total.weaponLoss);
         outcome.damage = appliedDamage;
         outcome.hpAfter = std::max(0.0, outcome.hpBefore - appliedDamage);
-        const bool killCredit = outcome.hpBefore > 0.0 && outcome.hpAfter <= 0.0 && outcome.hit();
+        const bool killCredit = outcome.hpBefore > 0.0 && outcome.hpAfter <= 0.0;
         total.hullDamage += delta.hullDamage;
         total.sensorLoss += delta.sensorLoss;
         total.commsLoss += delta.commsLoss;
         total.mobilityLoss += delta.mobilityLoss;
         total.weaponLoss += delta.weaponLoss;
-        resolved.push_back(ResolvedShot{attacker, outcome, killCredit});
+        resolved.push_back({projectileId, attacker, outcome, killCredit});
     }
-    m_pendingCombatRequests.clear();
 
     QStringList damagedIds = accumulatedDamage.keys();
     damagedIds.sort();
     for (const QString& targetId : damagedIds) {
-        UnitBase* target = unit(targetId);
-        if (target && target->alive()) {
+        if (UnitBase* target = unit(targetId); target && target->alive()) {
             target->applyDamageDelta(accumulatedDamage.value(targetId));
         }
     }
-    for (ResolvedShot& shot : resolved) {
-        shot.attacker->applyCombatOutcome(shot.outcome, shot.killCredit);
+    for (ResolvedProjectile& result : resolved) {
+        if (result.attacker) result.attacker->applyCombatOutcome(result.outcome,
+                                                                 result.killCredit);
         appendTimeline(QStringLiteral("combat"),
-                       shot.outcome.hit() ? QStringLiteral("武器命中")
-                                          : QStringLiteral("武器未命中"),
-                       QJsonObject{{QStringLiteral("shotId"), shot.outcome.shotId},
-                                   {QStringLiteral("attackerId"), shot.outcome.attackerId},
-                                   {QStringLiteral("targetId"), shot.outcome.targetId},
-                                   {QStringLiteral("hit"), shot.outcome.hit()},
-                                   {QStringLiteral("damage"), shot.outcome.damage},
-                                   {QStringLiteral("distance"), shot.outcome.distance},
-                                   {QStringLiteral("probability"), shot.outcome.effectiveProbability},
-                                   {QStringLiteral("kill"), shot.killCredit}},
-                       shot.killCredit ? QStringLiteral("warn") : QStringLiteral("info"));
+                       result.outcome.hit() ? QStringLiteral("导弹命中")
+                                            : QStringLiteral("攻击无效"),
+                       QJsonObject{{QStringLiteral("shotId"), result.outcome.shotId},
+                                   {QStringLiteral("attackerId"), result.outcome.attackerId},
+                                   {QStringLiteral("targetId"), result.outcome.targetId},
+                                   {QStringLiteral("result"), result.outcome.result},
+                                   {QStringLiteral("hit"), result.outcome.hit()},
+                                   {QStringLiteral("damage"), result.outcome.damage},
+                                   {QStringLiteral("kill"), result.killCredit}},
+                       result.killCredit ? QStringLiteral("warn") : QStringLiteral("info"));
     }
 }
 
+void SimulationEngine::advanceServices(double dt) {
+    for (auto& [id, controlled] : m_units) {
+        if (!controlled->serviceRequested()) continue;
+        UnitBase* cp = unit(controlled->serviceCpId());
+        const bool eligible = controlled->alive() && cp && cp->alive()
+            && cp->kind() == UnitKind::CommandPost && cp->side() == controlled->side()
+            && controlled->pos().distanceTo2D(cp->pos()) <= kServiceRadiusMeters;
+        if (!eligible) {
+            controlled->cancelService();
+            controlled->setStatus(QStringLiteral("补充已中断"));
+            appendTimeline(QStringLiteral("service"), QStringLiteral("补充中断"),
+                           QJsonObject{{QStringLiteral("unitId"), id}});
+            continue;
+        }
+        if (controlled->advanceService(dt)) {
+            controlled->setStatus(QStringLiteral("补充完成"));
+            appendTimeline(QStringLiteral("service"), QStringLiteral("补充完成"),
+                           QJsonObject{{QStringLiteral("unitId"), id}},
+                           QStringLiteral("success"));
+        } else {
+            controlled->setStatus(QStringLiteral("补充中 %1%")
+                                      .arg(qRound(controlled->serviceProgress() * 100.0)));
+        }
+    }
+}
+
+void SimulationEngine::expireScanContacts() {
+    const auto previousSize = m_scanContacts.size();
+    std::erase_if(m_scanContacts, [this](const ScanContact& contact) {
+        const UnitBase* scanner = unit(contact.scannerId);
+        const UnitBase* target = unit(contact.targetId);
+        return contact.expiresAt <= simTime() || !scanner || !scanner->alive()
+            || !target || !target->alive();
+    });
+    if (m_scanContacts.size() != previousSize) emit scanContactsChanged();
+}
+
 void SimulationEngine::applyEcmJamming() {
-    constexpr double kJammedFactor = 0.4;
+    constexpr double kJammedFactor = 0.5;
     std::vector<std::pair<QString, UnitBase*>> jammers;
     jammers.reserve(m_units.size());
     for (auto& [id, unit] : m_units) {
@@ -686,6 +923,7 @@ void SimulationEngine::applySchedules(double simTime, double dt) {
     for (auto& [id, u] : m_units) {
         if (!u->movable()) continue;
         if (!u->alive()) continue;
+        if (!u->hasUsableFuel() || u->serviceRequested()) continue;
         if (u->hasActiveWaypoints()) continue;
         const auto& sched = u->schedule();
         if (sched.empty()) continue;
@@ -829,6 +1067,41 @@ QJsonObject SimulationEngine::unitSnapshot(const QString& id) const {
     o["subsystems"] = u->subsystemStateJson();
     o["serviceRequested"] = u->serviceRequested();
     o["serviceProgress"] = u->serviceProgress();
+    o["serviceDuration"] = u->serviceDuration();
+    o["serviceElapsed"] = u->serviceElapsed();
+    o["serviceCpId"] = u->serviceCpId();
+    const UnitBase* serviceCp = unit(commandSenderIdFor(u.get()));
+    o["serviceEligible"] = u->movable() && u->alive() && serviceCp && serviceCp->alive()
+        && u->pos().distanceTo2D(serviceCp->pos()) <= kServiceRadiusMeters;
+    o["fuelRemaining"] = u->fuelRemaining();
+    o["fuelCapacity"] = u->fuelCapacity();
+    o["fuelBurnRate"] = u->fuelBurnRate();
+    const double endurance = u->estimatedFuelEndurance();
+    o["estimatedEnduranceSec"] = std::isfinite(endurance) ? endurance : -1.0;
+    o["economyCruiseSpeed"] = u->economyCruiseSpeed();
+    o["abilities"] = u->abilityStateJson();
+    o["countermeasureRange"] = u->countermeasureState().range;
+    o["countermeasureCooldownRemaining"] = u->countermeasureState().cooldownRemaining;
+    o["countermeasureRemaining"] = u->countermeasureState().remaining;
+    o["countermeasureCapacity"] = u->countermeasureState().capacity;
+    o["scanCooldownRemaining"] = u->scanState().cooldownRemaining;
+    o["repairCooldownRemaining"] = u->repairCooldownRemaining();
+    int incomingThreatCount = 0;
+    double nearestThreatDistance = std::numeric_limits<double>::infinity();
+    double minimumThreatEta = std::numeric_limits<double>::infinity();
+    for (const auto& [projectileId, projectile] : m_projectiles) {
+        Q_UNUSED(projectileId);
+        if (!projectile.active() || projectile.side == u->side()
+            || projectile.targetId != id) continue;
+        const double distance = u->pos().distanceTo2D(projectile.position);
+        if (distance > kProjectileThreatRadiusMeters) continue;
+        ++incomingThreatCount;
+        nearestThreatDistance = std::min(nearestThreatDistance, distance);
+        minimumThreatEta = std::min(minimumThreatEta, distance / projectile.speed);
+    }
+    o["incomingThreatCount"] = incomingThreatCount;
+    o["nearestThreatDistance"] = incomingThreatCount > 0 ? nearestThreatDistance : -1.0;
+    o["minimumThreatEta"] = incomingThreatCount > 0 ? minimumThreatEta : -1.0;
     o["status"] = u->statusText();
     o["sharedKnowledge"] = u->sharedKnowledgeJson();
     QJsonArray rp;
@@ -873,6 +1146,8 @@ QJsonObject SimulationEngine::unitSnapshot(const QString& id) const {
         o["rulesOfEngagement"] = attacker->rulesOfEngagement();
         o["targetId"] = attacker->targetId();
         o["armed"] = attacker->armed();
+        o["activeProjectileId"] = attacker->activeProjectileId();
+        o["activeProjectileCount"] = attacker->activeProjectileCount();
         if (configured) {
             o["initialAmmo"] = configured->initialAmmo;
             o["hitProbability"] = configured->hitProbability;
@@ -883,6 +1158,15 @@ QJsonObject SimulationEngine::unitSnapshot(const QString& id) const {
             o["damageMax"] = configured->damageMax;
             o["rangeFalloff"] = configured->rangeFalloff;
             o["rearmDurationSec"] = configured->rearmDurationSec;
+        }
+    }
+    if (const auto projected = m_remoteRuntimeProjection.constFind(id);
+        projected != m_remoteRuntimeProjection.constEnd()) {
+        // The server has already validated and permission-trimmed this object.
+        // Overlay it last so fields absent from the local mirror (actions,
+        // threat summaries, and projected private state) survive the decode.
+        for (auto field = projected->constBegin(); field != projected->constEnd(); ++field) {
+            o.insert(field.key(), field.value());
         }
     }
     return o;
@@ -916,6 +1200,10 @@ void SimulationEngine::initCommandDispatch() {
     m_dispatch["setSchedule"]   = [this](auto& a){ cmdSetSchedule(a); };
     m_dispatch["halt"]          = [this](auto& a){ cmdHalt(a); };
     m_dispatch["service"]       = [this](auto& a){ cmdService(a); };
+    m_dispatch["cancelService"] = [this](auto& a){ cmdCancelService(a); };
+    m_dispatch["activateCountermeasure"] = [this](auto& a){ cmdActivateCountermeasure(a); };
+    m_dispatch["activateScan"] = [this](auto& a){ cmdActivateScan(a); };
+    m_dispatch["attemptFieldRepair"] = [this](auto& a){ cmdAttemptFieldRepair(a); };
     m_dispatch["cancelEngagement"] = [this](auto& a){ cmdCancelEngagement(a); };
     m_dispatch["setRoe"]        = [this](auto& a){ cmdSetRulesOfEngagement(a); };
 }
@@ -973,7 +1261,10 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
         return CommandResult::reject(QString::fromLatin1(CommandCode::UnitDestroyed),
                                      QStringLiteral("单元已摧毁: %1").arg(unitId));
     }
-    if (action != QLatin1String("unitOrder") && !controlled->movable()) {
+    const bool stationaryAction = action == QLatin1String("unitOrder")
+        || action == QLatin1String("activateCountermeasure")
+        || action == QLatin1String("attemptFieldRepair");
+    if (!stationaryAction && !controlled->movable()) {
         return CommandResult::reject(QString::fromLatin1(CommandCode::UnitNotMovable),
                                      QStringLiteral("该操作仅适用于可移动单元: %1").arg(unitId));
     }
@@ -1021,6 +1312,11 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
         && (reloadingAttacker->ammoRemaining() <= 0 || reloadingAttacker->serviceRequested())) {
         return CommandResult::reject(QString::fromLatin1(CommandCode::WeaponUnavailable),
                                      QStringLiteral("攻击机没有可用弹药或正在补给"));
+    }
+    if (action == QLatin1String("engageTarget")
+        && activeProjectileCount() >= kMaximumProjectiles) {
+        return CommandResult::reject(QString::fromLatin1(CommandCode::WeaponUnavailable),
+                                     QStringLiteral("全局在途导弹已达到 512 枚安全上限"));
     }
     if (action == QLatin1String("setRoe")) {
         const QString roe = args.value(QStringLiteral("roe")).toString();
@@ -1113,9 +1409,63 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
         }
     }
 
+    const bool movementAction = action == QLatin1String("moveTo")
+        || action == QLatin1String("withdraw") || action == QLatin1String("attackAt")
+        || action == QLatin1String("setFlightPlan") || action == QLatin1String("pursue")
+        || action == QLatin1String("guideAttack") || action == QLatin1String("setSchedule");
+    if (movementAction && !controlled->hasUsableFuel()) {
+        return CommandResult::reject(QString::fromLatin1(CommandCode::WeaponUnavailable),
+                                     QStringLiteral("燃油已耗尽，无法执行新的移动命令"));
+    }
+    if (action == QLatin1String("activateCountermeasure")) {
+        if (!controlled->countermeasureState().supported()) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidUnitKind),
+                                         QStringLiteral("该单元不支持干扰弹"));
+        }
+        if (!controlled->countermeasureState().available()) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::WeaponUnavailable),
+                                         QStringLiteral("干扰弹冷却中或次数已用尽"));
+        }
+    }
+    if (action == QLatin1String("activateScan")) {
+        if (controlled->kind() != UnitKind::ReconUAV || !controlled->scanState().supported()) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidUnitKind),
+                                         QStringLiteral("该操作仅适用于侦察无人机"));
+        }
+        if (!controlled->scanState().available()) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::WeaponUnavailable),
+                                         QStringLiteral("扫描技能冷却中"));
+        }
+    }
+    if (action == QLatin1String("attemptFieldRepair")) {
+        const QJsonObject subsystems = controlled->subsystemStateJson();
+        const bool damaged = subsystems.value(QStringLiteral("sensor")).toDouble() < 1.0 - 1e-9
+            || subsystems.value(QStringLiteral("comms")).toDouble() < 1.0 - 1e-9
+            || subsystems.value(QStringLiteral("mobility")).toDouble() < 1.0 - 1e-9
+            || subsystems.value(QStringLiteral("weapon")).toDouble() < 1.0 - 1e-9;
+        if (!damaged || controlled->repairCooldownRemaining() > 1e-9) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::WeaponUnavailable),
+                                         damaged ? QStringLiteral("战场修理冷却中")
+                                                 : QStringLiteral("没有可修复的受损部位"));
+        }
+    }
+    if (action == QLatin1String("service")) {
+        UnitBase* cp = unit(commandSenderIdFor(controlled));
+        if (!cp || !cp->alive()
+            || controlled->pos().distanceTo2D(cp->pos()) > kServiceRadiusMeters) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
+                                         QStringLiteral("单元必须在活指挥所 500 米内才能开始补充"));
+        }
+    }
+    if (action == QLatin1String("cancelService") && !controlled->serviceRequested()) {
+        return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
+                                     QStringLiteral("单元当前未在补充"));
+    }
+
     const bool needsCommandPost = action != QLatin1String("setSpeed")
         && action != QLatin1String("setSchedule")
-        && action != QLatin1String("guideAttack");
+        && action != QLatin1String("guideAttack")
+        && action != QLatin1String("cancelService");
     if (needsCommandPost && commandSenderIdFor(controlled).isEmpty()) {
         return CommandResult::reject(QString::fromLatin1(CommandCode::CommandPostUnavailable),
                                      QStringLiteral("己方指挥所已摧毁，无法派单: %1").arg(unitId));
@@ -1399,6 +1749,7 @@ void SimulationEngine::cmdSetSchedule(const QVariantMap& args) {
               [](const SchedulePoint& a, const SchedulePoint& b) {
                   return a.time < b.time;
               });
+    u->cancelService();
     u->cancelWaypointMotion();
     u->setSchedule(sched);
     if (auto* su = findScenarioUnit(uid)) su->schedule = sched;
@@ -1429,15 +1780,85 @@ void SimulationEngine::cmdService(const QVariantMap& args) {
     const QString cpId = commandSenderIdFor(controlled);
     UnitBase* cp = unit(cpId);
     if (!cp || !cp->alive()) return;
-    Message message;
-    message.type = Message::Type::Withdraw;
-    message.sender = cpId;
-    message.receiver = unitId;
-    message.requiresAck = true;
-    message.payload[QStringLiteral("homeX")] = cp->pos().x;
-    message.payload[QStringLiteral("homeY")] = cp->pos().y;
-    message.payload[QStringLiteral("service")] = true;
-    m_transport->send(message);
+    controlled->cancelWaypointMotion();
+    controlled->clearSchedule();
+    if (auto* attacker = qobject_cast<AttackUAV*>(controlled)) attacker->cancelEngagement();
+    if (controlled->beginService(cpId)) {
+        appendTimeline(QStringLiteral("service"), QStringLiteral("开始补充"),
+                       QJsonObject{{QStringLiteral("unitId"), unitId},
+                                   {QStringLiteral("cpId"), cpId},
+                                   {QStringLiteral("duration"), controlled->serviceDuration()}});
+    }
+}
+
+void SimulationEngine::cmdCancelService(const QVariantMap& args) {
+    UnitBase* controlled = unit(args.value(QStringLiteral("unitId")).toString());
+    if (!controlled || !controlled->serviceRequested()) return;
+    const QString unitId = controlled->id();
+    controlled->cancelService();
+    controlled->setStatus(QStringLiteral("补充已取消"));
+    appendTimeline(QStringLiteral("service"), QStringLiteral("取消补充"),
+                   QJsonObject{{QStringLiteral("unitId"), unitId}});
+}
+
+void SimulationEngine::cmdActivateCountermeasure(const QVariantMap& args) {
+    UnitBase* source = unit(args.value(QStringLiteral("unitId")).toString());
+    if (!source || !source->activateCountermeasure()) return;
+    int affected = 0;
+    QStringList terminalIds;
+    for (auto& [projectileId, projectile] : m_projectiles) {
+        if (!projectile.active() || projectile.side == source->side()) continue;
+        if (source->pos().distanceTo2D(projectile.position)
+            > source->countermeasureState().range) continue;
+        projectile.terminalReason = QStringLiteral("countermeasured");
+        projectile.terminalAge = 0.0;
+        terminalIds.append(projectileId);
+        ++affected;
+    }
+    settleTerminalProjectiles(terminalIds);
+    source->setStatus(QStringLiteral("已释放干扰弹"));
+    appendTimeline(QStringLiteral("ability"), QStringLiteral("干扰弹释放"),
+                   QJsonObject{{QStringLiteral("unitId"), source->id()},
+                               {QStringLiteral("affectedProjectiles"), affected}});
+    emit projectilesChanged();
+}
+
+void SimulationEngine::cmdActivateScan(const QVariantMap& args) {
+    UnitBase* scanner = unit(args.value(QStringLiteral("unitId")).toString());
+    if (!scanner || !scanner->activateScan()) return;
+    std::erase_if(m_scanContacts, [scanner](const ScanContact& contact) {
+        return contact.scannerId == scanner->id();
+    });
+    const double range = scanner->scanState().range
+        * scanner->sensorHealth() * scanner->jamFactor();
+    int count = 0;
+    for (const auto& [targetId, target] : m_units) {
+        if (!target->alive() || target->side() == scanner->side()
+            || scanner->pos().distanceTo2D(target->pos()) > range) continue;
+        m_scanContacts.push_back(ScanContact{scanner->id(), targetId, scanner->side(),
+                                             simTime() + 18.0});
+        ++count;
+    }
+    scanner->setStatus(QStringLiteral("扫描完成，锁定 %1 个目标").arg(count));
+    appendTimeline(QStringLiteral("ability"), QStringLiteral("侦察扫描"),
+                   QJsonObject{{QStringLiteral("unitId"), scanner->id()},
+                               {QStringLiteral("contactCount"), count},
+                               {QStringLiteral("expiresAt"), simTime() + 18.0}});
+    emit scanContactsChanged();
+}
+
+void SimulationEngine::cmdAttemptFieldRepair(const QVariantMap& args) {
+    UnitBase* controlled = unit(args.value(QStringLiteral("unitId")).toString());
+    if (!controlled) return;
+    const bool success = controlled->attemptFieldRepair(m_battleSeed);
+    controlled->setStatus(success ? QStringLiteral("战场修理成功")
+                                  : QStringLiteral("战场修理失败"));
+    appendTimeline(QStringLiteral("ability"), QStringLiteral("战场修理"),
+                   QJsonObject{{QStringLiteral("unitId"), controlled->id()},
+                               {QStringLiteral("success"), success},
+                               {QStringLiteral("attemptSequence"),
+                                QString::number(controlled->repairAttemptSequence() - 1)}},
+                   success ? QStringLiteral("success") : QStringLiteral("info"));
 }
 
 void SimulationEngine::cmdCancelEngagement(const QVariantMap& args) {
@@ -1511,6 +1932,12 @@ void SimulationEngine::addOrUpdateUnit(const ScenarioUnit& su) {
             p.pos = su.pos;
             it->second->setCallsign(su.callsign);
             it->second->setParams(p);
+            if (it->second->movable()) {
+                it->second->configureFuel(std::max(1.0, su.fuelCapacitySec),
+                                          std::clamp(su.initialFuelSec, 0.0,
+                                                     su.fuelCapacitySec),
+                                          std::max(1.0, su.speed));
+            }
             if (auto* attacker = qobject_cast<AttackUAV*>(it->second.get())) {
                 attacker->configureWeapon(su);
             }
@@ -1594,14 +2021,149 @@ QJsonArray SimulationEngine::collectAllUnitsSnapshot() const {
     return arr;
 }
 
+QJsonArray SimulationEngine::projectilesSnapshot() const {
+    QJsonArray result;
+    for (const auto& [id, projectile] : m_projectiles) {
+        const double x = std::clamp(projectile.position.x, 0.0,
+                                    m_scenario.map.widthMeters);
+        const double y = std::clamp(projectile.position.y, 0.0,
+                                    m_scenario.map.heightMeters);
+        result.append(QJsonObject{
+            {QStringLiteral("id"), id},
+            {QStringLiteral("side"), sideName(projectile.side)},
+            {QStringLiteral("position"),
+             QJsonArray{x, y, projectile.position.alt}},
+            {QStringLiteral("headingRad"), projectile.headingRad},
+            {QStringLiteral("speed"), projectile.speed},
+            {QStringLiteral("age"), projectile.age},
+            {QStringLiteral("lifetime"), projectile.lifetime},
+            {QStringLiteral("active"), projectile.active()},
+            {QStringLiteral("terminalReason"), projectile.terminalReason},
+            {QStringLiteral("terminalAge"), projectile.terminalAge},
+            {QStringLiteral("resultSettled"), projectile.resultSettled},
+            {QStringLiteral("threatRadius"), kProjectileThreatRadiusMeters},
+            {QStringLiteral("attackerId"), projectile.attackerId},
+            {QStringLiteral("targetId"), projectile.targetId}});
+    }
+    return result;
+}
+
+qsizetype SimulationEngine::activeProjectileCount() const {
+    return static_cast<qsizetype>(std::count_if(
+        m_projectiles.cbegin(), m_projectiles.cend(),
+        [](const auto& entry) { return entry.second.active(); }));
+}
+
+QJsonArray SimulationEngine::activeScanContacts() const {
+    QJsonArray result;
+    for (const ScanContact& contact : m_scanContacts) {
+        if (contact.expiresAt <= simTime()) continue;
+        result.append(QJsonObject{{QStringLiteral("scannerId"), contact.scannerId},
+                                  {QStringLiteral("targetId"), contact.targetId},
+                                  {QStringLiteral("side"), sideName(contact.side)},
+                                  {QStringLiteral("expiresAt"), contact.expiresAt}});
+    }
+    return result;
+}
+
+bool SimulationEngine::applyRemoteProjectiles(const QJsonArray& projectiles,
+                                               QString* error) {
+    if (error) error->clear();
+    auto fail = [error](const QString& message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (projectiles.size() > kMaximumProjectiles * 2) {
+        return fail(QStringLiteral("权威导弹数量超过上限"));
+    }
+    std::map<QString, ProjectileState> restored;
+    static const QSet<QString> terminalReasons{
+        QStringLiteral("hit"), QStringLiteral("miss"), QStringLiteral("expired"),
+        QStringLiteral("out_of_bounds"), QStringLiteral("out_of_range"),
+        QStringLiteral("target_lost"),
+        QStringLiteral("countermeasured")};
+    qsizetype activeCount = 0;
+    for (const QJsonValue& value : projectiles) {
+        if (!value.isObject()) return fail(QStringLiteral("权威导弹对象无效"));
+        const QJsonObject object = value.toObject();
+        ProjectileState projectile;
+        projectile.id = object.value(QStringLiteral("id")).toString();
+        const QString side = object.value(QStringLiteral("side")).toString();
+        const QJsonArray position = object.value(QStringLiteral("position")).toArray();
+        if (projectile.id.isEmpty() || restored.contains(projectile.id)
+            || (side != QLatin1String("red") && side != QLatin1String("blue"))
+            || position.size() < 2) {
+            return fail(QStringLiteral("权威导弹标识或阵营无效"));
+        }
+        projectile.side = sideFromName(side);
+        projectile.position = GeoPos{position.at(0).toDouble(), position.at(1).toDouble(),
+                                     position.size() >= 3 ? position.at(2).toDouble() : 0.0};
+        projectile.previousPosition = projectile.position;
+        projectile.headingRad = object.value(QStringLiteral("headingRad")).toDouble();
+        projectile.speed = object.value(QStringLiteral("speed")).toDouble();
+        projectile.age = object.value(QStringLiteral("age")).toDouble();
+        projectile.lifetime = object.value(QStringLiteral("lifetime")).toDouble();
+        projectile.terminalAge = object.value(QStringLiteral("terminalAge")).toDouble(0.0);
+        projectile.terminalReason = object.value(QStringLiteral("terminalReason")).toString();
+        const bool active = object.value(QStringLiteral("active")).toBool();
+        projectile.resultSettled = object.value(QStringLiteral("resultSettled"))
+                                       .toBool(!active);
+        projectile.attackerId = object.value(QStringLiteral("attackerId")).toString();
+        projectile.targetId = object.value(QStringLiteral("targetId")).toString();
+        if (active) ++activeCount;
+        if (!std::isfinite(projectile.position.x) || !std::isfinite(projectile.position.y)
+            || !std::isfinite(projectile.position.alt)
+            || projectile.position.x < 0.0 || projectile.position.y < 0.0
+            || projectile.position.x > m_scenario.map.widthMeters
+            || projectile.position.y > m_scenario.map.heightMeters
+            || !std::isfinite(projectile.headingRad) || !finiteNonNegative(projectile.speed)
+            || !finiteNonNegative(projectile.age) || !std::isfinite(projectile.lifetime)
+            || projectile.lifetime <= 0.0 || !finiteNonNegative(projectile.terminalAge)
+            || (active && !projectile.terminalReason.isEmpty())
+            || (!active && !terminalReasons.contains(projectile.terminalReason))
+            || (active && projectile.resultSettled)
+            || (!active && !projectile.resultSettled)) {
+            return fail(QStringLiteral("权威导弹数值无效: %1").arg(projectile.id));
+        }
+        restored.emplace(projectile.id, projectile);
+    }
+    if (activeCount > kMaximumProjectiles) {
+        return fail(QStringLiteral("权威在途导弹数量超过上限"));
+    }
+    for (auto& [id, unitValue] : m_units) {
+        Q_UNUSED(id);
+        if (auto* attacker = qobject_cast<AttackUAV*>(unitValue.get())) {
+            attacker->clearActiveProjectiles();
+        }
+    }
+    m_projectiles = std::move(restored);
+    for (const auto& [id, projectile] : m_projectiles) {
+        Q_UNUSED(id);
+        if (!projectile.active()) continue;
+        if (auto* attacker = qobject_cast<AttackUAV*>(unit(projectile.attackerId))) {
+            attacker->restoreActiveProjectile(projectile.id);
+        }
+    }
+    emit projectilesChanged();
+    return true;
+}
+
 void SimulationEngine::applyRemoteRuntimeState(const QJsonArray& units, double simTime,
-                                               bool running, double speedMul) {
+                                               bool running, double speedMul,
+                                               bool partial) {
     m_timer.stop();
     const bool runningChangedValue = m_running != running;
     const bool speedChangedValue = m_clock->speedMul() != speedMul;
     m_running = running;
     m_clock->setSimTime(std::max(0.0, simTime));
     m_clock->setSpeedMul(std::clamp(speedMul, 0.0, 8.0));
+    if (!partial) m_remoteRuntimeProjection.clear();
+    for (const QJsonValue& value : units) {
+        if (!value.isObject()) continue;
+        const QJsonObject projected = value.toObject();
+        const QString id = projected.value(QStringLiteral("id")).toString();
+        if (!id.isEmpty()) m_remoteRuntimeProjection.insert(id, projected);
+    }
     SnapshotCodec::decodeRuntimeUnits(*this, units);
     if (runningChangedValue) emit runningChanged();
     if (speedChangedValue) emit speedMulChanged();
@@ -1613,9 +2175,239 @@ QJsonArray SimulationEngine::collectCheckpointState() const {
     return SnapshotCodec::encodeCheckpointUnits(*this);
 }
 
+QJsonObject SimulationEngine::collectGlobalCheckpointState() const {
+    QJsonArray projectiles;
+    for (const auto& [id, projectile] : m_projectiles) {
+        const WeaponProfile& weapon = projectile.request.weapon;
+        projectiles.append(QJsonObject{
+            {QStringLiteral("id"), id},
+            {QStringLiteral("attackerId"), projectile.attackerId},
+            {QStringLiteral("targetId"), projectile.targetId},
+            {QStringLiteral("side"), sideName(projectile.side)},
+            {QStringLiteral("position"),
+             QJsonArray{std::clamp(projectile.position.x, 0.0, m_scenario.map.widthMeters),
+                        std::clamp(projectile.position.y, 0.0, m_scenario.map.heightMeters),
+                        projectile.position.alt}},
+            {QStringLiteral("previousPosition"),
+             QJsonArray{std::clamp(projectile.previousPosition.x, 0.0,
+                                   m_scenario.map.widthMeters),
+                        std::clamp(projectile.previousPosition.y, 0.0,
+                                   m_scenario.map.heightMeters),
+                        projectile.previousPosition.alt}},
+            {QStringLiteral("headingRad"), projectile.headingRad},
+            {QStringLiteral("speed"), projectile.speed},
+            {QStringLiteral("age"), projectile.age},
+            {QStringLiteral("lifetime"), projectile.lifetime},
+            {QStringLiteral("launchTime"), projectile.launchTime},
+            {QStringLiteral("terminalAge"), projectile.terminalAge},
+            {QStringLiteral("terminalReason"), projectile.terminalReason},
+            {QStringLiteral("resultSettled"), projectile.resultSettled},
+            {QStringLiteral("request"),
+             QJsonObject{{QStringLiteral("shotSequence"),
+                          QString::number(projectile.request.shotSequence)},
+                         {QStringLiteral("distance"), projectile.request.distance},
+                         {QStringLiteral("attackerEffectiveness"),
+                          projectile.request.attackerEffectiveness},
+                         {QStringLiteral("weapon"),
+                          QJsonObject{{QStringLiteral("hitProbability"), weapon.hitProbability},
+                                      {QStringLiteral("minRange"), weapon.minRange},
+                                      {QStringLiteral("optimalRange"), weapon.optimalRange},
+                                      {QStringLiteral("maxRange"), weapon.maxRange},
+                                      {QStringLiteral("damageMin"), weapon.damageMin},
+                                      {QStringLiteral("damageMax"), weapon.damageMax},
+                                      {QStringLiteral("rangeFalloff"), weapon.rangeFalloff}}}}}});
+    }
+    return {{QStringLiteral("schema"), 4},
+            {QStringLiteral("combatSeed"), QString::number(m_battleSeed, 16)},
+            {QStringLiteral("projectiles"), projectiles},
+            {QStringLiteral("scanContacts"), activeScanContacts()}};
+}
+
+bool SimulationEngine::restoreGlobalCheckpointState(const QJsonObject& state,
+                                                     QString* error) {
+    if (error) error->clear();
+    auto fail = [error](const QString& message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (state.isEmpty() || state.value(QStringLiteral("schema")).toInt(2) <= 2) {
+        m_projectiles.clear();
+        m_scanContacts.clear();
+        for (auto& [id, value] : m_units) {
+            Q_UNUSED(id);
+            if (auto* attacker = qobject_cast<AttackUAV*>(value.get())) {
+                attacker->clearActiveProjectiles();
+            }
+        }
+        emit projectilesChanged();
+        emit scanContactsChanged();
+        return true;
+    }
+    const int schema = state.value(QStringLiteral("schema")).toInt();
+    if (schema != 3 && schema != 4) {
+        return fail(QStringLiteral("不支持的全局检查点版本"));
+    }
+    bool seedOk = false;
+    const quint64 seed = state.value(QStringLiteral("combatSeed")).toString()
+                             .toULongLong(&seedOk, 16);
+    if (!seedOk || seed == 0) return fail(QStringLiteral("全局检查点随机种子无效"));
+
+    const QJsonArray projectileArray = state.value(QStringLiteral("projectiles")).toArray();
+    if (projectileArray.size() > kMaximumProjectiles * 2) {
+        return fail(QStringLiteral("全局检查点导弹过多"));
+    }
+    std::map<QString, ProjectileState> restoredProjectiles;
+    qsizetype activeCount = 0;
+    static const QSet<QString> terminalReasons{
+        QStringLiteral("hit"), QStringLiteral("miss"), QStringLiteral("expired"),
+        QStringLiteral("out_of_bounds"), QStringLiteral("out_of_range"),
+        QStringLiteral("target_lost"),
+        QStringLiteral("countermeasured")};
+    for (const QJsonValue& value : projectileArray) {
+        const QJsonObject object = value.toObject();
+        ProjectileState projectile;
+        projectile.id = object.value(QStringLiteral("id")).toString();
+        projectile.attackerId = object.value(QStringLiteral("attackerId")).toString();
+        projectile.targetId = object.value(QStringLiteral("targetId")).toString();
+        const QString side = object.value(QStringLiteral("side")).toString();
+        const QJsonArray position = object.value(QStringLiteral("position")).toArray();
+        const QJsonArray previous = object.value(QStringLiteral("previousPosition")).toArray();
+        UnitBase* attackerUnit = unit(projectile.attackerId);
+        UnitBase* targetUnit = unit(projectile.targetId);
+        if (projectile.id.isEmpty() || restoredProjectiles.contains(projectile.id)
+            || !attackerUnit || !targetUnit || attackerUnit->side() == targetUnit->side()
+            || sideName(attackerUnit->side()) != side || position.size() != 3
+            || previous.size() != 3) {
+            return fail(QStringLiteral("全局检查点导弹引用无效: %1").arg(projectile.id));
+        }
+        projectile.side = attackerUnit->side();
+        projectile.position = GeoPos{position.at(0).toDouble(), position.at(1).toDouble(),
+                                     position.at(2).toDouble()};
+        projectile.previousPosition = GeoPos{previous.at(0).toDouble(), previous.at(1).toDouble(),
+                                             previous.at(2).toDouble()};
+        projectile.headingRad = object.value(QStringLiteral("headingRad")).toDouble();
+        projectile.speed = object.value(QStringLiteral("speed")).toDouble();
+        projectile.age = object.value(QStringLiteral("age")).toDouble();
+        projectile.lifetime = object.value(QStringLiteral("lifetime")).toDouble();
+        projectile.launchTime = object.value(QStringLiteral("launchTime")).toDouble();
+        projectile.terminalAge = object.value(QStringLiteral("terminalAge")).toDouble();
+        projectile.terminalReason = object.value(QStringLiteral("terminalReason")).toString();
+        projectile.resultSettled = schema >= 4
+            ? object.value(QStringLiteral("resultSettled")).toBool(false)
+            : !projectile.terminalReason.isEmpty();
+        const QJsonObject request = object.value(QStringLiteral("request")).toObject();
+        bool sequenceOk = false;
+        projectile.request.shotSequence = request.value(QStringLiteral("shotSequence"))
+                                              .toString().toULongLong(&sequenceOk);
+        projectile.request.attackerId = projectile.attackerId;
+        projectile.request.targetId = projectile.targetId;
+        projectile.request.distance = request.value(QStringLiteral("distance")).toDouble();
+        projectile.request.attackerEffectiveness =
+            request.value(QStringLiteral("attackerEffectiveness")).toDouble();
+        const QJsonObject weapon = request.value(QStringLiteral("weapon")).toObject();
+        projectile.request.weapon = WeaponProfile{
+            weapon.value(QStringLiteral("hitProbability")).toDouble(),
+            weapon.value(QStringLiteral("minRange")).toDouble(),
+            weapon.value(QStringLiteral("optimalRange")).toDouble(),
+            weapon.value(QStringLiteral("maxRange")).toDouble(),
+            weapon.value(QStringLiteral("damageMin")).toDouble(),
+            weapon.value(QStringLiteral("damageMax")).toDouble(),
+            weapon.value(QStringLiteral("rangeFalloff")).toDouble()};
+        const WeaponProfile& profile = projectile.request.weapon;
+        const bool active = projectile.active();
+        if (active) ++activeCount;
+        const bool validPosition = std::isfinite(projectile.position.x)
+            && std::isfinite(projectile.position.y) && std::isfinite(projectile.position.alt)
+            && projectile.position.x >= 0.0 && projectile.position.y >= 0.0
+            && projectile.position.x <= m_scenario.map.widthMeters
+            && projectile.position.y <= m_scenario.map.heightMeters
+            && std::isfinite(projectile.previousPosition.x)
+            && std::isfinite(projectile.previousPosition.y)
+            && std::isfinite(projectile.previousPosition.alt);
+        const bool validRequest = sequenceOk && finiteNonNegative(projectile.request.distance)
+            && std::isfinite(projectile.request.attackerEffectiveness)
+            && projectile.request.attackerEffectiveness >= 0.0
+            && projectile.request.attackerEffectiveness <= 1.0
+            && std::isfinite(profile.hitProbability) && std::isfinite(profile.minRange)
+            && std::isfinite(profile.optimalRange) && std::isfinite(profile.maxRange)
+            && std::isfinite(profile.damageMin) && std::isfinite(profile.damageMax)
+            && std::isfinite(profile.rangeFalloff) && profile.damageMin >= 0.0
+            && profile.damageMax >= profile.damageMin;
+        const bool validKinematics = schema == 3
+            ? std::abs(projectile.speed - 360.0) <= 1e-9
+                && std::abs(projectile.lifetime - 18.0) <= 1e-9
+            : std::abs(projectile.speed - kProjectileSpeedMps) <= 1e-9
+                && std::abs(projectile.lifetime - kProjectileLifetimeSec) <= 1e-9;
+        if (!validPosition || !std::isfinite(projectile.headingRad)
+            || !validKinematics
+            || !finiteNonNegative(projectile.age)
+            || !finiteNonNegative(projectile.launchTime)
+            || !finiteNonNegative(projectile.terminalAge)
+            || (!active && !terminalReasons.contains(projectile.terminalReason))
+            || (active && projectile.resultSettled)
+            || (!active && !projectile.resultSettled)
+            || !validRequest) {
+            return fail(QStringLiteral("全局检查点导弹数值无效: %1").arg(projectile.id));
+        }
+        restoredProjectiles.emplace(projectile.id, projectile);
+    }
+    if (activeCount > kMaximumProjectiles) {
+        return fail(QStringLiteral("全局检查点在途导弹过多"));
+    }
+
+    std::vector<ScanContact> restoredContacts;
+    const QJsonArray contacts = state.value(QStringLiteral("scanContacts")).toArray();
+    if (contacts.size() > 4096) return fail(QStringLiteral("全局检查点扫描联系过多"));
+    QSet<QString> contactKeys;
+    for (const QJsonValue& value : contacts) {
+        const QJsonObject object = value.toObject();
+        ScanContact contact{object.value(QStringLiteral("scannerId")).toString(),
+                            object.value(QStringLiteral("targetId")).toString(),
+                            sideFromName(object.value(QStringLiteral("side")).toString()),
+                            object.value(QStringLiteral("expiresAt")).toDouble()};
+        UnitBase* scanner = unit(contact.scannerId);
+        UnitBase* target = unit(contact.targetId);
+        const QString key = contact.scannerId + QLatin1Char('\0') + contact.targetId;
+        if (!scanner || !target || scanner->kind() != UnitKind::ReconUAV
+            || scanner->side() != contact.side || target->side() == contact.side
+            || !finiteNonNegative(contact.expiresAt) || contactKeys.contains(key)) {
+            return fail(QStringLiteral("全局检查点扫描联系无效"));
+        }
+        contactKeys.insert(key);
+        restoredContacts.push_back(contact);
+    }
+
+    m_battleSeed = seed;
+    m_projectiles = std::move(restoredProjectiles);
+    m_scanContacts = std::move(restoredContacts);
+    for (auto& [id, value] : m_units) {
+        Q_UNUSED(id);
+        if (auto* attacker = qobject_cast<AttackUAV*>(value.get())) {
+            attacker->clearActiveProjectiles();
+        }
+    }
+    for (const auto& [id, projectile] : m_projectiles) {
+        Q_UNUSED(id);
+        if (!projectile.active()) continue;
+        if (auto* attacker = qobject_cast<AttackUAV*>(unit(projectile.attackerId))) {
+            attacker->restoreActiveProjectile(projectile.id);
+        }
+    }
+    emit projectilesChanged();
+    emit scanContactsChanged();
+    return true;
+}
+
 bool SimulationEngine::restoreCheckpointState(const QJsonArray& units, double simTime,
                                               bool running, double speedMul,
                                               QString* error) {
+    return restoreCheckpointState(units, QJsonObject{}, simTime, running, speedMul, error);
+}
+
+bool SimulationEngine::restoreCheckpointState(const QJsonArray& units,
+                                              const QJsonObject& globalState,
+                                              double simTime, bool running,
+                                              double speedMul, QString* error) {
     if (error) error->clear();
     if (!std::isfinite(simTime) || simTime < 0.0
         || !std::isfinite(speedMul) || speedMul < 0.0 || speedMul > 8.0) {
@@ -1623,11 +2415,14 @@ bool SimulationEngine::restoreCheckpointState(const QJsonArray& units, double si
         return false;
     }
     const QJsonArray rollbackState = collectCheckpointState();
+    const QJsonObject rollbackGlobalState = collectGlobalCheckpointState();
     const bool wasRunning = m_running;
     m_timer.stop();
     QString restoreError;
-    if (!SnapshotCodec::decodeCheckpointUnits(*this, units, &restoreError)) {
+    if (!SnapshotCodec::decodeCheckpointUnits(*this, units, &restoreError)
+        || !SnapshotCodec::decodeGlobalCheckpoint(*this, globalState, &restoreError)) {
         SnapshotCodec::decodeCheckpointUnits(*this, rollbackState, nullptr);
+        SnapshotCodec::decodeGlobalCheckpoint(*this, rollbackGlobalState, nullptr);
         if (wasRunning) m_timer.start();
         if (error) *error = restoreError;
         return false;
@@ -1640,6 +2435,8 @@ bool SimulationEngine::restoreCheckpointState(const QJsonArray& units, double si
     emit speedMulChanged();
     emit simTimeChanged();
     emit unitsChanged();
+    emit projectilesChanged();
+    emit scanContactsChanged();
     return true;
 }
 
@@ -1660,6 +2457,15 @@ QVariantList SimulationEngine::unitsForView() const {
         m["detectRange"] = u->detectRange();
         m["attackRange"] = u->attackRange();
         m["commRange"] = u->commRange();
+        m["fuelRemaining"] = u->fuelRemaining();
+        m["fuelCapacity"] = u->fuelCapacity();
+        m["fuelBurnRate"] = u->fuelBurnRate();
+        const double endurance = u->estimatedFuelEndurance();
+        m["estimatedEnduranceSec"] = std::isfinite(endurance) ? endurance : -1.0;
+        m["abilities"] = u->abilityStateJson().toVariantMap();
+        m["serviceRequested"] = u->serviceRequested();
+        m["serviceProgress"] = u->serviceProgress();
+        m["serviceDuration"] = u->serviceDuration();
         if (auto* attacker = qobject_cast<AttackUAV*>(u.get())) {
             m["ammoRemaining"] = attacker->ammoRemaining();
             m["ammoCapacity"] = attacker->ammoCapacity();
@@ -1668,6 +2474,13 @@ QVariantList SimulationEngine::unitsForView() const {
             m["fuelRemaining"] = attacker->fuelRemaining();
             m["fuelCapacity"] = attacker->fuelCapacity();
             m["turnaroundProgress"] = attacker->turnaroundProgress();
+        }
+        if (const auto projected = m_remoteRuntimeProjection.constFind(id);
+            projected != m_remoteRuntimeProjection.constEnd()) {
+            const QVariantMap projectedMap = projected->toVariantMap();
+            for (auto field = projectedMap.constBegin(); field != projectedMap.constEnd(); ++field) {
+                m.insert(field.key(), field.value());
+            }
         }
         l.append(m);
     }
@@ -1694,7 +2507,8 @@ void SimulationEngine::captureReplayCheckpoint() {
     if (m_replaying) return;
     m_replayCheckpoints.push_back(ReplayCheckpoint{
         simTime(), static_cast<qsizetype>(m_replayCommands.size()),
-        static_cast<qsizetype>(m_replaySteps.size()), collectCheckpointState()});
+        static_cast<qsizetype>(m_replaySteps.size()), collectCheckpointState(),
+        collectGlobalCheckpointState()});
     m_lastReplayCheckpointTime = simTime();
     constexpr size_t kMaxReplayCheckpoints = 720;
     if (m_replayCheckpoints.size() > kMaxReplayCheckpoints) {
@@ -1728,6 +2542,7 @@ bool SimulationEngine::seekReplay(double targetTime, QString* error) {
     const quint64 initialSeed = m_replayInitialSeed;
     const double duration = m_recordedDuration;
     const QJsonArray finalSnapshot = m_recordedFinalSnapshot;
+    const QJsonArray finalProjectiles = m_recordedFinalProjectiles;
     const double previousSpeed = speedMul();
 
     const ReplayCheckpoint* selected = nullptr;
@@ -1750,8 +2565,9 @@ bool SimulationEngine::seekReplay(double targetTime, QString* error) {
     qsizetype stepIndex = 0;
     if (selected && selected->time > 0.0) {
         QString restoreError;
-        if (!restoreCheckpointState(selected->state, selected->time, false,
-                                    previousSpeed, &restoreError)) {
+        if (!restoreCheckpointState(selected->state, selected->globalState,
+                                    selected->time, false, previousSpeed,
+                                    &restoreError)) {
             m_replaying = false;
             if (error) *error = QStringLiteral("回放检查点恢复失败: %1").arg(restoreError);
             return false;
@@ -1796,11 +2612,14 @@ bool SimulationEngine::seekReplay(double targetTime, QString* error) {
     m_timelineSequence = timelineSequence;
     m_recordedDuration = duration;
     m_recordedFinalSnapshot = finalSnapshot;
+    m_recordedFinalProjectiles = finalProjectiles;
     m_clock->setSpeedMul(previousSpeed);
     emit runningChanged();
     emit speedMulChanged();
     emit simTimeChanged();
     emit unitsChanged();
+    emit projectilesChanged();
+    emit scanContactsChanged();
     emit timelineChanged();
     return true;
 }
@@ -1839,6 +2658,7 @@ QJsonObject SimulationEngine::battleReport() const {
                          {QStringLiteral("blueLosses"), blueLosses}}},
             {QStringLiteral("scenario"), ScenarioIo::toJson(m_replayInitialScenario)},
             {QStringLiteral("finalUnits"), m_recordedFinalSnapshot},
+            {QStringLiteral("finalProjectiles"), m_recordedFinalProjectiles},
             {QStringLiteral("events"), m_timeline}};
 }
 

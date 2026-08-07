@@ -289,6 +289,10 @@ code { overflow-wrap: anywhere; border-radius: 4px; padding: 12px; background: #
 .room-mode-fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }
 .room-mode-fieldset legend { margin-bottom: 7px; color: #c3d0d8; font-size: 12px; }
 .room-mode-fieldset .field-hint { margin-top: 12px; }
+.room-ai-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 12px; padding: 14px; border: 1px solid #2c4057; border-radius: 6px; background: #0d151e; }
+.room-ai-fields > label:last-of-type { grid-column: 1 / -1; }
+.room-ai-fields .field-hint { grid-column: 1 / -1; margin: -4px 0 0; overflow-wrap: anywhere; }
+.room-ai-fields input:disabled, .room-ai-fields select:disabled { cursor: not-allowed; opacity: .62; }
 .mode-segment { display: inline-grid; grid-template-columns: 1fr 1fr; overflow: hidden; border: 1px solid #344957; border-radius: 6px; background: #0d1621; }
 .mode-segment label { position: relative; min-width: 82px; margin: 0; cursor: pointer; }
 .mode-segment input { position: absolute; opacity: 0; }
@@ -335,6 +339,7 @@ code { overflow-wrap: anywhere; border-radius: 4px; padding: 12px; background: #
 .toast.error { border-color: #7a3540; background: #3a1d23; color: #ffdce0; }
 body.modal-open > #toast { bottom: 104px; }
 @media (max-width: 1100px) { .workspace { padding-inline: 24px; } .metric-strip { grid-template-columns: 1fr 1fr; } .metric-strip div:nth-child(2) { border-right: 0; } .metric-strip div:nth-child(-n+2) { border-bottom: 1px solid #283342; } .monitor-metrics div:nth-child(even) { border-right: 0; } .monitor-metrics div:nth-child(-n+4) { border-bottom: 1px solid #283342; } .security-layout, .monitor-layout { grid-template-columns: 1fr; } .ai-config-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ai-config-form label:last-of-type { grid-column: 1 / -1; } .event-row { grid-template-columns: 135px 80px 52px minmax(70px, 110px) 1fr; gap: 8px; padding-inline: 14px; } }
+@media (max-width: 620px) { .room-ai-fields { grid-template-columns: 1fr; } .room-ai-fields > label:last-of-type { grid-column: auto; } }
 @media (max-width: 760px) {
   .login-shell { padding: 18px; }
   .login-panel { padding: 28px 22px; }

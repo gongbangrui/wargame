@@ -7,8 +7,8 @@
 
 namespace gbr::Protocol {
 
-inline constexpr int Version = 3;
-inline constexpr int SchemaVersion = 2;
+inline constexpr int Version = 4;
+inline constexpr int SchemaVersion = 4;
 inline constexpr int MaxMessageBytes = 256 * 1024;
 inline constexpr int MaxServerMessageBytes = 8 * 1024 * 1024;
 inline constexpr int MaxIdentifierLength = 64;
@@ -21,6 +21,9 @@ inline constexpr int MaxJsonNodes = 262144;
 inline constexpr int MaxRoomNameLength = 96;
 inline constexpr int MaxSeatIdLength = 64;
 inline constexpr int MaxDdsTicketLength = 128;
+inline constexpr int MaxProjectiles = 512;
+inline constexpr int MaxProjectileRecords = MaxProjectiles * 2;
+inline constexpr int MaxChangedUnitIds = 512;
 inline constexpr qint64 MaxSafeJsonInteger = 9007199254740991LL;
 
 struct ValidationResult {
@@ -119,6 +122,7 @@ struct TransferEventProjection {
 ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
                                       RoomLifecycleProjection* projection);
 ValidationResult projectSnapshot(const QJsonObject& payload, SnapshotProjection* projection);
+ValidationResult validateSnapshotState(const QJsonObject& payload);
 ValidationResult projectSeatDirectory(const QJsonObject& payload,
                                       SeatDirectoryProjection* projection);
 ValidationResult projectDeploymentPrompt(const QJsonObject& payload,
@@ -157,10 +161,15 @@ inline constexpr const char* RequestRedeployMessage = "requestRedeploy";
 inline constexpr const char* RedeployMessage = "redeploy";
 inline constexpr const char* ShareIntelMessage = "shareIntel";
 inline constexpr const char* MapMarkMessage = "mapMark";
+inline constexpr const char* SetObserverTrajectoriesMessage = "setObserverTrajectories";
+inline constexpr const char* SetObserverTrailsMessage = "setObserverTrails";
 inline constexpr const char* HeartbeatMessage = "heartbeat";
 inline constexpr const char* RoomDirectoryMessage = "roomDirectory";
 inline constexpr const char* SeatStateMessage = "seatState";
 inline constexpr const char* DeploymentPromptMessage = "deploymentPrompt";
 inline constexpr const char* IntelShareEventMessage = "intelShare";
+
+inline constexpr int MaxObserverTrajectoryUnits = 8;
+inline constexpr int MaxObserverTrajectoryPoints = 90;
 
 } // namespace gbr::Protocol

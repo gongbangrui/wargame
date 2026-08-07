@@ -417,7 +417,12 @@ void NetworkClient::onTextMessage(const QString& text) {
         emit snapshotReceived(m_stateStore.snapshot());
         retransmitPendingCommands();
     } else if (type == QLatin1String("delta")) {
-        emit snapshotReceived(m_stateStore.snapshot());
+        QStringList changedUnitIds;
+        for (const QJsonValue& value
+             : payload.value(QStringLiteral("changedUnitIds")).toArray()) {
+            changedUnitIds.append(value.toString());
+        }
+        emit deltaSnapshotReceived(m_stateStore.snapshot(), changedUnitIds);
     } else if (type == QLatin1String("chat")) {
         emit chatReceived(payload);
     } else if (type == QLatin1String("roomDirectory")) {
@@ -718,6 +723,13 @@ void NetworkClient::sendMapMark(const QVariantMap& position, const QString& labe
                QJsonObject{{QStringLiteral("position"), QJsonObject::fromVariantMap(position)},
                            {QStringLiteral("label"), label},
                            {QStringLiteral("recipientSeatIds"), recipients}});
+}
+
+void NetworkClient::setObserverTrajectories(const QStringList& unitIds) {
+    QJsonArray ids;
+    for (const QString& unitId : unitIds) ids.append(unitId);
+    sendSimple(QString::fromLatin1(Protocol::SetObserverTrajectoriesMessage),
+               QJsonObject{{QStringLiteral("unitIds"), ids}});
 }
 
 void NetworkClient::sendChat(const QString& text, const QStringList& recipientSeatIds) {

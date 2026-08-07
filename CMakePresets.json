@@ -13,6 +13,7 @@
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "ON",
         "WARGAME_BUILD_SERVER": "ON"
       }
     },

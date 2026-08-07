@@ -93,6 +93,11 @@ class UnitBase : public QObject {
     Q_PROPERTY(QJsonObject subsystems READ subsystemStateJson NOTIFY damageStateChanged)
     Q_PROPERTY(bool movable READ movable CONSTANT)
     Q_PROPERTY(QVariantList recentPath READ recentPath NOTIFY recentPathChanged)
+    Q_PROPERTY(double fuelRemaining READ fuelRemaining NOTIFY runtimeStateChanged)
+    Q_PROPERTY(double fuelCapacity READ fuelCapacity NOTIFY runtimeStateChanged)
+    Q_PROPERTY(double fuelBurnRate READ fuelBurnRate NOTIFY runtimeStateChanged)
+    Q_PROPERTY(double estimatedFuelEndurance READ estimatedFuelEndurance NOTIFY runtimeStateChanged)
+    Q_PROPERTY(bool servicing READ serviceRequested NOTIFY runtimeStateChanged)
 public:
     /// @brief Unit construction parameters with sensible defaults.
     struct Params {
@@ -114,6 +119,21 @@ public:
         double commsLoss = 0.0;
         double mobilityLoss = 0.0;
         double weaponLoss = 0.0;
+    };
+
+    struct AbilityState {
+        double range = 0.0;
+        double cooldownSec = 0.0;
+        double cooldownRemaining = 0.0;
+        int capacity = 0;
+        int remaining = 0;
+
+        bool supported() const { return capacity != 0; }
+        bool unlimited() const { return capacity < 0; }
+        bool available() const {
+            return supported() && cooldownRemaining <= 1e-9
+                && (unlimited() || remaining > 0);
+        }
     };
 
     /// @brief Construct unit and subscribe to message bus.
@@ -212,11 +232,41 @@ public:
     /// Compute and apply deterministic damage in two separate phases.
     DamageDelta assessDamage(double incomingDamage, int subsystemIndex) const;
     void applyDamageDelta(const DamageDelta& delta);
-    /// Restore hull and subsystems while the unit is at a live command post.
+    /// Advance common fuel and ability cooldown state after this unit's motion.
+    void advanceRuntimeState(double dt, double actualSpeed);
+    /// Configure scenario fuel without changing the economic cruise-speed baseline.
+    void configureFuel(double capacity, double initialFuel, double economyCruiseSpeed);
+    double fuelRemaining() const { return m_fuelRemaining; }
+    double fuelCapacity() const { return m_fuelCapacity; }
+    double fuelBurnRate() const { return m_fuelBurnRate; }
+    double estimatedFuelEndurance() const;
+    double economyCruiseSpeed() const { return m_economyCruiseSpeed; }
+    bool hasUsableFuel() const { return !movable() || m_fuelRemaining > 1e-9; }
+
+    const AbilityState& countermeasureState() const { return m_countermeasure; }
+    const AbilityState& scanState() const { return m_scan; }
+    double repairCooldownRemaining() const { return m_repairCooldownRemaining; }
+    double repairCooldownSec() const { return m_repairCooldownSec; }
+    quint64 repairAttemptSequence() const { return m_repairAttemptSequence; }
+    bool activateCountermeasure();
+    bool activateScan();
+    bool attemptFieldRepair(quint64 battleSeed);
+    QJsonObject abilityStateJson() const;
+
+    /// Begin an interruptible, atomic service action at a live friendly CP.
+    bool beginService(const QString& serviceCpId);
+    void cancelService();
+    bool advanceService(double dt);
+    QString serviceCpId() const { return m_serviceCpId; }
+    double serviceDuration() const { return m_serviceDuration; }
+    double serviceElapsed() const { return m_serviceElapsed; }
+    /// Compatibility entry point; service is now atomic rather than incremental.
     virtual bool serviceTick(double dt);
-    void requestService(bool value) { m_serviceRequested = value; }
+    void requestService(bool value);
     bool serviceRequested() const { return m_serviceRequested; }
     double serviceProgress() const;
+    QJsonObject runtimeStateJson() const;
+    bool restoreRuntimeState(const QJsonObject& state, QString* error = nullptr);
 
     void handleMessage(const Message& m);
     bool hasActiveWaypoints() const { return m_hasActiveWaypoints; }
@@ -261,6 +311,7 @@ signals:
     void hpChanged();
     void damageStateChanged();
     void recentPathChanged();
+    void runtimeStateChanged();
     /// @brief UI event notification (e.g. target detected, unit destroyed).
     void notifyEvent(const QString& title, const QString& body, const QString& level);
     void strikeOrderRequested(const QString& targetId);
@@ -274,6 +325,9 @@ protected:
 
     void send(const Message& m) { if (m_bus) m_bus->send(m); }
     void rememberShared(const QString& key, const QJsonValue& v);
+    virtual double ammunitionDeficit() const { return 0.0; }
+    virtual double rearmDurationContribution() const { return 0.0; }
+    virtual void restoreServiceSpecificResources() {}
 
     QString m_id;
     QString m_callsign;
@@ -304,10 +358,27 @@ protected:
     double m_mobilityHealth = 1.0;
     double m_weaponHealth = 1.0;
     bool m_serviceRequested = false;
+    QString m_serviceCpId;
+    double m_serviceElapsed = 0.0;
+    double m_serviceDuration = 0.0;
+    double m_fuelCapacity = 0.0;
+    double m_fuelRemaining = 0.0;
+    double m_economyCruiseSpeed = 1.0;
+    double m_fuelIdleRate = 0.0;
+    double m_fuelMoveCoefficient = 0.0;
+    double m_fuelBurnRate = 0.0;
+    int m_fuelWarningStage = 0;
+    AbilityState m_countermeasure;
+    AbilityState m_scan;
+    double m_repairCooldownSec = 60.0;
+    double m_repairCooldownRemaining = 0.0;
+    quint64 m_repairAttemptSequence = 0;
     QString m_cpId;
     std::function<UnitBase*(const QString&)> m_lookup;
 
     void recomputeEffectiveParameters();
+    void configureAbilitiesAndFuelEconomy();
+    void completeService();
 };
 
 } // namespace gbr

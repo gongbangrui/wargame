@@ -31,6 +31,154 @@ QSet<QString> unitIds(const QJsonArray& units) {
     return result;
 }
 
+QJsonArray sortedStringArray(const QSet<QString>& values) {
+    QStringList ids = values.values();
+    ids.sort();
+    QJsonArray result;
+    for (const QString& id : ids) result.append(id);
+    return result;
+}
+
+QSet<QString> stringSet(const QJsonValue& value) {
+    QSet<QString> result;
+    if (!value.isArray()) return result;
+    for (const QJsonValue& item : value.toArray()) result.insert(item.toString());
+    return result;
+}
+
+QJsonObject trajectoryForUnit(const QJsonArray& trails, const QString& unitId) {
+    for (const QJsonValue& value : trails) {
+        const QJsonObject trail = value.toObject();
+        if (trail.value(QStringLiteral("unitId")).toString() == unitId) return trail;
+    }
+    return {};
+}
+
+QJsonArray trajectoryPoints(const QJsonObject& trail) {
+    return trail.value(QStringLiteral("points")).toArray();
+}
+
+bool trajectoryPointPrefix(const QJsonArray& prefix, const QJsonArray& full) {
+    if (prefix.size() > full.size()) return false;
+    for (qsizetype i = 0; i < prefix.size(); ++i) {
+        if (prefix.at(i) != full.at(i)) return false;
+    }
+    return true;
+}
+
+QJsonObject makeTrajectoryDelta(const QJsonObject& base, const QJsonObject& current) {
+    const QJsonObject baseTrails = base.value(QStringLiteral("observerTrajectories")).toObject();
+    const QJsonObject currentTrails = current.value(QStringLiteral("observerTrajectories")).toObject();
+    const QSet<QString> baseSelected = stringSet(baseTrails.value(QStringLiteral("selectedUnitIds")));
+    const QSet<QString> currentSelected = stringSet(currentTrails.value(QStringLiteral("selectedUnitIds")));
+    QJsonArray updates;
+    const QJsonArray baseArray = baseTrails.value(QStringLiteral("trails")).toArray();
+    const QJsonArray currentArray = currentTrails.value(QStringLiteral("trails")).toArray();
+    QStringList ids = currentSelected.values();
+    ids.sort();
+    const bool resetSelection = baseTrails.isEmpty() || baseSelected != currentSelected;
+    for (const QString& id : ids) {
+        const QJsonObject before = trajectoryForUnit(baseArray, id);
+        const QJsonObject after = trajectoryForUnit(currentArray, id);
+        const QJsonArray beforePoints = trajectoryPoints(before);
+        const QJsonArray afterPoints = trajectoryPoints(after);
+        if (resetSelection) {
+            updates.append(QJsonObject{{QStringLiteral("unitId"), id},
+                                       {QStringLiteral("reset"), true},
+                                       {QStringLiteral("points"), afterPoints}});
+            continue;
+        }
+        if (after.isEmpty()) {
+            updates.append(QJsonObject{{QStringLiteral("unitId"), id},
+                                       {QStringLiteral("reset"), true},
+                                       {QStringLiteral("points"), QJsonArray{}}});
+            continue;
+        }
+        if (before == after) continue;
+        QJsonObject update{{QStringLiteral("unitId"), id},
+                           {QStringLiteral("reset"), false},
+                           {QStringLiteral("points"), afterPoints}};
+        if (trajectoryPointPrefix(beforePoints, afterPoints)) {
+            QJsonArray appended;
+            for (qsizetype i = beforePoints.size(); i < afterPoints.size(); ++i) {
+                appended.append(afterPoints.at(i));
+            }
+            update[QStringLiteral("points")] = appended;
+        } else {
+            update[QStringLiteral("reset")] = true;
+        }
+        if (!afterPoints.isEmpty()) {
+            update[QStringLiteral("trimBefore")] =
+                afterPoints.first().toObject().value(
+                    afterPoints.first().toObject().contains(QStringLiteral("time"))
+                        ? QStringLiteral("time") : QStringLiteral("simTime"));
+        }
+        updates.append(update);
+    }
+    return QJsonObject{{QStringLiteral("selectedUnitIds"), sortedStringArray(currentSelected)},
+                       {QStringLiteral("updates"), updates}};
+}
+
+bool mergeTrajectoryDelta(QJsonObject& candidate, const QJsonObject& delta, QString* error) {
+    const QJsonObject incoming = delta.value(QStringLiteral("observerTrajectoryDelta")).toObject();
+    if (incoming.isEmpty()) return true;
+    QSet<QString> selected = stringSet(incoming.value(QStringLiteral("selectedUnitIds")));
+    QJsonObject existing = candidate.value(QStringLiteral("observerTrajectories")).toObject();
+    QHash<QString, QJsonArray> trails;
+    for (const QJsonValue& value : existing.value(QStringLiteral("trails")).toArray()) {
+        const QJsonObject trail = value.toObject();
+        trails.insert(trail.value(QStringLiteral("unitId")).toString(),
+                      trail.value(QStringLiteral("points")).toArray());
+    }
+    for (auto it = trails.begin(); it != trails.end();) {
+        if (!selected.contains(it.key())) it = trails.erase(it);
+        else ++it;
+    }
+    for (const QJsonValue& value : incoming.value(QStringLiteral("updates")).toArray()) {
+        const QJsonObject update = value.toObject();
+        const QString id = update.value(QStringLiteral("unitId")).toString();
+        if (!selected.contains(id)) {
+            if (error) *error = QStringLiteral("轨迹增量包含未选择单位");
+            return false;
+        }
+        QJsonArray points = update.value(QStringLiteral("points")).toArray();
+        if (update.value(QStringLiteral("reset")).toBool(false)) {
+            trails[id] = points;
+        } else {
+            QJsonArray merged = trails.value(id);
+            for (const QJsonValue& point : points) merged.append(point);
+            trails[id] = merged;
+        }
+        if (update.contains(QStringLiteral("trimBefore"))) {
+            const double trimBefore = update.value(QStringLiteral("trimBefore")).toDouble();
+            QJsonArray trimmed;
+            for (const QJsonValue& point : trails.value(id)) {
+                const QJsonObject object = point.toObject();
+                const QString key = object.contains(QStringLiteral("time"))
+                    ? QStringLiteral("time") : QStringLiteral("simTime");
+                if (object.value(key).toDouble() >= trimBefore) trimmed.append(point);
+            }
+            trails[id] = trimmed;
+        }
+        while (trails.value(id).size() > Protocol::MaxObserverTrajectoryPoints) {
+            QJsonArray trimmed = trails.value(id);
+            trimmed.removeFirst();
+            trails[id] = trimmed;
+        }
+    }
+    QJsonArray output;
+    QStringList ids = trails.keys();
+    ids.sort();
+    for (const QString& id : ids) {
+        output.append(QJsonObject{{QStringLiteral("unitId"), id},
+                                  {QStringLiteral("points"), trails.value(id)}});
+    }
+    candidate[QStringLiteral("observerTrajectories")] =
+        QJsonObject{{QStringLiteral("selectedUnitIds"), sortedStringArray(selected)},
+                    {QStringLiteral("trails"), output}};
+    return true;
+}
+
 } // namespace
 
 bool canCreate(const QJsonObject& base, const QJsonObject& current) {
@@ -42,6 +190,10 @@ bool canCreate(const QJsonObject& base, const QJsonObject& current) {
     if (base.value(QStringLiteral("scenario")) != current.value(QStringLiteral("scenario"))) {
         return false;
     }
+    if (!Protocol::validateSnapshotState(base).valid
+        || !Protocol::validateSnapshotState(current).valid) {
+        return false;
+    }
     return unitIds(base.value(QStringLiteral("units")).toArray())
         == unitIds(current.value(QStringLiteral("units")).toArray());
 }
@@ -51,9 +203,11 @@ QJsonObject create(const QJsonObject& base, const QJsonObject& current) {
     const auto previousUnits = unitsById(base.value(QStringLiteral("units")).toArray());
     const auto currentUnits = unitsById(current.value(QStringLiteral("units")).toArray());
     QJsonArray changedUnits;
+    QSet<QString> changedIds;
     for (auto it = currentUnits.cbegin(); it != currentUnits.cend(); ++it) {
         if (!previousUnits.contains(it.key()) || previousUnits.value(it.key()) != it.value()) {
             changedUnits.append(it.value());
+            changedIds.insert(it.key());
         }
     }
 
@@ -66,12 +220,22 @@ QJsonObject create(const QJsonObject& base, const QJsonObject& current) {
                        current.value(QStringLiteral("roomState")).toObject()
                            .value(QStringLiteral("scenarioRevision"))},
                       {QStringLiteral("units"), changedUnits},
+                      {QStringLiteral("changedUnitIds"), sortedStringArray(changedIds)},
                       {QStringLiteral("roomState"), current.value(QStringLiteral("roomState"))}};
     if (base.value(QStringLiteral("messages")) != current.value(QStringLiteral("messages"))) {
         delta[QStringLiteral("messages")] = current.value(QStringLiteral("messages"));
     }
     if (base.value(QStringLiteral("mapMarks")) != current.value(QStringLiteral("mapMarks"))) {
         delta[QStringLiteral("mapMarks")] = current.value(QStringLiteral("mapMarks"));
+    }
+    if (base.value(QStringLiteral("projectiles"))
+        != current.value(QStringLiteral("projectiles"))) {
+        delta[QStringLiteral("projectiles")] = current.value(QStringLiteral("projectiles"));
+    }
+    if (base.value(QStringLiteral("observerTrajectories"))
+        != current.value(QStringLiteral("observerTrajectories"))) {
+        const QJsonObject trajectoryDelta = makeTrajectoryDelta(base, current);
+        delta[QStringLiteral("observerTrajectoryDelta")] = trajectoryDelta;
     }
     return delta;
 }
@@ -99,28 +263,62 @@ bool apply(QJsonObject& state, const QJsonObject& delta, QString* error) {
         return fail(QStringLiteral("场景版本已变化，需要完整同步"));
     }
 
-    QHash<QString, QJsonObject> units = unitsById(state.value(QStringLiteral("units")).toArray());
+    if (!delta.value(QStringLiteral("units")).isArray()
+        || !delta.value(QStringLiteral("roomState")).isObject()) {
+        return fail(QStringLiteral("增量结构无效"));
+    }
+
+    QJsonObject candidate = state;
+    QHash<QString, QJsonObject> units = unitsById(
+        candidate.value(QStringLiteral("units")).toArray());
+    QSet<QString> actualChangedIds;
     for (const QJsonValue& value : delta.value(QStringLiteral("units")).toArray()) {
         const QJsonObject unit = value.toObject();
         const QString id = unit.value(QStringLiteral("id")).toString();
         if (id.isEmpty() || !units.contains(id)) {
             return fail(QStringLiteral("增量包含未知单元"));
         }
+        actualChangedIds.insert(id);
         units[id] = unit;
+    }
+    if (delta.contains(QStringLiteral("changedUnitIds"))) {
+        const QSet<QString> declared = stringSet(delta.value(QStringLiteral("changedUnitIds")));
+        if (declared != actualChangedIds) {
+            return fail(QStringLiteral("增量变化单元列表与内容不一致"));
+        }
     }
     QStringList ids = units.keys();
     ids.sort();
     QJsonArray merged;
     for (const QString& id : ids) merged.append(units.value(id));
-    state[QStringLiteral("units")] = merged;
-    state[QStringLiteral("roomState")] = delta.value(QStringLiteral("roomState"));
+    candidate[QStringLiteral("units")] = merged;
+    candidate[QStringLiteral("roomState")] = delta.value(QStringLiteral("roomState"));
     if (delta.contains(QStringLiteral("messages"))) {
-        state[QStringLiteral("messages")] = delta.value(QStringLiteral("messages"));
+        candidate[QStringLiteral("messages")] = delta.value(QStringLiteral("messages"));
     }
     if (delta.contains(QStringLiteral("mapMarks"))) {
-        state[QStringLiteral("mapMarks")] = delta.value(QStringLiteral("mapMarks"));
+        candidate[QStringLiteral("mapMarks")] = delta.value(QStringLiteral("mapMarks"));
     }
-    state[QStringLiteral("stateRevision")] = next;
+    if (delta.contains(QStringLiteral("projectiles"))) {
+        candidate[QStringLiteral("projectiles")] = delta.value(QStringLiteral("projectiles"));
+    }
+    if (delta.contains(QStringLiteral("observerTrajectories"))) {
+        candidate[QStringLiteral("observerTrajectories")]
+            = delta.value(QStringLiteral("observerTrajectories"));
+    }
+    if (delta.contains(QStringLiteral("observerTrajectoryDelta"))
+        && !mergeTrajectoryDelta(candidate, delta, error)) {
+        return false;
+    }
+    candidate[QStringLiteral("stateRevision")] = next;
+
+    const Protocol::ValidationResult validation = Protocol::validateSnapshotState(candidate);
+    if (!validation.valid) {
+        return fail(validation.message.isEmpty()
+                        ? QStringLiteral("增量合并后状态无效")
+                        : validation.message);
+    }
+    state = candidate;
     return true;
 }
 

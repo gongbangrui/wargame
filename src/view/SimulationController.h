@@ -23,6 +23,7 @@ class SimulationController : public QObject {
     Q_PROPERTY(double simTime READ simTime NOTIFY simTimeForward)
     Q_PROPERTY(bool running READ running NOTIFY runningForward)
     Q_PROPERTY(QVariantList units READ units NOTIFY unitsForward)
+    Q_PROPERTY(QVariantList projectiles READ projectiles NOTIFY projectilesForward)
     Q_PROPERTY(quint64 unitStateRevision READ unitStateRevision NOTIFY unitsForward)
     Q_PROPERTY(QVariantList messages READ messages NOTIFY messagesForward)
     Q_PROPERTY(QJsonObject mapInfo READ mapInfo NOTIFY mapInfoForward)
@@ -49,6 +50,8 @@ class SimulationController : public QObject {
     Q_PROPERTY(QVariantList onlineRooms READ onlineRooms NOTIFY onlineRoomsChanged)
     Q_PROPERTY(QVariantList onlineSeats READ onlineSeats NOTIFY onlineSeatsChanged)
     Q_PROPERTY(QVariantList onlineMapMarks READ onlineMapMarks NOTIFY onlineMapMarksChanged)
+    Q_PROPERTY(QJsonObject observerTrajectories READ observerTrajectories
+               NOTIFY observerTrajectoriesChanged)
     Q_PROPERTY(QVariantList pendingSeatTransfers READ pendingSeatTransfers NOTIFY pendingSeatTransfersChanged)
     Q_PROPERTY(QString currentRoomId READ currentRoomId NOTIFY onlineStateChanged)
     Q_PROPERTY(QString currentSeatId READ currentSeatId NOTIFY onlineStateChanged)
@@ -91,6 +94,9 @@ public:
     QString cpIssues() const { return isNetworked() ? m_remoteCpIssues : m_engine.cpIssues(); }
     QString lastError() const { return isNetworked() ? m_remoteLastError : m_engine.lastError(); }
     QVariantList units() const { return m_engine.unitsForView(); }
+    QVariantList projectiles() const {
+        return isNetworked() ? m_remoteProjectiles : m_engine.projectilesForView();
+    }
     quint64 unitStateRevision() const { return m_unitStateRevision; }
     QVariantList messages() const { return isNetworked() ? m_remoteMessages : m_engine.recentMessages(); }
     QJsonObject mapInfo() const { return m_engine.mapInfo(); }
@@ -115,6 +121,7 @@ public:
     QVariantList onlineRooms() const { return m_onlineRooms; }
     QVariantList onlineSeats() const { return m_onlineSeats; }
     QVariantList onlineMapMarks() const { return m_onlineMapMarks; }
+    QJsonObject observerTrajectories() const { return m_observerTrajectories; }
     QVariantList pendingSeatTransfers() const { return m_pendingSeatTransfers; }
     QString currentRoomId() const { return m_currentRoomId; }
     QString currentSeatId() const { return m_currentSeatId; }
@@ -189,6 +196,7 @@ public:
                                       const QString& note = QString());
     Q_INVOKABLE void markOnlineMap(const QVariantMap& position, const QString& label = QString(),
                                    const QStringList& recipientSeatIds = {});
+    Q_INVOKABLE void setObserverTrajectories(const QStringList& unitIds);
 
     /// 兼容旧 QML 调用的连接提示接口。
     Q_INVOKABLE QString connectToPeer(const QString& host, int port);
@@ -250,6 +258,7 @@ signals:
     void onlineRoomsChanged();
     void onlineSeatsChanged();
     void onlineMapMarksChanged();
+    void observerTrajectoriesChanged();
     void pendingSeatTransfersChanged();
     void onlineStateChanged();
     void leaveRoomPendingChanged();
@@ -266,6 +275,7 @@ signals:
     void simTimeForward();
     void runningForward();
     void unitsForward();
+    void projectilesForward();
     void messagesForward();
     void mapInfoForward();
     void commandExecuted(const QString& action, const QVariantMap& args);
@@ -285,6 +295,8 @@ private:
     QString pickDefaultUnit(const QString& kind, const QString& side) const;
     void ensureFocusedConsistent();
     void applyRemoteSnapshot(const QJsonObject& payload);
+    void applyRemoteState(const QJsonObject& payload, const QStringList& changedUnitIds,
+                          bool partialRuntime);
     void clearOnlineRoomDerivedState(bool preserveRoomId);
     void applyRoleView();
     void rememberServerAddress(const QString& server);
@@ -329,10 +341,12 @@ private:
     QString m_communicationState = QStringLiteral("disconnected");
     qint64 m_remoteScenarioRevision = -1;
     QVariantList m_remoteMessages;
+    QVariantList m_remoteProjectiles;
     QVariantList m_chatMessages;
     QVariantList m_onlineRooms;
     QVariantList m_onlineSeats;
     QVariantList m_onlineMapMarks;
+    QJsonObject m_observerTrajectories;
     QVariantList m_pendingSeatTransfers;
     QString m_currentRoomId;
     QString m_currentSeatId;

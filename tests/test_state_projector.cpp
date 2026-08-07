@@ -28,6 +28,46 @@ QJsonObject unitById(const QJsonArray& units, const QString& id) {
     return {};
 }
 
+QJsonObject projectileById(const QJsonArray& projectiles, const QString& id) {
+    for (const QJsonValue& value : projectiles) {
+        if (value.toObject().value(QStringLiteral("id")).toString() == id) {
+            return value.toObject();
+        }
+    }
+    return {};
+}
+
+QJsonObject projectileAtX(const QJsonArray& projectiles, double x) {
+    for (const QJsonValue& value : projectiles) {
+        const QJsonObject candidate = value.toObject();
+        const QJsonArray position = candidate.value(QStringLiteral("position")).toArray();
+        if (!position.isEmpty() && qFuzzyCompare(position.first().toDouble(), x)) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+QJsonObject projectile(const QString& id, const QString& side,
+                       const GeoPos& position, const QString& attackerId,
+                       const QString& targetId, double threatRadius = 1300.0) {
+    return {{QStringLiteral("id"), id},
+            {QStringLiteral("side"), side},
+            {QStringLiteral("position"),
+             QJsonArray{position.x, position.y, position.alt}},
+            {QStringLiteral("headingRad"), 0.0},
+            {QStringLiteral("speed"), 420.0},
+            {QStringLiteral("age"), 1.0},
+            {QStringLiteral("lifetime"), 16.0},
+            {QStringLiteral("active"), true},
+            {QStringLiteral("terminalReason"), QString{}},
+            {QStringLiteral("terminalAge"), 0.0},
+            {QStringLiteral("resultSettled"), false},
+            {QStringLiteral("threatRadius"), threatRadius},
+            {QStringLiteral("attackerId"), attackerId},
+            {QStringLiteral("targetId"), targetId}};
+}
+
 } // namespace
 
 TEST(StateProjectorTest, PermissionMatrixIsServerOwned) {
@@ -40,6 +80,37 @@ TEST(StateProjectorTest, PermissionMatrixIsServerOwned) {
     EXPECT_FALSE(StateProjector::canEditSide(QStringLiteral("red"), QStringLiteral("blue")));
 }
 
+TEST(StateProjectorTest, ProjectsPerUnitActionCapabilitiesWithoutEnemyPrivateState) {
+    SimulationEngine engine;
+    engine.loadDefaultScenario();
+
+    const QJsonObject commander = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_commander_1"), 1, roomState(), {},
+        QStringLiteral("red_cp"));
+    const QJsonObject cp = unitById(commander.value(QStringLiteral("units")).toArray(),
+                                    QStringLiteral("red_cp"));
+    ASSERT_TRUE(cp.contains(QStringLiteral("actions")));
+    const QJsonObject cpActions = cp.value(QStringLiteral("actions")).toObject();
+    EXPECT_TRUE(cpActions.contains(QStringLiteral("activateCountermeasure")));
+    EXPECT_TRUE(cpActions.contains(QStringLiteral("attemptFieldRepair")));
+    EXPECT_FALSE(cpActions.contains(QStringLiteral("moveTo")));
+
+    const QJsonObject attack = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_attack_1"), 2, roomState(), {},
+        QStringLiteral("red_a1"));
+    const QJsonObject ownAttack = unitById(attack.value(QStringLiteral("units")).toArray(),
+                                           QStringLiteral("red_a1"));
+    ASSERT_TRUE(ownAttack.contains(QStringLiteral("actions")));
+    const QJsonObject attackActions = ownAttack.value(QStringLiteral("actions")).toObject();
+    EXPECT_TRUE(attackActions.contains(QStringLiteral("engageTarget")));
+    EXPECT_TRUE(attackActions.contains(QStringLiteral("service")));
+
+    const QJsonObject enemy = unitById(attack.value(QStringLiteral("units")).toArray(),
+                                       QStringLiteral("blue_a1"));
+    EXPECT_FALSE(enemy.contains(QStringLiteral("actions")));
+    EXPECT_FALSE(enemy.contains(QStringLiteral("abilities")));
+}
+
 TEST(StateProjectorTest, HiddenEnemyDoesNotAppearInRawFactionSnapshot) {
     SimulationEngine engine;
     engine.loadDefaultScenario();
@@ -49,6 +120,197 @@ TEST(StateProjectorTest, HiddenEnemyDoesNotAppearInRawFactionSnapshot) {
     EXPECT_FALSE(encoded.contains("blue_cp"));
     EXPECT_FALSE(encoded.contains("blue_r1"));
     EXPECT_FALSE(encoded.contains("blue_a1"));
+}
+
+TEST(StateProjectorTest, FactionProjectileVisibilityUsesOwnSideSensorsAndThreatRadius) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& unit : scenario.units) {
+        unit.schedule.clear();
+        if (unit.side == QLatin1String("red")) {
+            unit.detectRange = 0.0;
+            unit.commRange = 0.0;
+            unit.pos = GeoPos{14000.0, 13000.0, unit.pos.alt};
+        }
+        if (unit.id == QLatin1String("red_a1")) {
+            unit.pos = GeoPos{1000.0, 1000.0, 2000.0};
+            unit.detectRange = 200.0;
+        } else if (unit.id == QLatin1String("red_cp")) {
+            unit.pos = GeoPos{12000.0, 12000.0, 50.0};
+        } else if (unit.id == QLatin1String("blue_a1")) {
+            unit.pos = GeoPos{18000.0, 14000.0, 2000.0};
+        }
+    }
+    SimulationEngine engine;
+    ASSERT_TRUE(engine.setScenario(scenario));
+
+    const QJsonArray authoritative{
+        projectile(QStringLiteral("red_a1:41"), QStringLiteral("red"),
+                   GeoPos{19000.0, 14000.0, 2000.0}, QStringLiteral("red_a1"),
+                   QStringLiteral("blue_cp")),
+        projectile(QStringLiteral("blue_a1:42"), QStringLiteral("blue"),
+                   GeoPos{1100.0, 1000.0, 2000.0}, QStringLiteral("blue_a1"),
+                   QStringLiteral("red_cp")),
+        projectile(QStringLiteral("blue_a1:43"), QStringLiteral("blue"),
+                   GeoPos{2000.0, 1000.0, 2000.0}, QStringLiteral("blue_a1"),
+                   QStringLiteral("red_a1")),
+        projectile(QStringLiteral("blue_a1:44"), QStringLiteral("blue"),
+                   GeoPos{9000.0, 7000.0, 2000.0}, QStringLiteral("blue_a1"),
+                   QStringLiteral("red_cp"))};
+    QString error;
+    ASSERT_TRUE(engine.applyRemoteProjectiles(authoritative, &error))
+        << error.toStdString();
+
+    const QJsonArray projected = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_attack_1"), 2, roomState(), {},
+        QStringLiteral("red_a1"))
+        .value(QStringLiteral("projectiles")).toArray();
+    const QJsonObject own = projectileAtX(projected, 19000.0);
+    const QJsonObject sensor = projectileAtX(projected, 1100.0);
+    const QJsonObject threat = projectileAtX(projected, 2000.0);
+    EXPECT_FALSE(own.isEmpty());
+    EXPECT_FALSE(sensor.isEmpty());
+    EXPECT_FALSE(threat.isEmpty());
+    EXPECT_TRUE(projectileAtX(projected, 9000.0).isEmpty());
+
+    EXPECT_EQ(own.value(QStringLiteral("attackerId")).toString(),
+              QStringLiteral("red_a1"));
+    EXPECT_FALSE(own.contains(QStringLiteral("targetId")));
+    EXPECT_FALSE(sensor.contains(QStringLiteral("attackerId")));
+    EXPECT_FALSE(sensor.contains(QStringLiteral("targetId")));
+    EXPECT_FALSE(threat.contains(QStringLiteral("attackerId")));
+    EXPECT_EQ(threat.value(QStringLiteral("targetId")).toString(),
+              QStringLiteral("red_a1"));
+    for (const QJsonValue& value : projected) {
+        EXPECT_FALSE(value.toObject().value(QStringLiteral("id")).toString()
+                         .contains(QStringLiteral("red_a1")));
+        EXPECT_FALSE(value.toObject().value(QStringLiteral("id")).toString()
+                         .contains(QStringLiteral("blue_a1")));
+    }
+}
+
+TEST(StateProjectorTest, ProjectileIdentitiesFollowUnitVisibilityAndPrivilegedRole) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& unit : scenario.units) {
+        unit.schedule.clear();
+        if (unit.side == QLatin1String("red")) {
+            unit.detectRange = 0.0;
+            unit.commRange = 0.0;
+            unit.pos = GeoPos{14000.0, 13000.0, unit.pos.alt};
+        }
+        if (unit.id == QLatin1String("red_a1")) {
+            unit.pos = GeoPos{1000.0, 1000.0, 2000.0};
+            unit.detectRange = 1000.0;
+        } else if (unit.id == QLatin1String("blue_a1")) {
+            unit.pos = GeoPos{1500.0, 1000.0, 2000.0};
+        } else if (unit.id == QLatin1String("blue_cp")) {
+            unit.pos = GeoPos{18000.0, 14000.0, 50.0};
+        }
+    }
+    SimulationEngine engine;
+    ASSERT_TRUE(engine.setScenario(scenario));
+    engine.stepOnce(0.01);
+
+    QString error;
+    ASSERT_TRUE(engine.applyRemoteProjectiles(
+        QJsonArray{
+            projectile(QStringLiteral("red_a1:51"), QStringLiteral("red"),
+                       GeoPos{8000.0, 7000.0, 2000.0}, QStringLiteral("red_a1"),
+                       QStringLiteral("blue_cp")),
+            projectile(QStringLiteral("blue_a1:52"), QStringLiteral("blue"),
+                       GeoPos{1100.0, 1000.0, 2000.0}, QStringLiteral("blue_a1"),
+                       QStringLiteral("red_a1"))},
+        &error)) << error.toStdString();
+
+    const QJsonArray faction = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_attack_1"), 3, roomState(), {},
+        QStringLiteral("red_a1"))
+        .value(QStringLiteral("projectiles")).toArray();
+    const QJsonObject outgoing = projectileAtX(faction, 8000.0);
+    const QJsonObject incoming = projectileAtX(faction, 1100.0);
+    ASSERT_FALSE(outgoing.isEmpty());
+    ASSERT_FALSE(incoming.isEmpty());
+    EXPECT_EQ(outgoing.value(QStringLiteral("attackerId")).toString(),
+              QStringLiteral("red_a1"));
+    EXPECT_FALSE(outgoing.contains(QStringLiteral("targetId")));
+    EXPECT_EQ(incoming.value(QStringLiteral("attackerId")).toString(),
+              QStringLiteral("blue_a1"));
+    EXPECT_EQ(incoming.value(QStringLiteral("targetId")).toString(),
+              QStringLiteral("red_a1"));
+
+    const QJsonArray observer = StateProjector::snapshotFor(
+        engine, QStringLiteral("observer"), 4, roomState())
+        .value(QStringLiteral("projectiles")).toArray();
+    ASSERT_EQ(observer.size(), 2);
+    for (const QJsonValue& value : observer) {
+        const QJsonObject projected = value.toObject();
+        EXPECT_FALSE(projected.contains(QStringLiteral("attackerId")));
+        EXPECT_FALSE(projected.contains(QStringLiteral("targetId")));
+        EXPECT_FALSE(projected.value(QStringLiteral("id")).toString()
+                         .contains(QStringLiteral("red_a1")));
+        EXPECT_FALSE(projected.value(QStringLiteral("id")).toString()
+                         .contains(QStringLiteral("blue_a1")));
+    }
+
+    const QJsonArray director = StateProjector::snapshotFor(
+        engine, QStringLiteral("director"), 5, roomState())
+        .value(QStringLiteral("projectiles")).toArray();
+    const QJsonObject privileged = projectileById(director, QStringLiteral("red_a1:51"));
+    EXPECT_EQ(privileged.value(QStringLiteral("attackerId")).toString(),
+              QStringLiteral("red_a1"));
+    EXPECT_EQ(privileged.value(QStringLiteral("targetId")).toString(),
+              QStringLiteral("blue_cp"));
+}
+
+TEST(StateProjectorTest, ScanContactsRequireScannerToRecipientCommunication) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& unit : scenario.units) {
+        unit.schedule.clear();
+        unit.detectRange = 0.0;
+        unit.commRange = 0.0;
+        unit.pos = GeoPos{19000.0, 14000.0, unit.pos.alt};
+        if (unit.id == QLatin1String("red_r1")) {
+            unit.pos = GeoPos{1000.0, 1000.0, 3000.0};
+        } else if (unit.id == QLatin1String("red_a1")) {
+            unit.pos = GeoPos{1500.0, 1000.0, 2000.0};
+        } else if (unit.id == QLatin1String("blue_a1")) {
+            unit.pos = GeoPos{5000.0, 1000.0, 2000.0};
+        }
+    }
+    SimulationEngine engine;
+    ASSERT_TRUE(engine.setScenario(scenario));
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("activateScan"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")}}).accepted);
+
+    const QJsonArray contacts = engine.activeScanContacts();
+    ASSERT_EQ(contacts.size(), 1);
+    EXPECT_EQ(contacts.first().toObject().value(QStringLiteral("scannerId")).toString(),
+              QStringLiteral("red_r1"));
+    EXPECT_EQ(contacts.first().toObject().value(QStringLiteral("targetId")).toString(),
+              QStringLiteral("blue_a1"));
+
+    const QJsonArray scannerUnits = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_recon_1"), 6, roomState(), {},
+        QStringLiteral("red_r1"))
+        .value(QStringLiteral("units")).toArray();
+    EXPECT_FALSE(unitById(scannerUnits, QStringLiteral("blue_a1")).isEmpty());
+
+    const QJsonArray disconnectedUnits = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_attack_1"), 7, roomState(), {},
+        QStringLiteral("red_a1"))
+        .value(QStringLiteral("units")).toArray();
+    EXPECT_TRUE(unitById(disconnectedUnits, QStringLiteral("blue_a1")).isEmpty());
+
+    engine.unit(QStringLiteral("red_r1"))->setCommRange(600.0);
+    ASSERT_TRUE(StateProjector::canTransmit(engine, QStringLiteral("red_r1"),
+                                            QStringLiteral("red_a1")));
+    ASSERT_FALSE(StateProjector::canTransmit(engine, QStringLiteral("red_a1"),
+                                             QStringLiteral("red_r1")));
+    const QJsonArray sharedUnits = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_attack_1"), 8, roomState(), {},
+        QStringLiteral("red_a1"))
+        .value(QStringLiteral("units")).toArray();
+    EXPECT_FALSE(unitById(sharedUnits, QStringLiteral("blue_a1")).isEmpty());
 }
 
 TEST(StateProjectorTest, ObservedEnemyExcludesPrivateBehaviorState) {
@@ -141,7 +403,8 @@ TEST(StateProjectorTest, ObserverSnapshotWhitelistsBilateralRuntimeState) {
     EXPECT_FALSE(unitById(units, QStringLiteral("blue_cp")).isEmpty());
     const QSet<QString> allowedSnapshotKeys{
         QStringLiteral("schemaVersion"), QStringLiteral("stateRevision"),
-        QStringLiteral("scenario"), QStringLiteral("units"), QStringLiteral("roomState")};
+        QStringLiteral("scenario"), QStringLiteral("units"),
+        QStringLiteral("projectiles"), QStringLiteral("roomState")};
     for (auto it = observer.constBegin(); it != observer.constEnd(); ++it) {
         EXPECT_TRUE(allowedSnapshotKeys.contains(it.key())) << it.key().toStdString();
     }
@@ -168,6 +431,7 @@ TEST(StateProjectorTest, ObserverSnapshotWhitelistsBilateralRuntimeState) {
         QStringLiteral("serviceRequested"), QStringLiteral("serviceProgress"),
         QStringLiteral("ammoRemaining"), QStringLiteral("ammoCapacity"),
         QStringLiteral("cooldownRemaining"), QStringLiteral("cooldownSec"),
+        QStringLiteral("activeProjectileCount"),
         QStringLiteral("fuelRemaining"), QStringLiteral("fuelCapacity"),
         QStringLiteral("turnaroundProgress")};
     for (const QJsonValue& value : units) {

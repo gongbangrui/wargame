@@ -24,6 +24,8 @@ Item {
     property bool showCommRange: false
     property bool showRoutes: true
     property bool showRecentPaths: true
+    property bool showProjectiles: true
+    onShowProjectilesChanged: innerCanvas.requestPaint()
     property bool showEnemyHp: true
     property bool showCoordinateGrid: false   // controlled by settings
     property bool showCoordinateReadout: false
@@ -101,6 +103,8 @@ Item {
     property var routes: []
     property var mapMarkers: []
     property string selectedMapMarkerId: ""
+    property var abilityCooldownByUnit: ({})
+    property var abilityEffects: []
     property bool pointerInside: false
     property var pointerLogicalPos: ({x: 0, y: 0})
     property bool actionPulseActive: false
@@ -110,6 +114,31 @@ Item {
 
     // 公共刷新方法
     function refresh() { innerCanvas.requestPaint() }
+    function rebuildRecentPaths() {
+        var map = ({})
+        if (root.controller && root.controller.networked) {
+            if (root.controller.isObserver) {
+                var projected = root.controller.observerTrajectories || ({})
+                var trails = projected.trails || []
+                for (var ti = 0; ti < trails.length; ti++) {
+                    var trail = trails[ti]
+                    if (trail && trail.unitId && trail.points && trail.points.length > 0)
+                        map[trail.unitId] = trail.points
+                }
+            }
+            root.recentPathsByUnit = map
+            innerCanvas.requestPaint()
+            return
+        }
+        var all = root.controller ? root.controller.allUnits() : []
+        for (var i = 0; i < all.length; i++) {
+            var snap = all[i]
+            if (snap && snap.recentPath && snap.recentPath.length > 0)
+                map[snap.id] = snap.recentPath
+        }
+        root.recentPathsByUnit = map
+        innerCanvas.requestPaint()
+    }
     function pulseActionAt(logicalPos, color) {
         if (!logicalPos) return
         root.actionPulseX = Number(logicalPos.x)
@@ -117,6 +146,43 @@ Item {
         root.actionPulseColor = color || t.actionPulse
         root.actionPulseActive = true
         actionPulseAnimation.restart()
+    }
+
+    function observeAbilityTransitions(units) {
+        var previous = root.abilityCooldownByUnit || ({})
+        var next = ({})
+        var effects = root.abilityEffects ? root.abilityEffects.slice() : []
+        var now = Date.now()
+        for (var i = 0; i < units.length; i++) {
+            var unit = units[i]
+            if (!unit || !unit.id || !unit.position || unit.position.length < 2) continue
+            var abilities = unit.abilities || ({})
+            var observedAbilities = ["countermeasure", "scan"]
+            for (var abilityIndex = 0; abilityIndex < observedAbilities.length; abilityIndex++) {
+                var abilityName = observedAbilities[abilityIndex]
+                var ability = abilities[abilityName]
+                if (!ability || ability.cooldownRemaining === undefined) continue
+                var key = unit.id + ":" + abilityName
+                var cooldown = Number(ability.cooldownRemaining || 0)
+                next[key] = cooldown
+                if (previous[key] !== undefined && cooldown > Number(previous[key]) + 1) {
+                    effects.push({
+                        kind: abilityName,
+                        x: Number(unit.position[0]),
+                        y: Number(unit.position[1]),
+                        range: Number(ability.range || 0),
+                        side: unit.side || "",
+                        started: now,
+                        duration: abilityName === "scan" ? 850 : 520
+                    })
+                }
+            }
+        }
+        root.abilityCooldownByUnit = next
+        if (effects.length > 0) {
+            root.abilityEffects = effects.slice(Math.max(0, effects.length - 12))
+            abilityEffectTimer.start()
+        }
     }
 
     function applyMapInfo(recenter) {
@@ -340,12 +406,37 @@ Item {
         property var units: []
         property var detections: []
         property var enemyDetections: []
+        property var projectiles: []
+        property var previousProjectiles: []
+        property double projectileSampleStartedMs: 0
+        property double projectileSampleIntervalMs: 100
+        property double projectileLastArrivalMs: 0
         property point _guideHover: Qt.point(-1, -1)
+
+        function acceptProjectileSample(sample) {
+            var now = Date.now()
+            if (projectileLastArrivalMs > 0) {
+                projectileSampleIntervalMs = Math.max(33,
+                    Math.min(1000, now - projectileLastArrivalMs))
+            }
+            previousProjectiles = projectiles || []
+            projectiles = sample || []
+            projectileLastArrivalMs = now
+            projectileSampleStartedMs = now
+            if (root.showProjectiles) projectileRenderTimer.restart()
+            requestPaint()
+        }
 
         Connections {
             target: root.controller
             function onUnitsForward() {
-                innerCanvas.units = root.controller.units
+                var projectedUnits = root.controller.units || []
+                root.observeAbilityTransitions(projectedUnits)
+                innerCanvas.units = projectedUnits
+                if (root.controller.networked) {
+                    root.rebuildRecentPaths()
+                    return
+                }
                 // Only rebuild the recentPaths map if at least one path changed.
                 // Otherwise we trigger a full repaint on every 16ms engine tick.
                 var map = ({})
@@ -368,6 +459,44 @@ Item {
                 if (!changed && Object.keys(prev).length !== Object.keys(map).length) changed = true
                 if (changed) root.recentPathsByUnit = map
                 innerCanvas.requestPaint()
+            }
+            function onObserverTrajectoriesChanged() {
+                root.rebuildRecentPaths()
+            }
+            function onProjectilesForward() {
+                innerCanvas.acceptProjectileSample(root.controller.projectiles)
+            }
+        }
+
+        Timer {
+            id: projectileRenderTimer
+            interval: 33
+            repeat: true
+            running: false
+            onTriggered: {
+                innerCanvas.requestPaint()
+                if (Date.now() - innerCanvas.projectileSampleStartedMs
+                        >= innerCanvas.projectileSampleIntervalMs) {
+                    if (innerCanvas.projectiles.length === 0)
+                        innerCanvas.previousProjectiles = []
+                    stop()
+                }
+            }
+        }
+
+        Timer {
+            id: abilityEffectTimer
+            interval: 33
+            repeat: true
+            running: false
+            onTriggered: {
+                var now = Date.now()
+                var active = (root.abilityEffects || []).filter(function(effect) {
+                    return now - effect.started < effect.duration
+                })
+                root.abilityEffects = active
+                innerCanvas.requestPaint()
+                if (active.length === 0) stop()
             }
         }
 
@@ -667,6 +796,138 @@ Item {
                 }
             }
 
+            // Ability effects are derived only from cooldown transitions in projected
+            // authoritative unit state. They never reveal an unprojected activation.
+            var abilityEffects = root.abilityEffects || []
+            for (var aei = 0; aei < abilityEffects.length; aei++) {
+                var effect = abilityEffects[aei]
+                var effectProgress = Math.max(0, Math.min(1,
+                    (Date.now() - effect.started) / Math.max(1, effect.duration)))
+                var effectPixel = root.toPixel(effect.x, effect.y)
+                var effectColor = effect.side === "red" ? "#ffc15a" : "#effcff"
+                ctx.save()
+                ctx.globalAlpha = 1 - effectProgress
+                ctx.strokeStyle = effectColor
+                ctx.lineWidth = 2
+                if (effect.kind === "scan") {
+                    ctx.beginPath()
+                    ctx.arc(effectPixel.x, effectPixel.y,
+                            Math.max(6, effect.range * root.zoom * effectProgress),
+                            0, Math.PI * 2)
+                    ctx.stroke()
+                } else {
+                    var fragmentRadius = Math.max(12,
+                        Math.min(130, effect.range * root.zoom)
+                        * (0.25 + effectProgress * 0.75))
+                    for (var fragment = 0; fragment < 14; fragment++) {
+                        var fragmentAngle = fragment / 14 * Math.PI * 2
+                            + effectProgress * 0.7
+                        var innerRadius = fragmentRadius * 0.72
+                        ctx.beginPath()
+                        ctx.moveTo(effectPixel.x + Math.cos(fragmentAngle) * innerRadius,
+                                   effectPixel.y + Math.sin(fragmentAngle) * innerRadius)
+                        ctx.lineTo(effectPixel.x + Math.cos(fragmentAngle) * fragmentRadius,
+                                   effectPixel.y + Math.sin(fragmentAngle) * fragmentRadius)
+                        ctx.stroke()
+                    }
+                }
+                ctx.restore()
+            }
+
+            // Projectile positions are rendered one authoritative sample behind.
+            // The interpolation factor is clamped, so a delayed server update can
+            // never turn into client-side trajectory prediction.
+            if (root.showProjectiles) {
+                var projectileAlpha = innerCanvas.projectileSampleIntervalMs > 0
+                    ? Math.max(0, Math.min(1,
+                        (Date.now() - innerCanvas.projectileSampleStartedMs)
+                        / innerCanvas.projectileSampleIntervalMs)) : 1
+                var previousById = ({})
+                var currentById = ({})
+                var previousProjectiles = innerCanvas.previousProjectiles || []
+                var currentProjectiles = innerCanvas.projectiles || []
+                for (var ppi = 0; ppi < previousProjectiles.length; ppi++) {
+                    var previousProjectile = previousProjectiles[ppi]
+                    if (previousProjectile && previousProjectile.id)
+                        previousById[previousProjectile.id] = previousProjectile
+                }
+                for (var cpi = 0; cpi < currentProjectiles.length; cpi++) {
+                    var projectile = currentProjectiles[cpi]
+                    if (!projectile || !projectile.id || !projectile.position
+                        || projectile.position.length < 2) continue
+                    currentById[projectile.id] = projectile
+                    var previous = previousById[projectile.id]
+                    var px = Number(projectile.position[0])
+                    var py = Number(projectile.position[1])
+                    var heading = Number(projectile.headingRad !== undefined
+                        ? projectile.headingRad : projectile.heading || 0)
+                    if (previous && previous.position && previous.position.length >= 2) {
+                        px = Number(previous.position[0])
+                            + (px - Number(previous.position[0])) * projectileAlpha
+                        py = Number(previous.position[1])
+                            + (py - Number(previous.position[1])) * projectileAlpha
+                        var oldHeading = Number(previous.headingRad !== undefined
+                            ? previous.headingRad : previous.heading || heading)
+                        var headingDelta = heading - oldHeading
+                        while (headingDelta > Math.PI) headingDelta -= Math.PI * 2
+                        while (headingDelta < -Math.PI) headingDelta += Math.PI * 2
+                        heading = oldHeading + headingDelta * projectileAlpha
+                    }
+                    if (!isFinite(px) || !isFinite(py) || !isFinite(heading)) continue
+                    var projectilePixel = root.toPixel(px, py)
+                    var redProjectile = projectile.side === "red"
+                    var bodyColor = redProjectile ? "#ff5b3f" : "#35c8ff"
+                    var edgeColor = redProjectile ? "#ffc15a" : "#effcff"
+                    var tailLength = Math.max(8, Math.min(24,
+                        Number(projectile.speed || 360) * root.zoom * 0.12))
+                    ctx.save()
+                    ctx.globalAlpha = 0.92
+                    ctx.strokeStyle = bodyColor
+                    ctx.lineWidth = 2.5
+                    ctx.beginPath()
+                    ctx.moveTo(projectilePixel.x - Math.cos(heading) * tailLength,
+                               projectilePixel.y - Math.sin(heading) * tailLength)
+                    ctx.lineTo(projectilePixel.x, projectilePixel.y)
+                    ctx.stroke()
+                    ctx.translate(projectilePixel.x, projectilePixel.y)
+                    ctx.rotate(heading)
+                    ctx.fillStyle = bodyColor
+                    ctx.strokeStyle = edgeColor
+                    ctx.lineWidth = 1.5
+                    ctx.beginPath()
+                    if (redProjectile) {
+                        ctx.moveTo(9, 0); ctx.lineTo(-6, -4.5)
+                        ctx.lineTo(-3, 0); ctx.lineTo(-6, 4.5)
+                    } else {
+                        ctx.moveTo(8, 0); ctx.lineTo(0, -4.5)
+                        ctx.lineTo(-7, 0); ctx.lineTo(0, 4.5)
+                    }
+                    ctx.closePath(); ctx.fill(); ctx.stroke()
+                    ctx.restore()
+                }
+                // A projectile missing from the new authoritative array is terminal.
+                // Keep only a short visual fade at its last confirmed position.
+                for (var dpi = 0; dpi < previousProjectiles.length; dpi++) {
+                    var deletedProjectile = previousProjectiles[dpi]
+                    if (!deletedProjectile || currentById[deletedProjectile.id]
+                        || !deletedProjectile.position
+                        || deletedProjectile.position.length < 2) continue
+                    var deletedX = Number(deletedProjectile.position[0])
+                    var deletedY = Number(deletedProjectile.position[1])
+                    if (!isFinite(deletedX) || !isFinite(deletedY)) continue
+                    var deletedPixel = root.toPixel(deletedX, deletedY)
+                    ctx.save()
+                    ctx.globalAlpha = Math.max(0, 1 - projectileAlpha) * 0.75
+                    ctx.strokeStyle = deletedProjectile.side === "red"
+                        ? "#ffc15a" : "#effcff"
+                    ctx.lineWidth = 2
+                    ctx.beginPath(); ctx.arc(deletedPixel.x, deletedPixel.y,
+                                             4 + projectileAlpha * 8, 0, Math.PI * 2)
+                    ctx.stroke()
+                    ctx.restore()
+                }
+            }
+
             // 追踪目标：静态高亮 + 进攻路线（无闪烁）
             if (root.trackingTargetId && root.pursueSourcePos && root.trackingTargetPos && root.trackingTargetAlive) {
                 var spx = root.toPixel(root.pursueSourcePos.x, root.pursueSourcePos.y)
@@ -694,6 +955,16 @@ Item {
                 var dead = !u.alive
                 var isEnemy = root.showAllSides ? false : (u.side !== root.sideFilter)
                 var p = root.toPixel(u.position[0], u.position[1])
+                var threatCount = Number(u.incomingThreatCount || 0)
+                if (!dead && visible && threatCount > 0) {
+                    ctx.save()
+                    ctx.strokeStyle = u.side === "red" ? "#ffc15a" : "#effcff"
+                    ctx.lineWidth = 2
+                    ctx.setLineDash([4, 3])
+                    ctx.beginPath(); ctx.arc(p.x, p.y, 18, 0, Math.PI * 2); ctx.stroke()
+                    ctx.setLineDash([])
+                    ctx.restore()
+                }
                 var showsRanges = root.rangeUnitIds === null
                     || root.rangeUnitIds.indexOf(u.id) >= 0
 
@@ -1200,14 +1471,9 @@ Item {
     Component.onCompleted: {
         root.applyMapInfo(true)
         innerCanvas.units = root.controller.units
-        var map = ({})
-        var all = root.controller.allUnits()
-        for (var i = 0; i < all.length; i++) {
-            var snap = root.controller.unitAt(all[i].id)
-            if (snap && snap.recentPath && snap.recentPath.length > 0)
-                map[all[i].id] = snap.recentPath
-        }
-        root.recentPathsByUnit = map
+        root.observeAbilityTransitions(innerCanvas.units || [])
+        innerCanvas.acceptProjectileSample(root.controller.projectiles)
+        root.rebuildRecentPaths()
         innerCanvas.requestPaint()
     }
 

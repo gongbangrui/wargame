@@ -10,12 +10,14 @@
 #include "ITransport.h"
 #include "CommandResult.h"
 #include "CombatResolver.h"
+#include "UnitBase.h"
 
 #include <QObject>
 #include <QTimer>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QSet>
+#include <QHash>
 #include <QVariantList>
 #include <QVariantMap>
 #include <map>
@@ -25,8 +27,34 @@
 
 namespace gbr {
 
-class UnitBase;
 class LocalTransport;
+
+struct ProjectileState {
+    QString id;
+    QString attackerId;
+    QString targetId;
+    Side side = Side::Red;
+    GeoPos position;
+    GeoPos previousPosition;
+    double headingRad = 0.0;
+    double speed = 420.0;
+    double age = 0.0;
+    double lifetime = 16.0;
+    double launchTime = 0.0;
+    double terminalAge = 0.0;
+    QString terminalReason;
+    bool resultSettled = false;
+    CombatRequest request;
+
+    bool active() const { return terminalReason.isEmpty(); }
+};
+
+struct ScanContact {
+    QString scannerId;
+    QString targetId;
+    Side side = Side::Red;
+    double expiresAt = 0.0;
+};
 
 /// @brief Core simulation engine that drives the wargame.
 /// @details Runs a 50ms real-time tick loop, scales by speedMul, and manages
@@ -43,8 +71,16 @@ class SimulationEngine : public QObject {
     Q_PROPERTY(QString cpIssues READ cpIssues NOTIFY readyForSimChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY errorOccurred)
     Q_PROPERTY(QVariantList timeline READ timelineForView NOTIFY timelineChanged)
+    Q_PROPERTY(QVariantList projectiles READ projectilesForView NOTIFY projectilesChanged)
 public:
     static constexpr double kMaximumCommandedUnitSpeedMps = 240.0;
+    static constexpr double kProjectileSpeedMps = 420.0;
+    static constexpr double kProjectileTurnRadiusMeters = 700.0;
+    static constexpr double kProjectileLifetimeSec = 16.0;
+    static constexpr double kProjectileCollisionRadiusMeters = 60.0;
+    static constexpr double kProjectileThreatRadiusMeters = 1300.0;
+    static constexpr double kServiceRadiusMeters = 500.0;
+    static constexpr qsizetype kMaximumProjectiles = 512;
 
     explicit SimulationEngine(QObject* parent = nullptr);
     /// @brief 注入自定义推演域消息传输。
@@ -102,6 +138,11 @@ public:
 
     QJsonArray collectPerceptionSnapshot(const QString& forSide) const;
     QJsonArray collectAllUnitsSnapshot() const;
+    QJsonArray projectilesSnapshot() const;
+    qsizetype activeProjectileCount() const;
+    QVariantList projectilesForView() const { return projectilesSnapshot().toVariantList(); }
+    QJsonArray activeScanContacts() const;
+    bool applyRemoteProjectiles(const QJsonArray& projectiles, QString* error = nullptr);
     QJsonArray timelineEvents() const { return m_timeline; }
     QVariantList timelineForView() const { return m_timeline.toVariantList(); }
     QJsonObject battleReport() const;
@@ -110,10 +151,17 @@ public:
 
     /// 应用权威运行时状态，但不启动本地计时器。
     void applyRemoteRuntimeState(const QJsonArray& units, double simTime,
-                                 bool running, double speedMul);
+                                 bool running, double speedMul,
+                                 bool partial = false);
     QJsonArray collectCheckpointState() const;
+    QJsonObject collectGlobalCheckpointState() const;
+    bool restoreGlobalCheckpointState(const QJsonObject& state,
+                                      QString* error = nullptr);
     bool restoreCheckpointState(const QJsonArray& units, double simTime,
                                 bool running, double speedMul, QString* error = nullptr);
+    bool restoreCheckpointState(const QJsonArray& units, const QJsonObject& globalState,
+                                double simTime, bool running, double speedMul,
+                                QString* error = nullptr);
     quint64 combatSeed() const { return m_battleSeed; }
     void restoreCombatSeed(quint64 seed) { if (seed != 0) m_battleSeed = seed; }
 
@@ -142,6 +190,8 @@ signals:
     /// @brief Emitted when one side's command post is destroyed.
     void simulationEnded(const QString& winner, const QString& loser);
     void timelineChanged();
+    void projectilesChanged();
+    void scanContactsChanged();
 
 private slots:
     void onMessagePosted(const QJsonObject& msg);
@@ -161,8 +211,12 @@ private:
     void connectUnitSignals(UnitBase* unit, const QString& id);
     void updateMessageCache(const QJsonObject& msg);
     void onTickInternal(bool manual, double manualDt);
-    void tickUnits(double dt);
+    void tickUnits(double dt, const QHash<QString, GeoPos>& previousPositions);
     void resolveCombatRequests();
+    void advanceProjectiles(double dt, const QHash<QString, GeoPos>& previousPositions);
+    void settleTerminalProjectiles(const QStringList& projectileIds);
+    void advanceServices(double dt);
+    void expireScanContacts();
     void applyEcmJamming();
     void scanReconDetections(double dt);
     void broadcastPositionReports(bool manual);
@@ -198,7 +252,14 @@ private:
     double m_scanAccum = 0.0;
     int m_reportCounter = 0;
     std::unordered_map<QString, QJsonArray> m_cachedDetections;
+    // Online snapshots contain permission-projected fields that are not part
+    // of the local UnitBase model (for example action capabilities and threat
+    // summaries). Keep the last validated projection on the remote mirror so
+    // the QML facade does not silently discard it.
+    QHash<QString, QJsonObject> m_remoteRuntimeProjection;
     std::vector<CombatRequest> m_pendingCombatRequests;
+    std::map<QString, ProjectileState> m_projectiles;
+    std::vector<ScanContact> m_scanContacts;
     quint64 m_battleSeed = 0x57415247414d4532ULL;
     std::unordered_map<QString, std::function<void(const QVariantMap&)>> m_dispatch;
     QJsonObject m_unitIdentityCatalog;
@@ -218,6 +279,7 @@ private:
         qsizetype commandCount = 0;
         qsizetype stepCount = 0;
         QJsonArray state;
+        QJsonObject globalState;
     };
     QJsonArray m_timeline;
     qint64 m_timelineSequence = 0;
@@ -230,6 +292,7 @@ private:
     double m_lastReplayCheckpointTime = 0.0;
     double m_recordedDuration = 0.0;
     QJsonArray m_recordedFinalSnapshot;
+    QJsonArray m_recordedFinalProjectiles;
     bool m_replaying = false;
 
     void cmdAssignTarget(const QVariantMap& args);
@@ -247,6 +310,10 @@ private:
     void cmdService(const QVariantMap& args);
     void cmdCancelEngagement(const QVariantMap& args);
     void cmdSetRulesOfEngagement(const QVariantMap& args);
+    void cmdActivateCountermeasure(const QVariantMap& args);
+    void cmdActivateScan(const QVariantMap& args);
+    void cmdAttemptFieldRepair(const QVariantMap& args);
+    void cmdCancelService(const QVariantMap& args);
     void checkWinLoseCondition();
     void initCommandDispatch();
     CommandResult validateCommand(const QString& action, const QVariantMap& args) const;

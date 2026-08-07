@@ -93,7 +93,8 @@ TEST(P3LifecycleTest, ServiceAtCommandPostRepairsRefuelsAndRearms) {
         QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_a1")}}).accepted);
     engine.stepOnce(0.05);
     EXPECT_TRUE(attacker->serviceRequested());
-    engine.stepOnce(2.0);
+    const double remainingService = attacker->serviceDuration() - attacker->serviceElapsed();
+    engine.stepOnce(remainingService + 0.01);
 
     EXPECT_FALSE(attacker->serviceRequested());
     EXPECT_DOUBLE_EQ(attacker->hp(), attacker->maxHp());
@@ -103,7 +104,7 @@ TEST(P3LifecycleTest, ServiceAtCommandPostRepairsRefuelsAndRearms) {
     EXPECT_DOUBLE_EQ(attacker->turnaroundProgress(), 1.0);
 }
 
-TEST(P3LifecycleTest, LowFuelAndEmptyAmmoTriggerAutomaticServiceReturn) {
+TEST(P3LifecycleTest, LowFuelAndEmptyAmmoDoNotForcePlayerReturn) {
     Scenario scenario = scenarioWithoutSchedules();
     for (ScenarioUnit& unit : scenario.units) {
         if (unit.id != QLatin1String("red_a1")) continue;
@@ -113,6 +114,7 @@ TEST(P3LifecycleTest, LowFuelAndEmptyAmmoTriggerAutomaticServiceReturn) {
         unit.initialAmmo = 1;
         unit.hitProbability = 0.0;
         unit.cooldownSec = 0.0;
+        unit.minAttackRange = 0.0;
     }
     SimulationEngine engine;
     ASSERT_TRUE(engine.setScenario(scenario));
@@ -126,10 +128,7 @@ TEST(P3LifecycleTest, LowFuelAndEmptyAmmoTriggerAutomaticServiceReturn) {
                      QVariantMap{{QStringLiteral("x"), 5000.0},
                                  {QStringLiteral("y"), 11000.0}}}}).accepted);
     engine.stepOnce(0.2);
-    EXPECT_TRUE(attacker->serviceRequested());
-    EXPECT_EQ(attacker->checkpointState().value(QStringLiteral("behavior")).toObject()
-                  .value(QStringLiteral("fsmState")).toString(),
-              QStringLiteral("withdrawing"));
+    EXPECT_FALSE(attacker->serviceRequested());
 
     attacker->requestService(false);
     attacker->cancelWaypointMotion();
@@ -141,7 +140,7 @@ TEST(P3LifecycleTest, LowFuelAndEmptyAmmoTriggerAutomaticServiceReturn) {
                     {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
     engine.stepOnce(0.05);
     EXPECT_EQ(attacker->ammoRemaining(), 0);
-    EXPECT_TRUE(attacker->serviceRequested());
+    EXPECT_FALSE(attacker->serviceRequested());
     EXPECT_TRUE(attacker->targetId().isEmpty());
 }
 
@@ -216,6 +215,7 @@ TEST(P3ReplayTest, SeekReproducesRecordedStateAndReportAggregatesCombat) {
             unit.damageMin = 20.0;
             unit.damageMax = 20.0;
             unit.cooldownSec = 10.0;
+            unit.minAttackRange = 0.0;
         }
     }
     SimulationEngine engine;

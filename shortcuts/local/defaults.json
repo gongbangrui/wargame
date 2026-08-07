@@ -1,0 +1,17 @@
+{
+  "toggleRun": "Space",
+  "speed0": "1",
+  "speed1": "2",
+  "speed2": "3",
+  "speed4": "4",
+  "speed8": "5",
+  "step": ".",
+  "speedUp": "W",
+  "speedDown": "S",
+  "prevUnit": "A,Left",
+  "nextUnit": "D,Right",
+  "nextUnitTab": "Tab",
+  "prevUnitSh": "Shift+Tab",
+  "autoFit": "Ctrl+F",
+  "cancelTrack": "P"
+}

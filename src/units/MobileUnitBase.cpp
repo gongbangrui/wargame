@@ -45,7 +45,7 @@ void MobileUnitBase::setupMobileFsm(const QString& movingState,
                         [this]{ return m_waypoints.isEmpty() && serviceRequested(); });
 
     m_fsm.addState("servicing", [this](double dt) {
-        serviceTick(dt);
+        Q_UNUSED(dt);
         setStatus(QStringLiteral("指挥所维修中 %1%")
                       .arg(qRound(serviceProgress() * 100.0)));
     }, [this]{ setHasActiveWaypoints(false); setStatus("开始检修"); });
@@ -57,6 +57,13 @@ void MobileUnitBase::setupMobileFsm(const QString& movingState,
 
 void MobileUnitBase::stepMotion(QVariantList& waypoints, int& idx, double dt,
                                  double snapThreshold) {
+    if (!hasUsableFuel()) {
+        waypoints.clear();
+        idx = 0;
+        setHasActiveWaypoints(false);
+        m_fsm.goTo(QStringLiteral("idle"));
+        return;
+    }
     if (waypoints.isEmpty()) return;
     if (idx < 0 || idx >= waypoints.size()) {
         waypoints.clear();
@@ -98,7 +105,7 @@ void MobileUnitBase::stepMotion(QVariantList& waypoints, int& idx, double dt,
 
 void MobileUnitBase::onMobileMessage(const Message& m) {
     if (m.type == Message::Type::Withdraw) {
-        requestService(m.payload.value("service").toBool(false));
+        cancelService();
         setStatus("撤离中");
         // Withdraw is an abort command, not a temporary waypoint override.
         clearSchedule();
@@ -116,6 +123,7 @@ void MobileUnitBase::onMobileMessage(const Message& m) {
         }
     } else if (m.type == Message::Type::Guidance) {
         if (m.payload.value("kind").toString() == "moveTo") {
+            cancelService();
             m_waypoints.clear();
             m_waypoints.append(QVariant::fromValue(
                 QPointF(m.payload.value("x").toDouble(),

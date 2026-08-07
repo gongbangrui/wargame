@@ -47,6 +47,9 @@ public:
     static QJsonArray encodeCheckpointUnits(const SimulationEngine& engine);
     static bool decodeCheckpointUnits(SimulationEngine& engine, const QJsonArray& units,
                                       QString* error = nullptr);
+    static QJsonObject encodeGlobalCheckpoint(const SimulationEngine& engine);
+    static bool decodeGlobalCheckpoint(SimulationEngine& engine, const QJsonObject& state,
+                                       QString* error = nullptr);
 };
 
 } // namespace gbr

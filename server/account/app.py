@@ -16,6 +16,8 @@ import sys
 import termios
 import threading
 import time
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -185,6 +187,18 @@ DEFAULT_SEAT_LIMITS = {
 DEFAULT_OLLAMA_BASE_URL: Final = "http://host.docker.internal:11434"
 DEFAULT_OLLAMA_MODEL: Final = "auto"
 LEGACY_OLLAMA_MODEL: Final = "qwen3.5:4b"
+OLLAMA_PROBE_TIMEOUT_SECONDS: Final = max(
+    0.25, min(float(os.getenv("OLLAMA_PROBE_TIMEOUT_SECONDS", "2.0")), 10.0)
+)
+OLLAMA_PROBE_MAX_BYTES: Final = 1024 * 1024
+_ollama_models_lock = threading.Lock()
+_ollama_models_cache: dict[str, object] = {
+    "baseUrl": "",
+    "models": [],
+    "connected": False,
+    "checkedAt": "",
+    "error": "",
+}
 
 
 def environment_ai_config() -> dict[str, str | int]:
@@ -287,11 +301,30 @@ class RoomBody(BaseModel):
     enabled: bool = True
     mode: Literal["pvp", "pve"] = "pvp"
     ai_difficulty: Literal["easy", "normal", "hard"] = "normal"
+    # Optional on input for backwards-compatible clients.  The service fills
+    # the values from the room/global defaults when a room is created, and
+    # preserves the stored values when an existing room is updated.
+    ai_provider: Literal["rules", "ollama"] | None = None
+    ai_model: str | None = Field(default=None, max_length=128)
 
     @field_validator("room_id", "name", "description", "scenario_id", mode="before")
     @classmethod
     def strip_room_text(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("ai_model", mode="before")
+    @classmethod
+    def strip_ai_model(cls, value: object) -> object:
+        if value is None:
+            return value
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("ai_model")
+    @classmethod
+    def validate_ai_model(cls, value: str | None) -> str | None:
+        if value is not None and any(character in value for character in "\r\n"):
+            raise ValueError("模型名称不能包含换行")
+        return value
 
     @field_validator("seat_limits")
     @classmethod
@@ -355,6 +388,36 @@ class AiConfigBody(BaseModel):
         return value
 
 
+class OllamaEndpointBody(BaseModel):
+    ollama_scheme: Literal["http", "https"] = "http"
+    ollama_host: str = Field(min_length=1, max_length=253)
+    ollama_port: int = Field(ge=1, le=65535)
+    # The endpoint API is also used by the console to retain the legacy
+    # global defaults.  Both fields are optional so deployments which only
+    # need to change the network endpoint remain source-compatible.
+    provider: Literal["rules", "auto", "ollama"] | None = None
+    model: str | None = Field(default=None, max_length=128)
+
+    @field_validator("ollama_host", mode="before")
+    @classmethod
+    def strip_endpoint_host(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        return normalize_ollama_host(value)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def strip_endpoint_model(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("model")
+    @classmethod
+    def validate_endpoint_model(cls, value: str | None) -> str | None:
+        if value is not None and any(character in value for character in "\r\n"):
+            raise ValueError("模型名称不能包含换行")
+        return value
+
+
 class InternalRoomStatusBody(BaseModel):
     status: Literal["stopped", "preparing", "running", "paused", "finished"]
     reason: str = Field(default="", max_length=256)
@@ -366,6 +429,7 @@ class InternalOperationAckBody(BaseModel):
     state: Literal["acknowledged", "failed"]
     revision: int = Field(default=0, ge=0)
     code: str = Field(default="", max_length=128)
+    ai_resolved_model: str = Field(default="", max_length=128)
 
 
 class InternalPresenceBody(BaseModel):
@@ -465,6 +529,9 @@ def initialize_database() -> None:
                 seat_parameters TEXT NOT NULL DEFAULT '{}',
                 mode TEXT NOT NULL DEFAULT 'pvp',
                 ai_difficulty TEXT NOT NULL DEFAULT 'normal',
+                ai_provider TEXT NOT NULL DEFAULT 'rules',
+                ai_model TEXT NOT NULL DEFAULT '',
+                ai_resolved_model TEXT NOT NULL DEFAULT '',
                 config_version INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'stopped',
                 winner TEXT NOT NULL DEFAULT '',
@@ -489,6 +556,8 @@ def initialize_database() -> None:
                 expected_status TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('pending', 'acknowledged', 'failed')),
                 requested_revision INTEGER NOT NULL DEFAULT 0,
+                requested_config_version INTEGER NOT NULL DEFAULT 1,
+                requested_ollama_config_version INTEGER NOT NULL DEFAULT 1,
                 applied_revision INTEGER,
                 result_code TEXT NOT NULL DEFAULT '',
                 requested_at TEXT NOT NULL,
@@ -570,15 +639,20 @@ def initialize_database() -> None:
             """
         )
         room_columns = {row["name"] for row in db.execute("PRAGMA table_info(rooms)")}
+        added_room_ai_columns: set[str] = set()
         for name, declaration in (
             ("winner", "TEXT NOT NULL DEFAULT ''"),
             ("status_reason", "TEXT NOT NULL DEFAULT ''"),
             ("mode", "TEXT NOT NULL DEFAULT 'pvp'"),
             ("ai_difficulty", "TEXT NOT NULL DEFAULT 'normal'"),
+            ("ai_provider", "TEXT NOT NULL DEFAULT 'rules'"),
+            ("ai_model", "TEXT NOT NULL DEFAULT ''"),
+            ("ai_resolved_model", "TEXT NOT NULL DEFAULT ''"),
             ("config_version", "INTEGER NOT NULL DEFAULT 1"),
         ):
             if name not in room_columns:
                 db.execute(f"ALTER TABLE rooms ADD COLUMN {name} {declaration}")
+                added_room_ai_columns.add(name)
         db.execute(
             "UPDATE rooms SET mode='pvp' WHERE mode NOT IN ('pvp', 'pve') OR mode IS NULL"
         )
@@ -587,11 +661,19 @@ def initialize_database() -> None:
             "WHERE ai_difficulty NOT IN ('easy', 'normal', 'hard') OR ai_difficulty IS NULL"
         )
         db.execute("UPDATE rooms SET config_version=1 WHERE config_version IS NULL OR config_version < 1")
+        db.execute(
+            "UPDATE rooms SET ai_provider='rules' "
+            "WHERE ai_provider NOT IN ('rules', 'ollama') OR ai_provider IS NULL"
+        )
+        db.execute("UPDATE rooms SET ai_model='' WHERE ai_model IS NULL")
+        db.execute("UPDATE rooms SET ai_resolved_model='' WHERE ai_resolved_model IS NULL")
         operation_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(room_operations)")
         }
         for name, declaration in (
             ("requested_revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("requested_config_version", "INTEGER NOT NULL DEFAULT 1"),
+            ("requested_ollama_config_version", "INTEGER NOT NULL DEFAULT 1"),
             ("applied_revision", "INTEGER"),
             ("result_code", "TEXT NOT NULL DEFAULT ''"),
         ):
@@ -652,11 +734,12 @@ def initialize_database() -> None:
         if db.execute("SELECT 1 FROM rooms WHERE room_id=?", (ACTIVE_GAME_ROOM_ID,)).fetchone() is None:
             now = iso_time(utc_now())
             db.execute(
-                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,config_version,status,enabled,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ACTIVE_GAME_ROOM_ID, "主推演室", "默认联网推演房间", "default",
                  json.dumps(DEFAULT_SEAT_LIMITS, ensure_ascii=False),
-                 json.dumps({}, ensure_ascii=False), "pvp", "normal", 1, "stopped", 1, now, now),
+                 json.dumps({}, ensure_ascii=False), "pvp", "normal", "rules", "", "", 1,
+                 "stopped", 1, now, now),
             )
         ai_config_row = db.execute(
             "SELECT provider, base_url, model, config_version FROM ai_config WHERE config_id=1"
@@ -681,6 +764,25 @@ def initialize_database() -> None:
                 (DEFAULT_OLLAMA_MODEL, iso_time(utc_now()), DEFAULT_OLLAMA_BASE_URL,
                  LEGACY_OLLAMA_MODEL),
             )
+        # Room AI configuration was introduced after the legacy global
+        # provider.  Migrate existing PVE rooms exactly once from that global
+        # tuple; PVP rooms intentionally remain rules-only.
+        if "ai_provider" in added_room_ai_columns:
+            global_row = db.execute(
+                "SELECT provider, model FROM ai_config WHERE config_id=1"
+            ).fetchone()
+            global_provider = str(global_row["provider"]) if global_row else "rules"
+            global_room_provider = "ollama" if global_provider in {"auto", "ollama"} else "rules"
+            global_model = str(global_row["model"]) if global_row else ""
+            db.execute(
+                "UPDATE rooms SET ai_provider=CASE WHEN mode='pve' THEN ? ELSE 'rules' END, "
+                "ai_model=CASE WHEN mode='pve' THEN ? ELSE '' END, ai_resolved_model=''",
+                (global_room_provider, global_model),
+            )
+        db.execute(
+            "UPDATE rooms SET ai_provider='rules', ai_model='', ai_resolved_model='' "
+            "WHERE mode='pvp'"
+        )
         db.execute(
             "UPDATE room_operations SET state='failed', acknowledged_at=? "
             "WHERE room_id!=? AND state='pending'",
@@ -969,6 +1071,119 @@ def public_ai_config(row: sqlite3.Row) -> dict:
     }
 
 
+def ollama_model_inventory(base_url: str, refresh: bool = False) -> dict:
+    """Read the Ollama model catalog from the account-service host.
+
+    The browser never talks to Ollama directly.  Keep a short-lived process
+    cache so opening the monitor page does not create a request storm.
+    """
+    global _ollama_models_cache
+    normalized = base_url.rstrip("/")
+    now = utc_now()
+    with _ollama_models_lock:
+        cached = dict(_ollama_models_cache)
+    if (
+        not refresh
+        and cached.get("baseUrl") == normalized
+        and isinstance(cached.get("checkedAt"), str)
+        and cached.get("checkedAt")
+    ):
+        try:
+            checked = datetime.fromisoformat(str(cached["checkedAt"]).replace("Z", "+00:00"))
+            if now - checked < timedelta(seconds=30):
+                return cached
+        except ValueError:
+            pass
+
+    checked_at = iso_time(now)
+    models: list[dict[str, object]] = []
+    model_names: list[str] = []
+    error = ""
+    connected = False
+    try:
+        request = urllib.request.Request(
+            f"{normalized}/api/tags",
+            headers={"Accept": "application/json", "User-Agent": "wargame-account"},
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=OLLAMA_PROBE_TIMEOUT_SECONDS) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > OLLAMA_PROBE_MAX_BYTES:
+                raise ValueError("Ollama 返回过大")
+            payload = response.read(OLLAMA_PROBE_MAX_BYTES + 1)
+            if len(payload) > OLLAMA_PROBE_MAX_BYTES:
+                raise ValueError("Ollama 返回过大")
+        document = json.loads(payload.decode("utf-8"))
+        raw_models = document.get("models") if isinstance(document, dict) else None
+        if not isinstance(raw_models, list):
+            raise ValueError("Ollama 返回格式无效")
+        for item in raw_models[:512]:
+            if isinstance(item, str):
+                name = item.strip()
+                entry: dict[str, object] = {"name": name}
+            elif isinstance(item, dict):
+                name = item.get("name") if isinstance(item.get("name"), str) else ""
+                name = name.strip()
+                entry = {"name": name}
+                if isinstance(item.get("size"), (int, float)):
+                    entry["size"] = int(item["size"])
+                if isinstance(item.get("modified_at"), str):
+                    entry["modifiedAt"] = item["modified_at"]
+            else:
+                continue
+            if not name or name in model_names or len(name) > 128 or any(c in name for c in "\r\n"):
+                continue
+            model_names.append(name)
+            models.append(entry)
+        connected = True
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        error = str(exc)[:256] or "Ollama 连接失败"
+        if isinstance(exc, urllib.error.HTTPError):
+            error = f"HTTP {exc.code}"
+        elif isinstance(exc, urllib.error.URLError):
+            error = str(exc.reason)[:256]
+
+    result = {
+        "baseUrl": normalized,
+        "connected": connected,
+        "connectionStatus": "connected" if connected else "unavailable",
+        "models": models,
+        "modelNames": model_names,
+        "checkedAt": checked_at,
+        "error": error,
+    }
+    with _ollama_models_lock:
+        _ollama_models_cache = result
+    return result
+
+
+def hosted_room_can_change_ai(db: sqlite3.Connection) -> bool:
+    row = db.execute(
+        "SELECT status FROM rooms WHERE room_id=?", (ACTIVE_GAME_ROOM_ID,)
+    ).fetchone()
+    if row is not None and row["status"] != "stopped":
+        return False
+    pending = db.execute(
+        "SELECT 1 FROM room_operations WHERE room_id=? AND state='pending' LIMIT 1",
+        (ACTIVE_GAME_ROOM_ID,),
+    ).fetchone()
+    return pending is None
+
+
+def room_ai_provider(value: object, mode: str = "pvp") -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in {"rules", "ollama"}:
+        return candidate
+    return "rules" if mode != "pve" else "ollama"
+
+
+def room_ai_model(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    model = value.strip()
+    return model if len(model) <= 128 and not any(c in model for c in "\r\n") else ""
+
+
 def public_room(row: sqlite3.Row) -> dict:
     def decode(value: str, fallback: object) -> object:
         try:
@@ -986,6 +1201,9 @@ def public_room(row: sqlite3.Row) -> dict:
         "seatParameters": decode(row["seat_parameters"], {}),
         "mode": row["mode"],
         "aiDifficulty": row["ai_difficulty"],
+        "aiProvider": room_ai_provider(row["ai_provider"], row["mode"]),
+        "aiModel": room_ai_model(row["ai_model"]),
+        "aiResolvedModel": room_ai_model(row["ai_resolved_model"]),
         "configVersion": int(row["config_version"]),
         "status": row["status"],
         "winner": row["winner"],
@@ -1002,6 +1220,8 @@ def public_room(row: sqlite3.Row) -> dict:
             "expectedStatus": row["operation_expected_status"],
             "state": row["operation_state"],
             "requestedRevision": row["operation_requested_revision"],
+            "requestedConfigVersion": row["operation_requested_config_version"],
+            "requestedOllamaConfigVersion": row["operation_requested_ollama_config_version"],
             "appliedRevision": row["operation_applied_revision"],
             "code": row["operation_result_code"],
             "requestedAt": row["operation_requested_at"],
@@ -1021,6 +1241,8 @@ def room_rows(db: sqlite3.Connection, enabled_only: bool) -> list[sqlite3.Row]:
                o.state AS operation_state, o.requested_at AS operation_requested_at,
                o.acknowledged_at AS operation_acknowledged_at,
                o.requested_revision AS operation_requested_revision,
+               o.requested_config_version AS operation_requested_config_version,
+               o.requested_ollama_config_version AS operation_requested_ollama_config_version,
                o.applied_revision AS operation_applied_revision,
                o.result_code AS operation_result_code
         FROM rooms r
@@ -1133,6 +1355,12 @@ def redacted_ai_status(game_status: dict, configured_ai: dict | None = None) -> 
     return {
         "active": room.get("roomMode") == "pve",
         "provider": provider,
+        "selectedProvider": allowed_text(
+            ai.get("selectedProvider"), {"rules", "ollama"}
+        ),
+        "selectedModel": ai.get("selectedModel")
+        if isinstance(ai.get("selectedModel"), str)
+        else "",
         "model": model,
         "baseUrl": base_url,
         "effectiveEngine": allowed_text(ai.get("effectiveEngine"), {"rules", "ollama"}),
@@ -1155,6 +1383,15 @@ def redacted_ai_status(game_status: dict, configured_ai: dict | None = None) -> 
              "configuration_error"},
         ),
         "stickyRules": bool(ai.get("stickyRules")),
+        "fallbackReason": ai.get("fallbackReason")
+        if isinstance(ai.get("fallbackReason"), str)
+        else "",
+        "roomConfigVersion": nonnegative_count(
+            ai.get("roomConfigVersion") or room.get("configVersion")
+        ),
+        "resolvedModel": ai.get("resolvedModel")
+        if isinstance(ai.get("resolvedModel"), str)
+        else "",
     }
 
 
@@ -1332,36 +1569,95 @@ def admin_ai_config(_: sqlite3.Row = Depends(require_admin)) -> dict:
     return {"aiConfig": public_ai_config(row)}
 
 
-@app.put("/api/admin/ai-config")
-def update_admin_ai_config(
-    body: AiConfigBody,
+@app.get("/api/admin/ollama-config")
+def admin_ollama_config(_: sqlite3.Row = Depends(require_admin)) -> dict:
+    with database() as db:
+        row = db.execute("SELECT * FROM ai_config WHERE config_id=1").fetchone()
+    if row is None:
+        raise HTTPException(status_code=503, detail="Ollama 端点尚未初始化")
+    config = public_ai_config(row)
+    return {"ollamaConfig": config, "aiConfig": config}
+
+
+@app.get("/api/admin/ollama-models")
+def admin_ollama_models(
+    refresh: bool = Query(default=False),
     _: sqlite3.Row = Depends(require_admin),
+) -> dict:
+    with database() as db:
+        row = db.execute("SELECT base_url FROM ai_config WHERE config_id=1").fetchone()
+    if row is None:
+        raise HTTPException(status_code=503, detail="Ollama 端点尚未初始化")
+    return ollama_model_inventory(row["base_url"], refresh=refresh)
+
+
+def _update_global_endpoint(
+    body: OllamaEndpointBody,
+    admin: sqlite3.Row,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> dict:
     try:
         base_url = build_ollama_base_url(body.ollama_scheme, body.ollama_host, body.ollama_port)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     with database() as db:
+        if not hosted_room_can_change_ai(db):
+            raise HTTPException(status_code=409, detail="托管房间只有停止状态才能修改 Ollama 配置")
         existing = db.execute("SELECT * FROM ai_config WHERE config_id=1").fetchone()
         if existing is None:
-            raise HTTPException(status_code=503, detail="AI 配置尚未初始化")
-        changed = (
-            body.provider != existing["provider"]
-            or base_url != existing["base_url"]
-            or body.model != existing["model"]
-        )
+            raise HTTPException(status_code=503, detail="Ollama 端点尚未初始化")
+        next_provider = provider if provider is not None else body.provider
+        if next_provider is None:
+            next_provider = existing["provider"]
+        next_model = model if model is not None else body.model
+        if next_model is None:
+            next_model = existing["model"]
+        changed = base_url != existing["base_url"] or next_provider != existing["provider"] or next_model != existing["model"]
         version = int(existing["config_version"]) + (1 if changed else 0)
         now = iso_time(utc_now())
         db.execute(
-            "UPDATE ai_config SET provider=?,base_url=?,model=?,config_version=?,updated_at=? "
-            "WHERE config_id=1",
-            (body.provider, base_url, body.model, version, now),
+            "UPDATE ai_config SET provider=?,base_url=?,model=?,config_version=?,updated_at=? WHERE config_id=1",
+            (next_provider, base_url, next_model, version, now),
         )
+        if changed:
+            db.execute(
+                "UPDATE rooms SET ai_resolved_model='', updated_at=? WHERE room_id=? AND status='stopped'",
+                (now, ACTIVE_GAME_ROOM_ID),
+            )
         row = db.execute("SELECT * FROM ai_config WHERE config_id=1").fetchone()
-    return {
-        "aiConfig": public_ai_config(row),
-        "message": "AI 配置已保存，游戏服务将在数秒内同步",
-    }
+    with _ollama_models_lock:
+        if changed:
+            _ollama_models_cache["checkedAt"] = ""
+    config = public_ai_config(row)
+    return {"ollamaConfig": config, "aiConfig": config, "message": "Ollama 配置已保存，停止房间开启时生效"}
+
+
+@app.put("/api/admin/ollama-config")
+def update_ollama_config(
+    body: OllamaEndpointBody,
+    admin: sqlite3.Row = Depends(require_admin),
+) -> dict:
+    return _update_global_endpoint(body, admin)
+
+
+@app.put("/api/admin/ai-config")
+def update_admin_ai_config(
+    body: AiConfigBody,
+    admin: sqlite3.Row = Depends(require_admin),
+) -> dict:
+    return _update_global_endpoint(
+        OllamaEndpointBody(
+            ollama_scheme=body.ollama_scheme,
+            ollama_host=body.ollama_host,
+            ollama_port=body.ollama_port,
+            provider=body.provider,
+            model=body.model,
+        ),
+        admin,
+        provider=body.provider,
+        model=body.model,
+    )
 
 
 @app.get("/api/admin/users")
@@ -1811,13 +2107,30 @@ def create_room(body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict
     now = iso_time(utc_now())
     try:
         with database() as db:
+            global_ai = db.execute(
+                "SELECT provider, model FROM ai_config WHERE config_id=1"
+            ).fetchone()
+            default_provider = (
+                "ollama"
+                if global_ai is not None and global_ai["provider"] in {"auto", "ollama"}
+                else "rules"
+            )
+            ai_provider = body.ai_provider or (default_provider if body.mode == "pve" else "rules")
+            ai_model = body.ai_model
+            if ai_model is None:
+                ai_model = str(global_ai["model"]) if body.mode == "pve" and global_ai else ""
+            if ai_provider == "rules":
+                # Keep a manually entered model for inspection, but it must
+                # never make a rules-only room depend on Ollama.
+                ai_model = ai_model or ""
             db.execute(
-                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,config_version,status,enabled,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (body.room_id, body.name, body.description, body.scenario_id,
                  json.dumps(body.seat_limits, ensure_ascii=False),
                  json.dumps(body.seat_parameters, ensure_ascii=False), body.mode,
-                 body.ai_difficulty, 1, "stopped", int(body.enabled), now, now),
+                 body.ai_difficulty, ai_provider, ai_model, "", 1, "stopped",
+                 int(body.enabled), now, now),
             )
             row = db.execute("SELECT * FROM rooms WHERE room_id=?", (body.room_id,)).fetchone()
     except sqlite3.IntegrityError as exc:
@@ -1848,6 +2161,27 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
             if "ai_difficulty" in body.model_fields_set
             else existing["ai_difficulty"]
         )
+        provider = (
+            body.ai_provider
+            if "ai_provider" in body.model_fields_set and body.ai_provider is not None
+            else room_ai_provider(existing["ai_provider"], existing["mode"])
+        )
+        model = (
+            body.ai_model
+            if "ai_model" in body.model_fields_set and body.ai_model is not None
+            else room_ai_model(existing["ai_model"])
+        )
+        ai_changed = provider != room_ai_provider(existing["ai_provider"], existing["mode"])
+        ai_changed = ai_changed or model != room_ai_model(existing["ai_model"])
+        if ai_changed and existing["status"] != "stopped":
+            raise HTTPException(status_code=409, detail="只有停止状态才能修改房间 AI 配置")
+        if mode == "pvp" and "ai_provider" not in body.model_fields_set:
+            provider = "rules"
+            model = ""
+        if mode == "pvp":
+            provider = "rules"
+            if "ai_model" not in body.model_fields_set:
+                model = ""
         config_version = int(existing["config_version"])
         changed = (
             body.name != existing["name"]
@@ -1858,15 +2192,18 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
             or bool(body.enabled) != bool(existing["enabled"])
             or mode != existing["mode"]
             or ai_difficulty != existing["ai_difficulty"]
+            or provider != room_ai_provider(existing["ai_provider"], existing["mode"])
+            or model != room_ai_model(existing["ai_model"])
         )
         if changed:
             config_version += 1
         now = iso_time(utc_now())
         db.execute(
-            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,mode=?,ai_difficulty=?,config_version=?,enabled=?,updated_at=? WHERE room_id=?",
+            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,mode=?,ai_difficulty=?,ai_provider=?,ai_model=?,ai_resolved_model=?,config_version=?,enabled=?,updated_at=? WHERE room_id=?",
             (body.name, body.description, body.scenario_id,
              json.dumps(body.seat_limits, ensure_ascii=False),
              json.dumps(body.seat_parameters, ensure_ascii=False), mode, ai_difficulty,
+             provider, model, "" if ai_changed or mode_changed else existing["ai_resolved_model"],
              config_version, int(body.enabled), now, room_id),
         )
         row = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
@@ -1920,7 +2257,11 @@ def room_action(room_id: str, action: str, _: sqlite3.Row = Depends(require_admi
                 )
             else:
                 raise HTTPException(status_code=409, detail="上一项房间操作尚未得到兵棋服务确认")
-        if action == "start" and row["status"] not in {"preparing", "paused"}:
+        if action == "open" and row["status"] not in {"stopped", "finished"}:
+            raise HTTPException(status_code=409, detail="只有停止或已结束的房间才能进入准备阶段")
+        if action == "force-stop" and row["status"] == "stopped":
+            raise HTTPException(status_code=409, detail="房间已经停止")
+        if action == "start" and row["status"] != "preparing":
             raise HTTPException(status_code=409, detail="房间尚未进入准备阶段")
         if action == "start":
             if not room_ready_for_start(room_id):
@@ -1932,21 +2273,27 @@ def room_action(room_id: str, action: str, _: sqlite3.Row = Depends(require_admi
         if action == "pause" and row["status"] not in {"preparing", "running", "paused"}:
             raise HTTPException(status_code=409, detail="当前房间状态不能暂停")
         operation_id = secrets.token_urlsafe(18)
-        operation_state = "acknowledged" if action == "force-stop" else "pending"
+        # Every lifecycle transition is a two-phase operation.  The account
+        # service records intent; only the authoritative game server may
+        # commit the target status through the internal acknowledgement API.
+        operation_state = "pending"
         requested_revision = room_lifecycle_revision(room_id)
+        requested_config_version = int(row["config_version"])
+        global_config = db.execute(
+            "SELECT config_version FROM ai_config WHERE config_id=1"
+        ).fetchone()
+        requested_ollama_config_version = int(global_config["config_version"]) if global_config else 1
         if action in {"reset", "redeploy"} and requested_revision <= 0:
             raise HTTPException(status_code=409, detail="兵棋服务尚未发布可操作的房间版本")
         try:
             db.execute(
-                "INSERT INTO room_operations(operation_id,room_id,action,expected_status,state,requested_revision,requested_at,acknowledged_at) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (operation_id, room_id, action, actions[action], operation_state, requested_revision, now,
-                 now if operation_state == "acknowledged" else None),
+                "INSERT INTO room_operations(operation_id,room_id,action,expected_status,state,requested_revision,requested_config_version,requested_ollama_config_version,requested_at,acknowledged_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (operation_id, room_id, action, actions[action], operation_state, requested_revision,
+                 requested_config_version, requested_ollama_config_version, now, None),
             )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="上一项房间操作尚未得到兵棋服务确认") from exc
-        if action not in {"reset", "redeploy"}:
-            db.execute("UPDATE rooms SET status=?,updated_at=? WHERE room_id=?", (actions[action], now, room_id))
         updated = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
     return {
         "room": public_room(updated),
@@ -1956,10 +2303,12 @@ def room_action(room_id: str, action: str, _: sqlite3.Row = Depends(require_admi
             "expectedStatus": actions[action],
             "state": operation_state,
             "requestedRevision": requested_revision,
+            "requestedConfigVersion": requested_config_version,
+            "requestedOllamaConfigVersion": requested_ollama_config_version,
             "appliedRevision": None,
             "code": "",
             "requestedAt": now,
-            "acknowledgedAt": now if operation_state == "acknowledged" else None,
+            "acknowledgedAt": None,
         },
     }
 
@@ -2141,21 +2490,22 @@ def internal_room_status(
             raise HTTPException(status_code=404, detail="房间不存在")
         now = iso_time(utc_now())
         winner = body.winner if body.status == "finished" else ""
-        db.execute(
-            "UPDATE rooms SET status=?,winner=?,status_reason=?,updated_at=? WHERE room_id=?",
-            (body.status, winner, body.reason, now, room_id),
-        )
         pending = db.execute(
             "SELECT operation_id, action, expected_status FROM room_operations "
             "WHERE room_id=? AND state='pending' ORDER BY requested_at DESC, operation_id DESC LIMIT 1",
             (room_id,),
         ).fetchone()
-        if pending is not None and pending["action"] not in {"reset", "redeploy"}:
-            state = "acknowledged" if pending["expected_status"] == body.status else "failed"
-            db.execute(
-                "UPDATE room_operations SET state=?, acknowledged_at=? WHERE operation_id=?",
-                (state, now, pending["operation_id"]),
-            )
+        if pending is not None:
+            # A lifecycle request is committed only by the operation ACK.  A
+            # status heartbeat cannot race that transaction or turn a failed
+            # validation into a successful transition.
+            sync_presence(db, room_id, body.occupants)
+            current = next(item for item in room_rows(db, False) if item["room_id"] == room_id)
+            return {"room": public_room(current), "reason": "pending operation"}
+        db.execute(
+            "UPDATE rooms SET status=?,winner=?,status_reason=?,updated_at=? WHERE room_id=?",
+            (body.status, winner, body.reason, now, room_id),
+        )
         sync_presence(db, room_id, body.occupants)
         updated = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
     return {"room": public_room(updated), "reason": body.reason}
@@ -2172,7 +2522,7 @@ def internal_room_operation_ack(
         raise HTTPException(status_code=403, detail="内部认证失败")
     with database() as db:
         row = db.execute(
-            "SELECT operation_id,expected_status,state,requested_revision,applied_revision,result_code "
+            "SELECT operation_id,action,expected_status,state,requested_revision,applied_revision,result_code "
             "FROM room_operations WHERE operation_id=? AND room_id=?",
             (operation_id, room_id),
         ).fetchone()
@@ -2197,8 +2547,15 @@ def internal_room_operation_ack(
         )
         if body.state == "acknowledged":
             db.execute(
-                "UPDATE rooms SET status=?,winner='',status_reason='',updated_at=? WHERE room_id=?",
-                (row["expected_status"], now, room_id),
+                "UPDATE rooms SET status=?,winner='',status_reason='',ai_resolved_model=?,updated_at=? WHERE room_id=?",
+                (row["expected_status"], body.ai_resolved_model.strip(), now, room_id),
+            )
+        elif row["action"] == "open":
+            # A failed open/configuration probe must leave a stopped room and
+            # must never publish a partially applied model.
+            db.execute(
+                "UPDATE rooms SET status='stopped',winner='',ai_resolved_model='',status_reason=?,updated_at=? WHERE room_id=?",
+                (body.code or "房间配置校验失败", now, room_id),
             )
         updated = next(item for item in room_rows(db, False) if item["room_id"] == room_id)
     return {"accepted": True, "room": public_room(updated), "revision": body.revision,

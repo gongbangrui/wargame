@@ -69,6 +69,7 @@ private:
         QString side;
         bool seatReady = false;
         bool observer = false;
+        QSet<QString> observerTrajectorySelection;
         QString token;
         QString ddsTicket;
         qint64 ddsTicketExpiresAtMs = 0;
@@ -88,6 +89,7 @@ private:
         QJsonObject authoritativeRoom;
         Scenario scenario;
         QJsonArray runtimeUnits;
+        QJsonObject engineState;
         double simTime = 0.0;
         bool running = false;
         double speed = 1.0;
@@ -118,6 +120,12 @@ private:
         QString aiReplanReason;
         double aiNextPrivilegedSampleAt = 0.0;
         quint64 aiPrivilegedSampleSequence = 0;
+        QString aiSelectedProvider;
+        QString aiSelectedModel;
+        QString aiResolvedModel;
+        quint64 aiRoomConfigVersion = 1;
+        quint64 aiOllamaConfigVersion = 1;
+        QString aiFallbackReason;
     };
 
     struct MapMarkRateWindow {
@@ -173,6 +181,7 @@ private:
     void handleSetUnitName(QWebSocket* socket, const QJsonObject& payload);
     void handleShareIntel(QWebSocket* socket, const QJsonObject& payload);
     void handleMapMark(QWebSocket* socket, const QJsonObject& payload);
+    void handleSetObserverTrajectories(QWebSocket* socket, const QJsonObject& payload);
     void sendSeatDirectory(QWebSocket* socket);
     QString normalizedRole(const ClientSession& session) const;
     bool hasSeatPermission(const ClientSession& session, const QString& action) const;
@@ -209,7 +218,9 @@ private:
     void broadcastEvent(const QJsonObject& event, const QString& side = QString());
     void broadcastChat(const QJsonObject& message);
 
-    QJsonObject snapshotFor(const ClientSession& session) const;
+    QJsonObject snapshotFor(const ClientSession& session, quint64 projectedRevision = 0) const;
+    void sampleObserverTrajectories();
+    QJsonObject observerTrajectoriesFor(const ClientSession& session) const;
     QSet<QString> visibleUnitIds(const ClientSession& session) const;
     QJsonArray filteredMessages(const ClientSession& session) const;
     QJsonArray filteredChatHistory(const ClientSession& session) const;
@@ -235,6 +246,7 @@ private:
     void processRoomOperation(const QJsonObject& operation);
     void acknowledgeRoomOperation(const QString& operationId, const QString& state,
                                   quint64 revision, const QString& code = QString());
+    void clearRoomOperationTracking();
     QJsonObject roomState() const;
     void audit(const QString& category, const QJsonObject& detail = QJsonObject{});
     void writeMonitorStatus();
@@ -292,6 +304,12 @@ private:
     quint64 m_aiPrivilegedSampleSequence = 0;
     OllamaProvider* m_ollamaProvider = nullptr;
     QString m_aiProviderMode = QStringLiteral("auto");
+    QString m_aiSelectedProvider = QStringLiteral("rules");
+    QString m_aiSelectedModel;
+    QString m_aiResolvedModel;
+    quint64 m_aiRoomConfigVersion = 1;
+    quint64 m_aiOllamaConfigVersion = 1;
+    QString m_aiFallbackReason;
     QString m_aiEffectiveEngine = QStringLiteral("rules");
     QString m_aiLastFailureClass;
     QString m_aiConnectionStatus = QStringLiteral("unknown");
@@ -342,6 +360,9 @@ private:
     };
     QHash<QString, SeatOccupant> m_seats;
     QHash<QString, QSet<QString>> m_sharedIntel;
+    QHash<qint64, QSet<QString>> m_observerSelectionCache;
+    QHash<QString, QJsonArray> m_observerTrajectories;
+    double m_nextObserverTrajectorySampleAt = 0.0;
     QHash<QString, int> m_seatLimits;
     QHash<QString, QJsonObject> m_seatParameters;
     QJsonArray m_roomDirectory;
@@ -356,6 +377,15 @@ private:
     QString m_aiDifficulty = QStringLiteral("normal");
     quint64 m_configVersion = 1;
     QString m_lastRoomUpdate;
+    QString m_lifecycleOperationInFlight;
+    QString m_lifecycleOperationAction;
+    quint64 m_lifecycleOperationRequestedRevision = 0;
+    quint64 m_lifecycleOperationRequestedConfigVersion = 0;
+    quint64 m_lifecycleOperationRequestedOllamaVersion = 0;
+    QString m_lifecycleOperationAckState;
+    QString m_lifecycleOperationAckCode;
+    quint64 m_lifecycleOperationAckRevision = 0;
+    bool m_lifecycleOperationAckInFlight = false;
 };
 
 } // namespace gbr

@@ -5,7 +5,9 @@
 #include "core/UnitBase.h"
 #include "protocol/Protocol.h"
 
+#include <QCryptographicHash>
 #include <QHash>
+#include <QJsonArray>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQueue>
@@ -171,6 +173,70 @@ QString seatKind(const QString& seat) {
     return {};
 }
 
+QString ownedUnitForRole(const SimulationEngine& engine, const QString& role,
+                         const QString& authoritativeOwnedUnitId) {
+    const QString side = StateProjector::sideForRole(role);
+    UnitBase* authoritativeOwned = engine.unit(authoritativeOwnedUnitId);
+    if (!authoritativeOwnedUnitId.isEmpty()) {
+        return authoritativeOwned && authoritativeOwned->sideStr() == side
+            ? authoritativeOwnedUnitId : QString{};
+    }
+    if (!isSeat(role)) return {};
+
+    const bool commander = role.contains(QLatin1String("_commander"));
+    const QString kind = seatKind(role);
+    const int separator = role.lastIndexOf(QLatin1Char('_'));
+    const int requestedIndex = separator >= 0 ? role.mid(separator + 1).toInt() - 1 : -1;
+    int matchingIndex = 0;
+    for (const QString& id : sortedUnitIds(engine)) {
+        UnitBase* unit = engine.unit(id);
+        if (!unit || unit->sideStr() != side) continue;
+        if (commander && unit->kind() == UnitKind::CommandPost) return id;
+        if (!commander && unit->kindStr() == kind && matchingIndex++ == requestedIndex) {
+            return id;
+        }
+    }
+    return {};
+}
+
+QString publicProjectileId(const QString& authoritativeId) {
+    const QByteArray digest = QCryptographicHash::hash(
+        QByteArrayLiteral("wargame-projectile-track:") + authoritativeId.toUtf8(),
+        QCryptographicHash::Sha256).toHex();
+    return QStringLiteral("track-%1").arg(QString::fromLatin1(digest.left(24)));
+}
+
+QJsonObject projectileForWire(const QJsonObject& source, bool exposeAuthoritativeId,
+                              bool exposeAttacker, bool exposeTarget,
+                              double mapWidth, double mapHeight) {
+    static const QStringList fields{
+        QStringLiteral("side"), QStringLiteral("headingRad"), QStringLiteral("speed"),
+        QStringLiteral("age"), QStringLiteral("lifetime"), QStringLiteral("active"),
+        QStringLiteral("terminalReason"), QStringLiteral("terminalAge"),
+        QStringLiteral("resultSettled"), QStringLiteral("threatRadius")};
+    QJsonObject projected;
+    const QString authoritativeId = source.value(QStringLiteral("id")).toString();
+    projected[QStringLiteral("id")] = exposeAuthoritativeId
+        ? authoritativeId : publicProjectileId(authoritativeId);
+    for (const QString& field : fields) {
+        if (source.contains(field)) projected.insert(field, source.value(field));
+    }
+
+    QJsonArray position = source.value(QStringLiteral("position")).toArray();
+    if (position.size() >= 2) {
+        position[0] = std::clamp(position.at(0).toDouble(), 0.0, mapWidth);
+        position[1] = std::clamp(position.at(1).toDouble(), 0.0, mapHeight);
+    }
+    projected[QStringLiteral("position")] = position;
+    if (exposeAttacker && source.contains(QStringLiteral("attackerId"))) {
+        projected[QStringLiteral("attackerId")] = source.value(QStringLiteral("attackerId"));
+    }
+    if (exposeTarget && source.contains(QStringLiteral("targetId"))) {
+        projected[QStringLiteral("targetId")] = source.value(QStringLiteral("targetId"));
+    }
+    return projected;
+}
+
 QJsonObject observedEnemyRuntime(const QJsonObject& source) {
     QJsonObject projected;
     for (const QString& field : {QStringLiteral("id"), QStringLiteral("callsign"),
@@ -184,6 +250,96 @@ QJsonObject observedEnemyRuntime(const QJsonObject& source) {
     return projected;
 }
 
+QJsonObject actionCapability(bool enabled) {
+    return QJsonObject{{QStringLiteral("visible"), true},
+                       {QStringLiteral("enabled"), enabled}};
+}
+
+bool canProjectActions(const SimulationEngine& engine, const QString& role,
+                       const QString& ownedUnitId, const UnitBase* unit,
+                       quint64 stateRevision) {
+    if (!unit || !unit->alive()) return false;
+    if (role == QLatin1String("director")) return true;
+    const QString side = StateProjector::sideForRole(role);
+    if (side.isEmpty() || unit->sideStr() != side) return false;
+    if (!isSeat(role)) return true;
+
+    const QString resolvedOwned = ownedUnitForRole(engine, role, ownedUnitId);
+    if (resolvedOwned.isEmpty()) return false;
+    if (!role.contains(QLatin1String("_commander"))) {
+        return unit->id() == resolvedOwned;
+    }
+    // The server grants commander control along the same directed link used
+    // by command validation. A unit may be visible through received data while
+    // still being non-controllable, so this check intentionally is stricter
+    // than visibleUnitIds().
+    return unit->id() == resolvedOwned
+        || directedReachable(engine, resolvedOwned, unit->id(), stateRevision,
+                             projectionCacheKey(role, resolvedOwned));
+}
+
+QJsonObject actionCapabilities(const SimulationEngine& engine, const QString& role,
+                               const QString& ownedUnitId, const UnitBase* unit,
+                               const QJsonObject& runtime, quint64 stateRevision) {
+    QJsonObject actions;
+    if (!canProjectActions(engine, role, ownedUnitId, unit, stateRevision)) return actions;
+
+    const bool movable = runtime.value(QStringLiteral("movable")).toBool();
+    const bool serviceRequested = runtime.value(QStringLiteral("serviceRequested")).toBool();
+    const bool serviceEligible = runtime.value(QStringLiteral("serviceEligible")).toBool();
+    const double fuel = runtime.value(QStringLiteral("fuelRemaining")).toDouble();
+    const bool hasFuel = !movable || fuel > 1e-9;
+    const auto ability = [&runtime](const QString& name) {
+        return runtime.value(QStringLiteral("abilities")).toObject()
+            .value(name).toObject();
+    };
+    const auto available = [&ability](const QString& name) {
+        return ability(name).value(QStringLiteral("available")).toBool(false);
+    };
+    const QString kind = runtime.value(QStringLiteral("kind")).toString();
+    const bool attack = kind == QLatin1String("attackuav");
+    const bool hasAmmo = runtime.value(QStringLiteral("ammoRemaining")).toInt() > 0;
+    const bool cooldownReady = runtime.value(QStringLiteral("cooldownRemaining")).toDouble()
+        <= 1e-9;
+    const bool weaponReady = hasAmmo && cooldownReady && !serviceRequested;
+
+    if (movable) {
+        actions.insert(QStringLiteral("moveTo"), actionCapability(hasFuel && !serviceRequested));
+        actions.insert(QStringLiteral("withdraw"), actionCapability(hasFuel && !serviceRequested));
+        actions.insert(QStringLiteral("setSpeed"), actionCapability(hasFuel && !serviceRequested));
+        actions.insert(QStringLiteral("service"), actionCapability(serviceEligible));
+        actions.insert(QStringLiteral("cancelService"), actionCapability(serviceRequested));
+    }
+    if (unit->countermeasureState().supported()) {
+        actions.insert(QStringLiteral("activateCountermeasure"),
+                       actionCapability(available(QStringLiteral("countermeasure"))));
+    }
+    if (unit->scanState().supported()) {
+        actions.insert(QStringLiteral("activateScan"),
+                       actionCapability(available(QStringLiteral("scan"))));
+    }
+
+    const QJsonObject subsystems = runtime.value(QStringLiteral("subsystems")).toObject();
+    const bool damaged = subsystems.value(QStringLiteral("sensor")).toDouble(1.0) < 1.0 - 1e-9
+        || subsystems.value(QStringLiteral("comms")).toDouble(1.0) < 1.0 - 1e-9
+        || subsystems.value(QStringLiteral("mobility")).toDouble(1.0) < 1.0 - 1e-9
+        || subsystems.value(QStringLiteral("weapon")).toDouble(1.0) < 1.0 - 1e-9;
+    const QJsonObject repair = ability(QStringLiteral("fieldRepair"));
+    const bool repairReady = damaged
+        && repair.value(QStringLiteral("available")).toBool(false);
+    actions.insert(QStringLiteral("attemptFieldRepair"), actionCapability(repairReady));
+
+    if (attack) {
+        actions.insert(QStringLiteral("engageTarget"), actionCapability(weaponReady));
+        actions.insert(QStringLiteral("assignTarget"), actionCapability(weaponReady));
+        actions.insert(QStringLiteral("attackAt"), actionCapability(weaponReady && hasFuel));
+        actions.insert(QStringLiteral("setFlightPlan"), actionCapability(hasFuel));
+        actions.insert(QStringLiteral("cancelEngagement"), actionCapability(true));
+        actions.insert(QStringLiteral("setRoe"), actionCapability(true));
+    }
+    return actions;
+}
+
 QJsonObject observerRuntime(const QJsonObject& source) {
     static const QStringList fields{
         QStringLiteral("id"), QStringLiteral("callsign"), QStringLiteral("kind"),
@@ -195,6 +351,7 @@ QJsonObject observerRuntime(const QJsonObject& source) {
         QStringLiteral("serviceRequested"), QStringLiteral("serviceProgress"),
         QStringLiteral("ammoRemaining"), QStringLiteral("ammoCapacity"),
         QStringLiteral("cooldownRemaining"), QStringLiteral("cooldownSec"),
+        QStringLiteral("activeProjectileCount"),
         QStringLiteral("fuelRemaining"), QStringLiteral("fuelCapacity"),
         QStringLiteral("turnaroundProgress")};
     QJsonObject projected;
@@ -345,10 +502,6 @@ QSet<QString> friendlyVisibleUnitIdsImpl(const SimulationEngine& engine, const Q
     const QString side = StateProjector::sideForRole(role);
     if (side.isEmpty()) return ids;
     const bool commander = role.contains(QLatin1String("_commander"));
-    const QString ownedKind = seatKind(role);
-    int ownedIndex = -1;
-    const int underscore = role.lastIndexOf(QLatin1Char('_'));
-    if (underscore >= 0) ownedIndex = role.mid(underscore + 1).toInt() - 1;
     const QStringList allIds = sortedUnitIds(engine);
     if (!isSeat(role)) {
         // Legacy faction snapshots are retained only for replay/import tests.
@@ -360,24 +513,7 @@ QSet<QString> friendlyVisibleUnitIdsImpl(const SimulationEngine& engine, const Q
         }
         return ids;
     }
-    QString ownedId = ownedUnitId;
-    UnitBase* authoritativeOwned = engine.unit(ownedId);
-    if (!ownedId.isEmpty() && (!authoritativeOwned || authoritativeOwned->sideStr() != side)) {
-        return ids;
-    }
-    if (ownedId.isEmpty()) {
-        int matchingIndex = 0;
-        for (const QString& id : allIds) {
-            UnitBase* unit = engine.unit(id);
-            if (!unit || unit->sideStr() != side) continue;
-            if (commander) {
-                if (unit->kind() == UnitKind::CommandPost) { ownedId = id; break; }
-            } else if (unit->kindStr() == ownedKind && matchingIndex++ == ownedIndex) {
-                ownedId = id;
-                break;
-            }
-        }
-    }
+    const QString ownedId = ownedUnitForRole(engine, role, ownedUnitId);
     if (ownedId.isEmpty()) return ids;
 
     ids.insert(ownedId);
@@ -404,6 +540,30 @@ QSet<QString> friendlyVisibleUnitIdsImpl(const SimulationEngine& engine, const Q
     return ids;
 }
 
+QSet<QString> scanVisibleTargetIds(const SimulationEngine& engine, const QString& role,
+                                   const QString& ownedUnitId, quint64 stateRevision) {
+    QSet<QString> ids;
+    if (hasFullVisibility(role)) return ids;
+    const QString side = StateProjector::sideForRole(role);
+    if (side.isEmpty()) return ids;
+    const QString recipientId = ownedUnitForRole(engine, role, ownedUnitId);
+    const QString cacheKey = projectionCacheKey(role, recipientId);
+    for (const QJsonValue& value : engine.activeScanContacts()) {
+        if (!value.isObject()) continue;
+        const QJsonObject contact = value.toObject();
+        if (contact.value(QStringLiteral("side")).toString() != side) continue;
+        const QString scannerId = contact.value(QStringLiteral("scannerId")).toString();
+        const QString targetId = contact.value(QStringLiteral("targetId")).toString();
+        if (!engine.unit(scannerId) || !engine.unit(targetId)) continue;
+        const bool eligible = !isSeat(role) || scannerId == recipientId
+            || (!recipientId.isEmpty()
+                && directedReachable(engine, scannerId, recipientId,
+                                     stateRevision, cacheKey));
+        if (eligible) ids.insert(targetId);
+    }
+    return ids;
+}
+
 QSet<QString> visibleUnitIdsImpl(const SimulationEngine& engine, const QString& role,
                                  const QString& ownedUnitId, quint64 stateRevision) {
     QSet<QString> ids = friendlyVisibleUnitIdsImpl(engine, role, ownedUnitId, stateRevision);
@@ -425,7 +585,68 @@ QSet<QString> visibleUnitIdsImpl(const SimulationEngine& engine, const QString& 
             if (!targetId.isEmpty() && engine.unit(targetId)) ids.insert(targetId);
         }
     }
+    ids.unite(scanVisibleTargetIds(engine, role, ownedUnitId, stateRevision));
     return ids;
+}
+
+QJsonArray projectedProjectiles(const SimulationEngine& engine, const QString& role,
+                                const QSet<QString>& visibleIds,
+                                const QSet<QString>& friendlyVisibleIds) {
+    const QString side = StateProjector::sideForRole(role);
+    const bool fullVisibility = hasFullVisibility(role);
+    const bool observer = isObserver(role);
+    const double mapWidth = std::max(0.0, engine.scenario().map.widthMeters);
+    const double mapHeight = std::max(0.0, engine.scenario().map.heightMeters);
+    QList<QJsonObject> output;
+
+    for (const QJsonValue& value : engine.projectilesSnapshot()) {
+        if (!value.isObject()) continue;
+        const QJsonObject projectile = value.toObject();
+        const QString projectileSide = projectile.value(QStringLiteral("side")).toString();
+        const QJsonArray position = projectile.value(QStringLiteral("position")).toArray();
+        if (position.size() < 2) continue;
+        const double x = position.at(0).toDouble();
+        const double y = position.at(1).toDouble();
+
+        bool visible = observer || fullVisibility || projectileSide == side;
+        if (!visible && !side.isEmpty()) {
+            for (const QString& sensorId : friendlyVisibleIds) {
+                const UnitBase* sensor = engine.unit(sensorId);
+                if (!sensor || !sensor->alive() || sensor->sideStr() != side) continue;
+                if (std::hypot(sensor->pos().x - x, sensor->pos().y - y)
+                    <= std::max(0.0, sensor->detectRange())) {
+                    visible = true;
+                    break;
+                }
+            }
+            const QString targetId = projectile.value(QStringLiteral("targetId")).toString();
+            const UnitBase* target = engine.unit(targetId);
+            const double threatRadius = projectile.value(QStringLiteral("threatRadius"))
+                                            .toDouble(SimulationEngine::kProjectileThreatRadiusMeters);
+            if (!visible && target && target->sideStr() == side
+                && std::hypot(target->pos().x - x, target->pos().y - y)
+                    <= std::max(0.0, threatRadius)) {
+                visible = true;
+            }
+        }
+        if (!visible) continue;
+
+        const QString attackerId = projectile.value(QStringLiteral("attackerId")).toString();
+        const QString targetId = projectile.value(QStringLiteral("targetId")).toString();
+        output.append(projectileForWire(
+            projectile, fullVisibility,
+            fullVisibility || (!observer && visibleIds.contains(attackerId)),
+            fullVisibility || (!observer && visibleIds.contains(targetId)),
+            mapWidth, mapHeight));
+    }
+    std::sort(output.begin(), output.end(), [](const QJsonObject& left,
+                                               const QJsonObject& right) {
+        return left.value(QStringLiteral("id")).toString()
+            < right.value(QStringLiteral("id")).toString();
+    });
+    QJsonArray projected;
+    for (const QJsonObject& projectile : output) projected.append(projectile);
+    return projected;
 }
 
 } // namespace
@@ -558,7 +779,8 @@ QJsonObject StateProjector::snapshotFor(const SimulationEngine& engine, const QS
                                         quint64 stateRevision,
                                         const QJsonObject& roomState,
                                         const QSet<QString>& explicitlyShared,
-                                        const QString& ownedUnitId) {
+                                        const QString& ownedUnitId,
+                                        const QJsonObject& observerTrajectories) {
     if (isObserver(role)) {
         QStringList ids = sortedUnitIds(engine);
         QJsonArray runtime;
@@ -566,13 +788,19 @@ QJsonObject StateProjector::snapshotFor(const SimulationEngine& engine, const QS
             const QJsonObject projected = observerRuntime(engine.unitSnapshot(id));
             if (!projected.isEmpty()) runtime.append(projected);
         }
-        return QJsonObject{{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+        QJsonObject snapshot{{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
                            {QStringLiteral("stateRevision"),
                             static_cast<qint64>(stateRevision)},
                            {QStringLiteral("scenario"), observerScenario(engine)},
                            {QStringLiteral("units"), runtime},
+                           {QStringLiteral("projectiles"),
+                            projectedProjectiles(engine, role, {}, {})},
                            {QStringLiteral("roomState"),
                             observerRoomState(roomState, stateRevision)}};
+        if (!observerTrajectories.isEmpty()) {
+            snapshot[QStringLiteral("observerTrajectories")] = observerTrajectories;
+        }
+        return snapshot;
     }
     QSet<QString> visibleIds = visibleUnitIdsImpl(engine, role, ownedUnitId, stateRevision);
     for (const QString& id : explicitlyShared) {
@@ -583,12 +811,22 @@ QJsonObject StateProjector::snapshotFor(const SimulationEngine& engine, const QS
 
     QHash<QString, QJsonObject> runtimeById;
     for (const QJsonValue& value : engine.collectAllUnitsSnapshot()) {
-        const QJsonObject runtime = value.toObject();
+        QJsonObject runtime = value.toObject();
+        runtime.remove(QStringLiteral("recentPath"));
         const QString id = runtime.value(QStringLiteral("id")).toString();
         if (!visibleIds.contains(id)) continue;
         const bool friendly = runtime.value(QStringLiteral("side")).toString() == side;
-        runtimeById.insert(id, fullVisibility || friendly
-                                  ? runtime : observedEnemyRuntime(runtime));
+        if (fullVisibility || friendly) {
+            const UnitBase* unit = engine.unit(id);
+            const QJsonObject capabilities = actionCapabilities(
+                engine, role, ownedUnitId, unit, runtime, stateRevision);
+            if (!capabilities.isEmpty()) {
+                runtime.insert(QStringLiteral("actions"), capabilities);
+            }
+            runtimeById.insert(id, runtime);
+        } else {
+            runtimeById.insert(id, observedEnemyRuntime(runtime));
+        }
     }
 
     Scenario filtered = engine.scenario();
@@ -635,6 +873,8 @@ QJsonObject StateProjector::snapshotFor(const SimulationEngine& engine, const QS
     runtimeIds.sort();
     QJsonArray runtime;
     for (const QString& id : runtimeIds) runtime.append(runtimeById.value(id));
+    const QSet<QString> friendlyVisibleIds = friendlyVisibleUnitIdsImpl(
+        engine, role, ownedUnitId, stateRevision);
     QJsonObject projectedRoomState = roomState;
     if (isSeat(role) && !role.contains(QLatin1String("_commander"))) {
         QString subordinateUnitId = ownedUnitId;
@@ -673,6 +913,9 @@ QJsonObject StateProjector::snapshotFor(const SimulationEngine& engine, const QS
                        {QStringLiteral("stateRevision"), static_cast<qint64>(stateRevision)},
                        {QStringLiteral("scenario"), ScenarioIo::toJson(filtered)},
                        {QStringLiteral("units"), runtime},
+                       {QStringLiteral("projectiles"),
+                        projectedProjectiles(engine, role, visibleIds,
+                                             friendlyVisibleIds)},
                        {QStringLiteral("messages"),
                         filteredMessagesImpl(engine, role, ownedUnitId, stateRevision)},
                        {QStringLiteral("roomState"), projectedRoomState}};

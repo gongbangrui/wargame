@@ -54,8 +54,8 @@ TEST(AttackPower, ParseMissingDefaultsTo100) {
     auto parsed = ScenarioIo::fromJson(j);
     ASSERT_EQ(parsed.units.size(), 1u);
     EXPECT_DOUBLE_EQ(parsed.units[0].attackPower, 100.0);
-    EXPECT_DOUBLE_EQ(parsed.units[0].damageMin, 100.0);
-    EXPECT_DOUBLE_EQ(parsed.units[0].damageMax, 100.0);
+    EXPECT_DOUBLE_EQ(parsed.units[0].damageMin, 80.0);
+    EXPECT_DOUBLE_EQ(parsed.units[0].damageMax, 110.0);
     EXPECT_DOUBLE_EQ(parsed.units[0].optimalRange, parsed.units[0].attackRange);
 }
 
@@ -92,25 +92,28 @@ TEST(AttackPower, MalformedV2WeaponFieldsAreRejectedAtParsingBoundary) {
 }
 
 TEST(AttackPower, AttackUavAppliesConfiguredDamage) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& unit : scenario.units) {
+        unit.schedule.clear();
+        if (unit.id == QLatin1String("red_a1")) {
+            unit.hitProbability = 1.0;
+            unit.minAttackRange = 0.0;
+            unit.damageMin = 250.0;
+            unit.damageMax = 250.0;
+        }
+    }
     SimulationEngine engine;
-    engine.loadDefaultScenario();
+    ASSERT_TRUE(engine.setScenario(scenario));
     auto* atk = dynamic_cast<AttackUAV*>(engine.unit("red_a1"));
     auto* tgt = engine.unit("blue_r1");
     ASSERT_NE(atk, nullptr);
     ASSERT_NE(tgt, nullptr);
 
-    // Set attackPower directly on the unit (simulating QML upsert)
-    UnitBase::Params p = atk->params();
-    p.attackPower = 250;
-    atk->setParams(p);
-
     double hpBefore = tgt->hp();
-    // Move attacker onto target so stepCombat fires
     atk->setPosition(tgt->pos());
     engine.command("engageTarget", QVariantMap{{"attackerId", "red_a1"},
                                                 {"targetId", "blue_r1"}});
 
-    // Force one tick so attackRange check + combat fire happens
     engine.stepOnce(2.0);
     EXPECT_LT(tgt->hp(), hpBefore);
 }
@@ -188,6 +191,7 @@ TEST(AttackPower, ReloadCompletesWithoutAutomaticFollowUpShot) {
             unit.cooldownSec = 4.0;
             unit.damageMin = 20.0;
             unit.damageMax = 20.0;
+            unit.minAttackRange = 0.0;
         }
         if (unit.id == QLatin1String("blue_cp")) unit.maxHp = 500.0;
     }
@@ -225,7 +229,7 @@ TEST(AttackPower, ReloadCompletesWithoutAutomaticFollowUpShot) {
     EXPECT_DOUBLE_EQ(target->hp(), 460.0);
 }
 
-TEST(AttackPower, MissKeepsTargetUntilAmmoIsExhausted) {
+TEST(AttackPower, GeometryContactCanMissAccordingToHitProbability) {
     Scenario scenario = ScenarioIo::defaultScenario();
     for (ScenarioUnit& unit : scenario.units) {
         unit.schedule.clear();
@@ -234,6 +238,7 @@ TEST(AttackPower, MissKeepsTargetUntilAmmoIsExhausted) {
             unit.ammoCapacity = 2;
             unit.hitProbability = 0.0;
             unit.cooldownSec = 0.1;
+            unit.minAttackRange = 0.0;
         }
     }
     SimulationEngine engine;
@@ -249,18 +254,9 @@ TEST(AttackPower, MissKeepsTargetUntilAmmoIsExhausted) {
                     {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
 
     engine.stepOnce(0.1);
-    EXPECT_EQ(attacker->targetId(), QStringLiteral("blue_r1"));
     EXPECT_EQ(attacker->ammoRemaining(), 1);
-    engine.stepOnce(0.1);
-    EXPECT_DOUBLE_EQ(attacker->cooldownRemaining(), 0.0);
-    ASSERT_TRUE(engine.executeCommand(
-        QStringLiteral("engageTarget"),
-        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
-                    {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
-    engine.stepOnce(0.1);
-    EXPECT_TRUE(attacker->targetId().isEmpty());
-    EXPECT_EQ(attacker->ammoRemaining(), 0);
-    EXPECT_DOUBLE_EQ(target->hp(), target->maxHp());
+    EXPECT_TRUE(target->alive());
+    EXPECT_EQ(attacker->lastShotOutcome(), QStringLiteral("miss"));
 }
 
 TEST(AttackPower, MinimumRangeClearsAndHoldsUntilExplicitReassignment) {
@@ -341,6 +337,9 @@ TEST(AttackPower, MinimumRangeClearsAndHoldsUntilExplicitReassignment) {
                     {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
     engine.stepOnce(0.05);
     EXPECT_EQ(attacker->ammoRemaining(), ammoBefore - 1);
+    for (int i = 0; i < 100 && attacker->hasActiveProjectile(); ++i) {
+        engine.stepOnce(0.05);
+    }
     EXPECT_DOUBLE_EQ(target->hp(), target->maxHp() - 10.0);
 }
 
@@ -389,6 +388,7 @@ TEST(AttackPower, WeaponReconfigurationPreservesShotSequence) {
             unit.commRange = 20000.0;
             unit.cooldownSec = 0.0;
             unit.hitProbability = 1.0;
+            unit.minAttackRange = 0.0;
         }
     }
     SimulationEngine engine;

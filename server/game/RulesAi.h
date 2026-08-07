@@ -35,10 +35,26 @@ struct AiObservedTarget {
     bool visible = false;
     bool privileged = false;
     bool commandPost = false;
+    double hp = 100.0;
+    double maxHp = 100.0;
 
     QJsonObject toJson() const;
     static bool fromJson(const QJsonObject& object, AiObservedTarget* target,
                          QString* error = nullptr);
+};
+
+struct AiObservedProjectile {
+    QString projectileId;
+    QString side;
+    QString targetId;
+    double x = 0.0;
+    double y = 0.0;
+    double headingRad = 0.0;
+    double speed = 0.0;
+    double age = 0.0;
+    double lifetime = 0.0;
+    bool active = true;
+    double expectedDamage = 0.0;
 };
 
 struct AiSeatState {
@@ -69,10 +85,34 @@ struct AiSeatState {
     int ammoRemaining = -1;
     int ammoCapacity = -1;
     double cooldownRemaining = 0.0;
+    double minimumAttackRange = -1.0;
+    double optimalAttackRange = -1.0;
+    double maximumAttackRange = -1.0;
     double fuelRemaining = -1.0;
     double fuelCapacity = -1.0;
+    double fuelBurnRate = 0.0;
+    double estimatedFuelEndurance = -1.0;
+    double lowestSubsystemHealth = 1.0;
+    bool serviceEligible = false;
+    bool serviceRequested = false;
+    double serviceProgress = 0.0;
+    bool commandPostAlive = false;
+    double commandPostX = 0.0;
+    double commandPostY = 0.0;
+    bool countermeasureSupported = false;
+    bool countermeasureAvailable = false;
+    double countermeasureRange = 0.0;
+    double countermeasureCooldownRemaining = 0.0;
+    int countermeasureRemaining = 0;
+    int countermeasureCapacity = 0;
+    bool scanSupported = false;
+    bool scanAvailable = false;
+    double scanCooldownRemaining = 0.0;
+    bool repairAvailable = false;
+    double repairCooldownRemaining = 0.0;
     bool communicationAvailable = true;
     QList<AiObservedTarget> visibleTargets;
+    QList<AiObservedProjectile> visibleProjectiles;
 };
 
 struct AiKnowledgeState {
@@ -119,7 +159,8 @@ public:
                                              const QList<AiSeatState>& seats,
                                              double now,
                                              double mapWidth = 20000.0,
-                                             double mapHeight = 15000.0);
+                                             double mapHeight = 15000.0,
+                                             const AiKnowledgeState* knowledge = nullptr);
 };
 
 }

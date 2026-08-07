@@ -22,6 +22,9 @@ Text {
             play: "▶", pause: "Ⅱ", stop: "■", edit: "✎",
             delete: "⌫", save: "▣", load: "↥", send: "➤", dot: "•",
             history: "◷", download: "⇩", table: "▦", locate: "⌖",
+            missile: "➤", countermeasure: "✦", scan: "◎", repair: "✚",
+            service: "▰", fuel: "◒", "return": "↩", menu: "☰",
+            unit: "▦", command: "⌁",
             "chevron-left": "‹", "chevron-right": "›"
         }
         return glyphs[root.name] || glyphs.dot

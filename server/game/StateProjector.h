@@ -35,7 +35,8 @@ public:
     static QJsonObject snapshotFor(const SimulationEngine& engine, const QString& role,
                                    quint64 stateRevision, const QJsonObject& roomState,
                                    const QSet<QString>& explicitlyShared = {},
-                                   const QString& ownedUnitId = {});
+                                   const QString& ownedUnitId = {},
+                                   const QJsonObject& observerTrajectories = {});
 };
 
 } // namespace gbr

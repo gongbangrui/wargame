@@ -5,6 +5,7 @@
 #include "protocol/StateDelta.h"
 
 #include <QJsonArray>
+#include <QStringList>
 
 using namespace gbr;
 
@@ -134,6 +135,7 @@ TEST(ProtocolTest, RejectsFractionalVersionsAndRevisions) {
                     {QStringLiteral("stateRevision"), 1},
                     {QStringLiteral("scenario"), QJsonObject{}},
                     {QStringLiteral("units"), QJsonArray{}},
+                    {QStringLiteral("projectiles"), QJsonArray{}},
                     {QStringLiteral("messages"), QJsonArray{}},
                     {QStringLiteral("roomState"), QJsonObject{}}});
     snapshot[QStringLiteral("schemaVersion")] = 2.5;
@@ -324,6 +326,33 @@ TEST(ProtocolTest, RejectsMalformedTypedCommandAndTransferContracts) {
     EXPECT_EQ(transfer.requestRevision, 11);
 }
 
+TEST(ProtocolTest, AbilityAndServiceCommandsRequireAValidUnitId) {
+    const QStringList actions{
+        QStringLiteral("activateCountermeasure"), QStringLiteral("activateScan"),
+        QStringLiteral("attemptFieldRepair"), QStringLiteral("cancelService")};
+    for (const QString& action : actions) {
+        const auto valid = Protocol::makeClientEnvelope(
+            QStringLiteral("command"), QStringLiteral("message-") + action,
+            QJsonObject{{QStringLiteral("commandId"), QStringLiteral("command-") + action},
+                        {QStringLiteral("action"), action},
+                        {QStringLiteral("stateRevision"), 9},
+                        {QStringLiteral("args"),
+                         QJsonObject{{QStringLiteral("unitId"),
+                                      QStringLiteral("red_a1")}}}});
+        EXPECT_TRUE(Protocol::validateClientEnvelope(valid).valid)
+            << action.toStdString();
+
+        QJsonObject invalidPayload = valid.value(QStringLiteral("payload")).toObject();
+        invalidPayload[QStringLiteral("args")] = QJsonObject{
+            {QStringLiteral("unitId"), QString{}}};
+        const auto invalid = Protocol::makeClientEnvelope(
+            QStringLiteral("command"), QStringLiteral("invalid-") + action,
+            invalidPayload);
+        EXPECT_FALSE(Protocol::validateClientEnvelope(invalid).valid)
+            << action.toStdString();
+    }
+}
+
 TEST(ProtocolTest, RejectsExcessivelyNestedJson) {
     QJsonValue nested = QJsonObject{};
     for (int i = 0; i < Protocol::MaxJsonDepth + 2; ++i) {
@@ -438,6 +467,7 @@ TEST(ProtocolTest, RejectsMalformedLifecycleSeatDeploymentIntelAndCommandProject
                     {QStringLiteral("stateRevision"), 1},
                     {QStringLiteral("scenario"), QJsonObject{}},
                     {QStringLiteral("units"), QJsonArray{}},
+                    {QStringLiteral("projectiles"), QJsonArray{}},
                     {QStringLiteral("messages"), QJsonArray{}},
                     {QStringLiteral("roomState"),
                      QJsonObject{{QStringLiteral("phase"), 7}}}});
@@ -483,6 +513,7 @@ TEST(ProtocolTest, RejectsUnknownLifecyclePhase) {
                     {QStringLiteral("stateRevision"), 1},
                     {QStringLiteral("scenario"), QJsonObject{{QStringLiteral("units"), QJsonArray{}}}},
                     {QStringLiteral("units"), QJsonArray{}},
+                    {QStringLiteral("projectiles"), QJsonArray{}},
                     {QStringLiteral("messages"), QJsonArray{}},
                     {QStringLiteral("roomState"),
                      QJsonObject{{QStringLiteral("phase"), QStringLiteral("bogus")}}}});
@@ -567,6 +598,47 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
 
 namespace {
 
+QJsonObject protocolProjectile(const QString& id = QStringLiteral("missile_1")) {
+    return {{QStringLiteral("id"), id},
+            {QStringLiteral("side"), QStringLiteral("red")},
+            {QStringLiteral("position"), QJsonArray{500.0, 400.0, 120.0}},
+            {QStringLiteral("headingRad"), 0.25},
+            {QStringLiteral("speed"), 420.0},
+            {QStringLiteral("age"), 1.0},
+            {QStringLiteral("lifetime"), 16.0},
+            {QStringLiteral("active"), true},
+            {QStringLiteral("terminalReason"), QString{}},
+            {QStringLiteral("terminalAge"), 0.0},
+            {QStringLiteral("resultSettled"), false},
+            {QStringLiteral("threatRadius"), 1300.0},
+            {QStringLiteral("attackerId"), QStringLiteral("red_a1")},
+            {QStringLiteral("targetId"), QStringLiteral("blue_a1")}};
+}
+
+QJsonObject protocolProjectileSnapshot(qint64 revision = 1) {
+    const QJsonArray units{
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("blue_a1")},
+                    {QStringLiteral("side"), QStringLiteral("blue")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("red_a1")},
+                    {QStringLiteral("side"), QStringLiteral("red")}}};
+    return {{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+            {QStringLiteral("stateRevision"), revision},
+            {QStringLiteral("scenario"),
+             QJsonObject{{QStringLiteral("schemaVersion"), 3},
+                         {QStringLiteral("map"),
+                          QJsonObject{{QStringLiteral("name"), QStringLiteral("test")},
+                                      {QStringLiteral("widthMeters"), 1000.0},
+                                      {QStringLiteral("heightMeters"), 800.0}}},
+                         {QStringLiteral("units"), units}}},
+            {QStringLiteral("units"), units},
+            {QStringLiteral("projectiles"), QJsonArray{protocolProjectile()}},
+            {QStringLiteral("messages"), QJsonArray{}},
+            {QStringLiteral("roomState"),
+             QJsonObject{{QStringLiteral("scenarioRevision"), 1},
+                         {QStringLiteral("stateRevision"), revision},
+                         {QStringLiteral("simTime"), 1.0}}}};
+}
+
 QJsonObject observerProtocolRuntimeUnit() {
     return {{QStringLiteral("id"), QStringLiteral("red_a1")},
             {QStringLiteral("callsign"), QStringLiteral("Red Attack 1")},
@@ -595,6 +667,7 @@ QJsonObject observerProtocolRuntimeUnit() {
             {QStringLiteral("ammoCapacity"), 4},
             {QStringLiteral("cooldownRemaining"), 0.0},
             {QStringLiteral("cooldownSec"), 4.0},
+            {QStringLiteral("activeProjectileCount"), 0},
             {QStringLiteral("fuelRemaining"), 1200.0},
             {QStringLiteral("fuelCapacity"), 1800.0},
             {QStringLiteral("turnaroundProgress"), 0.0}};
@@ -645,6 +718,7 @@ QJsonObject observerProtocolSnapshot() {
                      {QStringLiteral("units"),
                       QJsonArray{observerProtocolScenarioUnit()}}}},
         {QStringLiteral("units"), QJsonArray{observerProtocolRuntimeUnit()}},
+        {QStringLiteral("projectiles"), QJsonArray{}},
         {QStringLiteral("roomState"), roomState}};
 }
 
@@ -779,6 +853,108 @@ TEST(ProtocolTest, ObserverSnapshotAndDeltaRejectMalformedNestedFields) {
                      QStringLiteral("delta"), 2, delta)).valid);
 }
 
+TEST(ProtocolTest, SchemaThreeSnapshotRequiresValidProjectiles) {
+    const auto validate = [](const QJsonObject& payload) {
+        return Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+            QStringLiteral("snapshot"), 1, payload));
+    };
+
+    const QJsonObject valid = protocolProjectileSnapshot();
+    ASSERT_TRUE(validate(valid).valid);
+
+    QJsonObject missing = valid;
+    missing.remove(QStringLiteral("projectiles"));
+    EXPECT_FALSE(validate(missing).valid);
+
+    QJsonObject wrongType = valid;
+    wrongType[QStringLiteral("projectiles")] = QJsonObject{};
+    EXPECT_FALSE(validate(wrongType).valid);
+
+    QJsonObject malformed = valid;
+    QJsonObject missingSpeed = protocolProjectile();
+    missingSpeed.remove(QStringLiteral("speed"));
+    malformed[QStringLiteral("projectiles")] = QJsonArray{missingSpeed};
+    EXPECT_FALSE(validate(malformed).valid);
+
+    QJsonObject duplicate = valid;
+    duplicate[QStringLiteral("projectiles")] =
+        QJsonArray{protocolProjectile(), protocolProjectile()};
+    EXPECT_FALSE(validate(duplicate).valid);
+
+    QJsonArray tooMany;
+    for (int index = 0; index <= Protocol::MaxProjectiles; ++index) {
+        tooMany.append(protocolProjectile(QStringLiteral("missile_%1").arg(index)));
+    }
+    QJsonObject oversized = valid;
+    oversized[QStringLiteral("projectiles")] = tooMany;
+    EXPECT_FALSE(validate(oversized).valid);
+}
+
+TEST(ProtocolTest, ProjectileSnapshotRejectsBoundsAndReferenceSideViolations) {
+    const auto validate = [](const QJsonObject& payload) {
+        return Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+            QStringLiteral("snapshot"), 1, payload)).valid;
+    };
+
+    QJsonObject outOfBounds = protocolProjectileSnapshot();
+    QJsonObject projectile = protocolProjectile();
+    projectile[QStringLiteral("position")] = QJsonArray{1000.01, 400.0, 120.0};
+    outOfBounds[QStringLiteral("projectiles")] = QJsonArray{projectile};
+    EXPECT_FALSE(validate(outOfBounds));
+
+    QJsonObject wrongAttackerSide = protocolProjectileSnapshot();
+    projectile = protocolProjectile();
+    projectile[QStringLiteral("attackerId")] = QStringLiteral("blue_a1");
+    projectile.remove(QStringLiteral("targetId"));
+    wrongAttackerSide[QStringLiteral("projectiles")] = QJsonArray{projectile};
+    EXPECT_FALSE(validate(wrongAttackerSide));
+
+    QJsonObject wrongTargetSide = protocolProjectileSnapshot();
+    projectile = protocolProjectile();
+    projectile.remove(QStringLiteral("attackerId"));
+    projectile[QStringLiteral("targetId")] = QStringLiteral("red_a1");
+    wrongTargetSide[QStringLiteral("projectiles")] = QJsonArray{projectile};
+    EXPECT_FALSE(validate(wrongTargetSide));
+}
+
+TEST(ProtocolTest, AcceptsOutOfRangeTerminalProjectile) {
+    const auto validate = [](const QJsonObject& payload) {
+        return Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+            QStringLiteral("snapshot"), 1, payload));
+    };
+
+    QJsonObject payload = protocolProjectileSnapshot();
+    QJsonObject projectile = protocolProjectile();
+    projectile[QStringLiteral("active")] = false;
+    projectile[QStringLiteral("terminalReason")] = QStringLiteral("out_of_range");
+    projectile[QStringLiteral("resultSettled")] = true;
+    payload[QStringLiteral("projectiles")] = QJsonArray{projectile};
+    EXPECT_TRUE(validate(payload).valid);
+}
+
+TEST(ProtocolTest, ObserverProjectilesMustRemainAnonymous) {
+    const auto validate = [](const QJsonObject& payload) {
+        return Protocol::validateServerEnvelope(Protocol::makeServerEnvelope(
+            QStringLiteral("snapshot"), 1, payload)).valid;
+    };
+
+    QJsonObject anonymous = protocolProjectile();
+    anonymous.remove(QStringLiteral("attackerId"));
+    anonymous.remove(QStringLiteral("targetId"));
+    QJsonObject payload = observerProtocolSnapshot();
+    payload[QStringLiteral("projectiles")] = QJsonArray{anonymous};
+    ASSERT_TRUE(validate(payload));
+
+    anonymous[QStringLiteral("attackerId")] = QStringLiteral("red_a1");
+    payload[QStringLiteral("projectiles")] = QJsonArray{anonymous};
+    EXPECT_FALSE(validate(payload));
+
+    anonymous.remove(QStringLiteral("attackerId"));
+    anonymous[QStringLiteral("targetId")] = QStringLiteral("red_a1");
+    payload[QStringLiteral("projectiles")] = QJsonArray{anonymous};
+    EXPECT_FALSE(validate(payload));
+}
+
 TEST(ProtocolTest, RejectsMalformedOptionalPveFields) {
     const QJsonObject malformedSeatState = Protocol::makeServerEnvelope(
         QStringLiteral("seatState"), 1,
@@ -794,6 +970,7 @@ TEST(ProtocolTest, RejectsMalformedOptionalPveFields) {
                     {QStringLiteral("stateRevision"), 1},
                     {QStringLiteral("scenario"), QJsonObject{{QStringLiteral("units"), QJsonArray{}}}},
                     {QStringLiteral("units"), QJsonArray{}},
+                    {QStringLiteral("projectiles"), QJsonArray{}},
                     {QStringLiteral("messages"), QJsonArray{}},
                     {QStringLiteral("roomState"),
                      QJsonObject{{QStringLiteral("roomMode"), QStringLiteral("coop")},
@@ -811,6 +988,7 @@ TEST(StateDeltaTest, AppliesChangedUnitsAndRoomState) {
                      {QStringLiteral("units"),
                       QJsonArray{QJsonObject{{QStringLiteral("id"), QStringLiteral("red_a1")},
                                              {QStringLiteral("hp"), 100}}}},
+                     {QStringLiteral("projectiles"), QJsonArray{}},
                      {QStringLiteral("messages"), QJsonArray{}},
                      {QStringLiteral("mapMarks"), QJsonArray{}},
                      {QStringLiteral("roomState"),
@@ -836,11 +1014,48 @@ TEST(StateDeltaTest, AppliesChangedUnitsAndRoomState) {
     EXPECT_EQ(base, current);
 }
 
+TEST(StateDeltaTest, ReplacesAndClearsProjectileCollection) {
+    QJsonObject base = protocolProjectileSnapshot(10);
+    QJsonObject current = base;
+    current[QStringLiteral("stateRevision")] = 11;
+    QJsonObject currentRoom = current.value(QStringLiteral("roomState")).toObject();
+    currentRoom[QStringLiteral("stateRevision")] = 11;
+    currentRoom[QStringLiteral("simTime")] = 1.1;
+    current[QStringLiteral("roomState")] = currentRoom;
+    QJsonObject movedProjectile = protocolProjectile();
+    movedProjectile[QStringLiteral("position")] = QJsonArray{550.0, 425.0, 120.0};
+    movedProjectile[QStringLiteral("age")] = 1.1;
+    current[QStringLiteral("projectiles")] = QJsonArray{movedProjectile};
+
+    const QJsonObject replacementDelta = StateDelta::create(base, current);
+    ASSERT_TRUE(replacementDelta.contains(QStringLiteral("projectiles")));
+    EXPECT_EQ(replacementDelta.value(QStringLiteral("projectiles")),
+              current.value(QStringLiteral("projectiles")));
+    QString error;
+    ASSERT_TRUE(StateDelta::apply(base, replacementDelta, &error)) << error.toStdString();
+    EXPECT_EQ(base, current);
+
+    QJsonObject cleared = current;
+    cleared[QStringLiteral("stateRevision")] = 12;
+    QJsonObject clearedRoom = cleared.value(QStringLiteral("roomState")).toObject();
+    clearedRoom[QStringLiteral("stateRevision")] = 12;
+    clearedRoom[QStringLiteral("simTime")] = 1.2;
+    cleared[QStringLiteral("roomState")] = clearedRoom;
+    cleared[QStringLiteral("projectiles")] = QJsonArray{};
+
+    const QJsonObject removalDelta = StateDelta::create(current, cleared);
+    ASSERT_TRUE(removalDelta.contains(QStringLiteral("projectiles")));
+    EXPECT_TRUE(removalDelta.value(QStringLiteral("projectiles")).toArray().isEmpty());
+    ASSERT_TRUE(StateDelta::apply(base, removalDelta, &error)) << error.toStdString();
+    EXPECT_EQ(base, cleared);
+}
+
 TEST(StateDeltaTest, RejectsWrongBaseRevision) {
     QJsonObject state{{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
                       {QStringLiteral("stateRevision"), 7},
                       {QStringLiteral("scenario"), QJsonObject{}},
                       {QStringLiteral("units"), QJsonArray{}},
+                      {QStringLiteral("projectiles"), QJsonArray{}},
                       {QStringLiteral("roomState"),
                        QJsonObject{{QStringLiteral("scenarioRevision"), 1}}}};
     const QJsonObject delta{{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},

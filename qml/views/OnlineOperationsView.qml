@@ -36,7 +36,12 @@ Item {
     property string switchSourceSeatId: ""
     property string switchTargetSeatId: ""
     property string observedMatchPhase: ""
+    // The compact and desktop layouts share this one panel; only its active
+    // tactical view changes.  Keeping the state here also preserves the tab
+    // when the panel is moved into the narrow-screen drawer.
+    property int tacticalViewIndex: 0
     property bool compactLayout: width < 760
+    onCompactLayoutChanged: if (!compactLayout) tacticalDrawer.close()
     property color page: AppContext.page
     property color ink: AppContext.text
     property color dim: AppContext.muted
@@ -47,6 +52,8 @@ Item {
     property color orange: AppContext.warning
     property color info: AppContext.info
     property color danger: AppContext.danger
+
+    onAttackTargetIdChanged: root.syncAttackTargetBox()
 
     signal openChatRequested()
 
@@ -84,6 +91,51 @@ Item {
         root.switchTargetSeatId = ""
         if (root.commanderPointSelectionActive) root.cancelCommanderPointSelection()
         commanderCommandPanel.mapSelectionCanceled()
+    }
+
+    function syncAttackTargetBox() {
+        if (!targetBox) return
+        var wanted = root.attackTargetId || ""
+        var options = targetBox.model || []
+        var next = -1
+        for (var i = 0; i < options.length; i++) {
+            var option = options[i] || ({})
+            if (String(option.id || "") === wanted) {
+                next = i
+                break
+            }
+        }
+        targetBox.currentIndex = next
+    }
+
+    function selectedActionEnabled(action) {
+        var actions = root.selectedUnitSnapshot.actions
+            || root.selectedUnitSnapshot.actionCapabilities || ({})
+        var entry = actions[action]
+        if (entry === undefined) return false
+        return typeof entry === "object" && entry !== null
+            ? Boolean(entry.enabled) : Boolean(entry)
+    }
+
+    function adjustShortcutUnitSpeed(delta) {
+        if (!root.controller || root.controller.isObserver
+                || root.controller.matchPhase !== "running" || !root.selectedUnitId)
+            return
+        if (!root.selectedActionEnabled("setSpeed")) return
+        var current = Number(root.selectedUnitSnapshot.speed)
+        if (!isFinite(current)) current = Number(root.unitSpeedDraft || 1)
+        var next = Math.max(1, Math.min(240, Math.round((current + delta) / 5) * 5))
+        root.unitSpeedDraft = next
+        root.unitSpeedDirty = true
+        root.controller.command("setSpeed", { unitId: root.selectedUnitId, speed: next })
+        root.deploymentNotice = "移动速度已提交 · " + next + " m/s"
+    }
+
+    function shortcutsBlocked() {
+        return Boolean((switchSeatConfirmation && switchSeatConfirmation.opened)
+                       || (exitRoomConfirmation && exitRoomConfirmation.opened)
+                       || (tacticalDrawer && tacticalDrawer.opened)
+                       || (selectedUnitPanel && selectedUnitPanel.detailsOpen))
     }
 
     function normalizedCommunicationState() {
@@ -414,6 +466,76 @@ Item {
         root.selectedUnitId = unit.id
         if (root.isCommander && root.controller.matchPhase !== "running") return
         root.attackTargetId = ""
+    }
+    function observerTrajectoryIds() {
+        var projected = root.controller.observerTrajectories || ({})
+        return projected.selectedUnitIds ? projected.selectedUnitIds.slice() : []
+    }
+    function observerTrajectorySelected(unitId) {
+        return root.observerTrajectoryIds().indexOf(unitId) >= 0
+    }
+    function toggleObserverTrajectory(unitId) {
+        if (!root.controller.isObserver || !unitId) return
+        var selected = root.observerTrajectoryIds()
+        var index = selected.indexOf(unitId)
+        if (index >= 0) selected.splice(index, 1)
+        else {
+            if (selected.length >= 8) {
+                root.deploymentNotice = "最多同时显示 8 个单位轨迹"
+                return
+            }
+            selected.push(unitId)
+        }
+        root.controller.setObserverTrajectories(selected)
+    }
+    function switchUnit(direction) {
+        var candidates = root.controller.isObserver
+            ? (root.controller.units || []).filter(function(unit) { return unit && unit.alive })
+            : root.deployedFriendlyUnits()
+        if (!candidates || candidates.length === 0) return
+        var current = -1
+        for (var i = 0; i < candidates.length; i++) {
+            if (candidates[i].id === root.selectedUnitId) { current = i; break }
+        }
+        var next = (current + direction + candidates.length) % candidates.length
+        root.selectUnit(candidates[next])
+    }
+    function autoFitZoom() {
+        if (onlineCanvas) onlineCanvas.focusAt(onlineCanvas.mapSize.w / 2,
+                                               onlineCanvas.mapSize.h / 2)
+    }
+    function openTacticalDrawer() {
+        if (root.compactLayout) tacticalDrawer.open()
+    }
+    function cancelOnlineShortcut() {
+        if (root.commanderPointSelectionActive) root.cancelCommanderPointSelection()
+        if (onlineCanvas) onlineCanvas.stopGuideMode()
+    }
+    function shortcutUnitId() {
+        return root.selectedUnitId || root.controller.focusedUnitId || ""
+    }
+    function engageFocusedTarget() {
+        if (!root.controller.isObserver && root.controller.currentSeatType === "attack"
+                && root.controller.matchPhase === "running"
+                && root.selectedUnitId && root.attackTargetId
+                && root.selectedActionEnabled("engageTarget")) {
+            root.controller.command("engageTarget", {
+                attackerId: root.selectedUnitId, targetId: root.attackTargetId
+            })
+        }
+    }
+
+    function engageAvailabilityLabel() {
+        if (!root.selectedUnitId) return "请选择攻击机"
+        if (!root.attackTargetId) return "请选择已掌握的敌方目标"
+        if (!root.selectedActionEnabled("engageTarget")) {
+            var cooldown = Number(root.selectedUnitSnapshot.cooldownRemaining || 0)
+            if (cooldown > 0) return "武器冷却中 · " + cooldown.toFixed(1) + " s"
+            if (Number(root.selectedUnitSnapshot.ammoRemaining || 0) <= 0) return "弹药已耗尽"
+            if (root.selectedUnitSnapshot.serviceRequested) return "补给进行中"
+            return "服务器暂不允许攻击"
+        }
+        return "执行攻击"
     }
     function seatForUnit(unitId) {
         var seats = root.controller.onlineSeats || []
@@ -822,6 +944,22 @@ Item {
         }
     }
 
+    Drawer {
+        id: tacticalDrawer
+        edge: Qt.RightEdge
+        width: Math.min(392, root.width * 0.94)
+        height: root.height
+        modal: true
+        interactive: root.compactLayout && enabled
+        enabled: root.compactLayout && stages.currentIndex === 2
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onEnabledChanged: if (!enabled) close()
+        background: Rectangle {
+            color: root.panel
+            border.color: root.line
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent; anchors.margins: 18; spacing: 14
             RowLayout {
@@ -1000,8 +1138,8 @@ Item {
             }
             Item {
                     GridLayout { id: battleLayout; anchors.fill: parent; columns: root.compactLayout ? 1 : 2; columnSpacing: 12; rowSpacing: 12
-                    Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 420; Layout.preferredWidth: root.compactLayout ? -1 : Math.max(420, battleLayout.width - 368); Layout.minimumHeight: root.compactLayout ? 250 : 0; Layout.preferredHeight: root.compactLayout ? Math.max(260, battleLayout.height * 0.52) : -1; color: root.panel; border.color: root.line; radius: 6
-                        MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; visibleUnitIds: root.controller.isObserver ? null : root.deployedUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId
+                    Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 420; Layout.preferredWidth: root.compactLayout ? -1 : Math.max(420, battleLayout.width - 368); Layout.minimumHeight: root.compactLayout ? 250 : 0; Layout.preferredHeight: root.compactLayout ? battleLayout.height : -1; color: root.panel; border.color: root.line; radius: 6
+                        MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.controller.isObserver ? null : root.deployedUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId
                             onClickedMap: function(point) {
                                 if (root.controller.isObserver) return
                                 if (root.canDeploy) {
@@ -1104,8 +1242,46 @@ Item {
                                 }
                             }
                         }
+                        Button {
+                            id: openTacticalDrawerButton
+                            visible: root.compactLayout
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            anchors.margins: 12
+                            z: 90
+                            width: 86
+                            height: 34
+                            Accessible.name: "打开战术侧栏"
+                            onClicked: tacticalDrawer.open()
+                            contentItem: Row {
+                                anchors.centerIn: parent
+                                spacing: 6
+                                Icon { name: "menu"; iconSize: 15; iconColor: root.page }
+                                Text { text: "侧栏"; color: root.page; font.pixelSize: 11; font.bold: true }
+                            }
+                            background: Rectangle { color: root.cyan; radius: 5 }
+                        }
                     }
-                    Rectangle { Layout.fillWidth: root.compactLayout; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 332; Layout.minimumHeight: root.compactLayout ? 300 : 0; Layout.preferredWidth: root.compactLayout ? -1 : 356; Layout.preferredHeight: root.compactLayout ? Math.max(300, battleLayout.height * 0.48) : -1; color: root.panel; border.color: root.line; radius: 6
+                    Item {
+                        id: tacticalPanelHost
+                        visible: !root.compactLayout
+                        Layout.fillWidth: !root.compactLayout
+                        Layout.fillHeight: !root.compactLayout
+                        Layout.minimumWidth: root.compactLayout ? 0 : 332
+                        Layout.minimumHeight: root.compactLayout ? 0 : 300
+                        Layout.preferredWidth: root.compactLayout ? 0 : 356
+                        Layout.preferredHeight: root.compactLayout ? 0 : -1
+                        Layout.maximumWidth: root.compactLayout ? 0 : -1
+                        Layout.maximumHeight: root.compactLayout ? 0 : -1
+                        Rectangle {
+                            id: tacticalPanel
+                            parent: root.compactLayout ? tacticalDrawer.contentItem : tacticalPanelHost
+                            visible: !root.compactLayout || tacticalDrawer.opened
+                            anchors.fill: parent
+                            anchors.margins: root.compactLayout ? 10 : 0
+                            color: root.panel
+                            border.color: root.line
+                            radius: 6
                         ScrollView { id: commandScroll; anchors.fill: parent; anchors.margins: 14; clip: true; contentWidth: availableWidth; contentHeight: commandColumn.implicitHeight
                         ColumnLayout { id: commandColumn; width: commandScroll.availableWidth; spacing: 10
                             RowLayout { Layout.fillWidth: true; spacing: 8
@@ -1123,8 +1299,50 @@ Item {
                                     background: Rectangle { color: exitRoomButton.hovered ? root.panelAlt : "transparent"; border.color: root.orange; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
                                 }
                             }
+                            TabBar {
+                                id: tacticalTabs
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 34
+                                currentIndex: root.tacticalViewIndex
+                                onCurrentIndexChanged: root.tacticalViewIndex = currentIndex
+                                background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
+                                TabButton {
+                                    id: unitsTacticalTab
+                                    text: "单位"
+                                    Accessible.name: "单位视图"
+                                    contentItem: Row {
+                                        anchors.centerIn: parent; spacing: 4
+                                        Icon { name: "unit"; iconSize: 13; iconColor: tacticalTabs.currentIndex === 0 ? root.cyan : root.dim }
+                                        Text { text: unitsTacticalTab.text; color: tacticalTabs.currentIndex === 0 ? root.cyan : root.dim; font.pixelSize: 10; font.bold: tacticalTabs.currentIndex === 0 }
+                                    }
+                                    background: Rectangle { color: tacticalTabs.currentIndex === 0 ? root.panelAlt : "transparent"; radius: 3 }
+                                }
+                                TabButton {
+                                    id: commandTacticalTab
+                                    text: "指挥"
+                                    Accessible.name: "指挥视图"
+                                    contentItem: Row {
+                                        anchors.centerIn: parent; spacing: 4
+                                        Icon { name: "command"; iconSize: 13; iconColor: tacticalTabs.currentIndex === 1 ? root.cyan : root.dim }
+                                        Text { text: commandTacticalTab.text; color: tacticalTabs.currentIndex === 1 ? root.cyan : root.dim; font.pixelSize: 10; font.bold: tacticalTabs.currentIndex === 1 }
+                                    }
+                                    background: Rectangle { color: tacticalTabs.currentIndex === 1 ? root.panelAlt : "transparent"; radius: 3 }
+                                }
+                                TabButton {
+                                    id: intelligenceTacticalTab
+                                    text: "情报"
+                                    Accessible.name: "情报视图"
+                                    contentItem: Row {
+                                        anchors.centerIn: parent; spacing: 4
+                                        Icon { name: "scan"; iconSize: 13; iconColor: tacticalTabs.currentIndex === 2 ? root.cyan : root.dim }
+                                        Text { text: intelligenceTacticalTab.text; color: tacticalTabs.currentIndex === 2 ? root.cyan : root.dim; font.pixelSize: 10; font.bold: tacticalTabs.currentIndex === 2 }
+                                    }
+                                    background: Rectangle { color: tacticalTabs.currentIndex === 2 ? root.panelAlt : "transparent"; radius: 3 }
+                                }
+                            }
                             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
                             RowLayout {
+                                visible: root.tacticalViewIndex === 1
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Rectangle {
@@ -1154,6 +1372,7 @@ Item {
                             ColumnLayout {
                                 visible: !root.controller.isObserver && root.controller.matchPhase === "running"
                                          && root.visibleMapMarkFeed().length > 0
+                                         && root.tacticalViewIndex === 2
                                 Layout.fillWidth: true
                                 spacing: 6
                                 RowLayout {
@@ -1210,6 +1429,7 @@ Item {
                             }
                             Rectangle {
                                 visible: !root.controller.isObserver && !root.isCommander
+                                         && root.tacticalViewIndex === 1
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? subordinateComposer.implicitHeight + 16 : 0
                                 color: root.panelAlt; border.color: root.subordinateCanSend() ? root.line : root.orange; radius: 5
@@ -1258,6 +1478,7 @@ Item {
                                 visible: !root.controller.isObserver && root.isCommander && root.controller.matchPhase === "preparing"
                                          && (root.controller.pendingSeatTransfers.length > 0
                                              || root.pendingRedeploySeats().length > 0)
+                                         && root.tacticalViewIndex === 1
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? transferColumn.implicitHeight + 18 : 0
                                 color: root.panelAlt; border.color: root.orange; radius: 5
@@ -1315,6 +1536,7 @@ Item {
                             CommandPanel {
                                 id: commanderCommandPanel
                                 visible: !root.controller.isObserver && root.isCommander && root.controller.matchPhase === "running"
+                                         && root.tacticalViewIndex === 1
                                 Layout.fillWidth: true
                                 controller: root.controller
                                 selectedUnitId: root.selectedUnitId
@@ -1331,6 +1553,7 @@ Item {
                             }
                             Rectangle {
                                 visible: !root.controller.isObserver && !root.isCommander && root.controller.matchPhase === "running"
+                                         && root.tacticalViewIndex === 1
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? participantFeedColumn.implicitHeight + 18 : 0
                                 color: root.panelAlt; border.color: root.line; radius: 5
@@ -1382,6 +1605,7 @@ Item {
                             }
                             Rectangle {
                                 visible: !root.controller.isObserver && root.controller.matchPhase === "preparing"
+                                         && root.tacticalViewIndex === 1
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? deploymentPanel.implicitHeight + 18 : 0
                                 color: "#111f2a"; border.color: root.deploymentState === "waiting" ? root.orange : root.line; radius: 5
@@ -1437,12 +1661,13 @@ Item {
                             }
                             RowLayout {
                                 visible: !root.controller.isObserver && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander")
+                                         && root.tacticalViewIndex === 2
                                 Layout.fillWidth: true
                                 Text { Layout.fillWidth: true; text: root.isCommander ? "标点 / 情报接收战位" : "情报接收战位"; color: root.dim; font.pixelSize: 10 }
                                 Text { text: root.selectedRecipientIds.length + " 已选"; color: root.selectedRecipientIds.length > 0 ? root.cyan : root.orange; font.pixelSize: 9 }
                             }
                             Flow {
-                                visible: !root.controller.isObserver
+                                visible: !root.controller.isObserver && root.tacticalViewIndex === 2
                                 Layout.fillWidth: true
                                 spacing: 6
                                 CheckBox { id: communicationRangeToggle; text: "通信范围"; checked: root.showCommunicationRange; Accessible.name: "显示选中单位的通信范围"; onToggled: root.showCommunicationRange = checked
@@ -1460,6 +1685,7 @@ Item {
                             }
                             Flow {
                                 visible: !root.controller.isObserver && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander")
+                                         && root.tacticalViewIndex === 2
                                 Layout.fillWidth: true; spacing: 5
                                 Repeater {
                                     model: root.controller.onlineSeats || []
@@ -1474,27 +1700,58 @@ Item {
                                     }
                                 }
                             }
-                            Text { text: root.controller.isObserver ? "战场单位" : "已部署友方单位"; color: root.dim; font.pixelSize: 10 }
-                            Text { visible: root.deployedFriendlyUnits().length === 0; text: "当前没有已部署单位"; color: root.dim; font.pixelSize: 10 }
-                            ListView { id: friendlyUnitList; visible: count > 0; Layout.fillWidth: true; Layout.preferredHeight: visible ? Math.min(180, Math.max(38, contentHeight)) : 0; model: root.deployedFriendlyUnits(); clip: true; spacing: 4
+                            Text { visible: root.tacticalViewIndex === 0; text: root.controller.isObserver ? "战场单位" : "已部署友方单位"; color: root.dim; font.pixelSize: 10 }
+                            Text { visible: root.tacticalViewIndex === 0 && root.deployedFriendlyUnits().length === 0; text: "当前没有已部署单位"; color: root.dim; font.pixelSize: 10 }
+                            ListView { id: friendlyUnitList; visible: root.tacticalViewIndex === 0 && count > 0; Layout.fillWidth: true; Layout.preferredHeight: visible ? Math.min(180, Math.max(38, contentHeight)) : 0; model: root.deployedFriendlyUnits(); clip: true; spacing: 4
                                 delegate: Rectangle { id: friendlyDelegate; required property var modelData; width: friendlyUnitList.width; height: 38; color: root.selectedUnitId === friendlyDelegate.modelData.id ? root.panelAlt : root.panel; border.color: root.selectedUnitId === friendlyDelegate.modelData.id ? root.cyan : "transparent"; radius: 4; visible: friendlyDelegate.modelData.alive
-                                    RowLayout { anchors.fill: parent; anchors.margins: 8
+                                    RowLayout { anchors.fill: parent; anchors.margins: 8; z: 1
                                         Text { Layout.fillWidth: true; text: friendlyDelegate.modelData.callsign || friendlyDelegate.modelData.id; color: root.ink; font.pixelSize: 10; elide: Text.ElideRight }
                                         Text { text: friendlyDelegate.modelData.status || "在线"; color: root.selectedUnitId === friendlyDelegate.modelData.id ? root.cyan : root.dim; font.pixelSize: 9 }
+                                        Button {
+                                            id: observerTrailButton
+                                            visible: root.controller.isObserver
+                                            Layout.preferredWidth: 70
+                                            Layout.preferredHeight: 24
+                                            text: root.observerTrajectorySelected(friendlyDelegate.modelData.id)
+                                                  ? "隐藏轨迹" : "显示轨迹"
+                                            Accessible.name: text + " "
+                                                             + (friendlyDelegate.modelData.callsign
+                                                                || friendlyDelegate.modelData.id)
+                                            onClicked: root.toggleObserverTrajectory(
+                                                friendlyDelegate.modelData.id)
+                                            contentItem: Text {
+                                                text: observerTrailButton.text
+                                                color: root.observerTrajectorySelected(
+                                                           friendlyDelegate.modelData.id)
+                                                       ? root.orange : root.cyan
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
+                                                font.pixelSize: 9
+                                            }
+                                            background: Rectangle {
+                                                color: root.panelAlt
+                                                border.color: root.observerTrajectorySelected(
+                                                                  friendlyDelegate.modelData.id)
+                                                              ? root.orange : root.line
+                                                radius: 4
+                                            }
+                                        }
                                     }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectUnit(friendlyDelegate.modelData) }
+                                    MouseArea { anchors.fill: parent; z: 0; cursorShape: Qt.PointingHandCursor; onClicked: root.selectUnit(friendlyDelegate.modelData) }
                                     Behavior on color { ColorAnimation { duration: 150 } }
                                 }
                             }
                             UnitPanel {
-                                visible: root.selectedUnitId.length > 0
+                                id: selectedUnitPanel
+                                visible: root.tacticalViewIndex === 0 && root.selectedUnitId.length > 0
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? 300 : 0
                                 clip: true
                                 controller: root.controller
                                 editor: root.editor
                                 snap: root.selectedUnitSnapshot
-                                interactionEnabled: false
+                                interactionEnabled: !root.controller.isObserver
+                                                    && root.controller.matchPhase === "running"
                                 Accessible.name: "选中友方单位详情"
                             }
                             ComboBox {
@@ -1502,6 +1759,7 @@ Item {
                                 visible: !root.controller.isObserver
                                          && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander")
                                          && root.controller.matchPhase === "running"
+                                         && root.tacticalViewIndex === 2
                                 Layout.fillWidth: true
                                 model: root.controller.unitStateRevision >= 0
                                     ? root.controller.detectedEnemyOptions(root.selectedUnitId, root.controller.currentSeatSide, root.controller.currentSeatSide === "red" ? "blue" : "red") : []
@@ -1511,7 +1769,7 @@ Item {
                                 background: Rectangle { color: "#0b151c"; border.color: root.line; radius: 4 }
                                 contentItem: Text { text: intelTargetBox.currentText || "选择要共享的敌情"; color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; font.pixelSize: 10 }
                             }
-                            Button { id: shareIntelButton; visible: !root.controller.isObserver && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander"); Layout.fillWidth: true; text: "共享选定敌情"; enabled: intelTargetBox.count > 0 && root.recipientSeats().length > 0
+                            Button { id: shareIntelButton; visible: !root.controller.isObserver && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander") && root.tacticalViewIndex === 2; Layout.fillWidth: true; text: "共享选定敌情"; enabled: intelTargetBox.count > 0 && root.recipientSeats().length > 0
                                 onClicked: root.controller.shareOnlineIntel(intelTargetBox.currentValue, root.recipientSeats(), "手动共享敌情")
                                 contentItem: Text { text: shareIntelButton.text; color: root.cyan; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
                                 background: Rectangle { color: shareIntelButton.enabled ? root.panelAlt : root.line; border.color: root.line; radius: 4 }
@@ -1519,51 +1777,44 @@ Item {
                             ComboBox {
                                 id: targetBox
                                 visible: !root.controller.isObserver && root.controller.currentSeatType === "attack" && root.controller.matchPhase === "running"
+                                         && root.tacticalViewIndex === 0
                                 Layout.fillWidth: true
                                 model: root.controller.unitStateRevision >= 0
                                     ? root.controller.detectedEnemyOptions(root.selectedUnitId, root.controller.currentSeatSide, root.controller.currentSeatSide === "red" ? "blue" : "red") : []
                                 textRole: "callsign"
                                 valueRole: "id"
                                 enabled: count > 0
+                                Component.onCompleted: root.syncAttackTargetBox()
+                                onModelChanged: root.syncAttackTargetBox()
+                                onActivated: root.attackTargetId = currentValue || ""
                                 background: Rectangle { color: "#0b151c"; border.color: root.line; radius: 4 }
                                 contentItem: Text { text: root.controller.unitStateRevision >= 0 ? root.attackTargetLabel(targetBox.currentText) : (targetBox.currentText || "选择已掌握的敌方目标"); color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; font.pixelSize: 10 }
                             }
                             ColumnLayout {
                                 id: attackControl
                                 visible: !root.controller.isObserver && root.controller.currentSeatType === "attack" && root.controller.matchPhase === "running"
+                                         && root.tacticalViewIndex === 0
                                 Layout.fillWidth: true; spacing: 5
                                 property var selectedAttackUnit: root.selectedUnitSnapshot
-                                property real cooldownRemaining: Number(selectedAttackUnit.cooldownRemaining || 0)
-                                property real cooldownSec: Math.max(0.001, Number(selectedAttackUnit.cooldownSec || 0.001))
-                                property bool servicing: Boolean(selectedAttackUnit.serviceRequested)
-                                property real serviceProgress: Math.max(0, Math.min(1,
-                                    Number(selectedAttackUnit.turnaroundProgress || selectedAttackUnit.serviceProgress || 0)))
-                                property int ammoRemaining: Number(selectedAttackUnit.ammoRemaining || 0)
-                                RowLayout {
-                                    visible: attackControl.servicing || attackControl.cooldownRemaining > 0
-                                    Layout.fillWidth: true
-                                    Text { text: attackControl.servicing ? "补给 / 再装填" : "射击冷却"; color: root.orange; font.pixelSize: 10; font.bold: true }
-                                    ProgressBar {
-                                        id: onlineCooldownProgress
-                                        Layout.fillWidth: true; from: 0; to: 1
-                                        value: attackControl.servicing ? attackControl.serviceProgress
-                                            : 1 - Math.max(0, Math.min(1, attackControl.cooldownRemaining / attackControl.cooldownSec))
-                                        Accessible.name: attackControl.servicing ? "攻击无人机补给再装填进度" : "攻击无人机射击冷却进度"
-                                        background: Rectangle { implicitHeight: 6; radius: 3; color: root.panelAlt }
-                                        contentItem: Item { implicitHeight: 6; Rectangle { width: onlineCooldownProgress.visualPosition * parent.width; height: parent.height; radius: 3; color: root.orange } }
-                                    }
-                                    Text { text: attackControl.servicing ? Math.round(attackControl.serviceProgress * 100) + "%" : attackControl.cooldownRemaining.toFixed(1) + " s"; color: root.dim; font.pixelSize: 9; font.family: "Consolas" }
-                                }
-                                Button { id: engageButton; Layout.fillWidth: true; enabled: root.selectedUnitId && attackControl.selectedAttackUnit.alive && (root.attackTargetId || targetBox.count > 0) && attackControl.ammoRemaining > 0 && !attackControl.servicing && attackControl.cooldownRemaining <= 0; text: attackControl.servicing ? "补给中" : attackControl.ammoRemaining <= 0 ? "弹药耗尽" : attackControl.cooldownRemaining > 0 ? "冷却中" : "执行攻击"; Accessible.name: enabled ? "执行攻击" : engageButton.text
-                                    onClicked: {
-                                        root.controller.command("engageTarget", {"attackerId": root.selectedUnitId, "targetId": root.attackTargetId || targetBox.currentValue})
-                                    }
+                                property var actions: selectedAttackUnit.actions || selectedAttackUnit.actionCapabilities || ({})
+                                property bool serverAllowsEngage: actions.engageTarget !== undefined
+                                    ? (typeof actions.engageTarget === "object"
+                                       ? Boolean(actions.engageTarget.enabled)
+                                       : Boolean(actions.engageTarget))
+                                    : Number(selectedAttackUnit.ammoRemaining || 0) > 0
+                                      && !Boolean(selectedAttackUnit.serviceRequested)
+                                      && Number(selectedAttackUnit.cooldownRemaining || 0) <= 0
+                                Button { id: engageButton; Layout.fillWidth: true; enabled: root.selectedUnitId && attackControl.selectedAttackUnit.alive && root.attackTargetId.length > 0 && attackControl.serverAllowsEngage; text: "执行攻击 · 在途 " + Number(attackControl.selectedAttackUnit.activeProjectileCount || 0) + " 枚"; Accessible.name: (enabled ? "执行攻击" : root.engageAvailabilityLabel()) + "，在途 " + Number(attackControl.selectedAttackUnit.activeProjectileCount || 0) + " 枚"
+                                    onClicked: root.engageFocusedTarget()
+                                    ToolTip.visible: hovered && !enabled
+                                    ToolTip.text: root.engageAvailabilityLabel()
                                     contentItem: Text { text: engageButton.text; color: engageButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
                                     background: Rectangle { color: engageButton.enabled ? root.orange : root.line; radius: 4 }
                                 }
                             }
                             ColumnLayout {
                                 visible: !root.controller.isObserver && !root.isCommander && root.controller.matchPhase === "running"
+                                         && root.tacticalViewIndex === 0
                                 Layout.fillWidth: true
                                 spacing: 5
                                 Text { text: "本单位移动速度"; color: root.dim; font.pixelSize: 10 }
@@ -1597,7 +1848,7 @@ Item {
                                     background: Rectangle { color: root.panel; border.color: applyUnitSpeedButton.enabled ? root.cyan : root.line; radius: 4 }
                                 }
                             }
-                            Button { id: commanderReadyButton; visible: !root.controller.isObserver && root.controller.currentSeatType === "commander"; Layout.fillWidth: true; enabled: root.canDeploy ? onlineCanvas.pointerInside : (root.seatById(root.controller.currentSeatId) || ({})).deployed === true && (root.controller.seatReady || root.friendlySeatsReady()); text: root.canDeploy ? "确认当前位置部署指挥所" : root.controller.seatReady ? "取消指挥官就绪" : enabled ? "确认指挥官就绪" : root.friendlySeatsReady() ? "请先部署指挥所" : "等待本方单位部署并就绪"; onClicked: {
+                            Button { id: commanderReadyButton; visible: !root.controller.isObserver && root.controller.currentSeatType === "commander" && root.tacticalViewIndex === 0; Layout.fillWidth: true; enabled: root.canDeploy ? onlineCanvas.pointerInside : (root.seatById(root.controller.currentSeatId) || ({})).deployed === true && (root.controller.seatReady || root.friendlySeatsReady()); text: root.canDeploy ? "确认当前位置部署指挥所" : root.controller.seatReady ? "取消指挥官就绪" : enabled ? "确认指挥官就绪" : root.friendlySeatsReady() ? "请先部署指挥所" : "等待本方单位部署并就绪"; onClicked: {
                                     if (root.canDeploy) {
                                         var point = onlineCanvas.pointerLogicalPos
                                         root.controller.deployOnlineUnit(root.deployUnitId, point)
@@ -1612,13 +1863,13 @@ Item {
                                 contentItem: Text { text: commanderReadyButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
                                 background: Rectangle { color: commanderReadyButton.enabled ? (root.controller.seatReady ? root.orange : root.cyan) : root.line; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
                             }
-                            Button { id: participantReadyButton; visible: !root.controller.isObserver && root.controller.currentSeatType !== "commander"; Layout.fillWidth: true; enabled: (root.seatById(root.controller.currentSeatId) || ({})).deployed === true; text: root.controller.seatReady ? "取消战位就绪" : enabled ? "确认部署并就绪" : "等待指挥官部署"; onClicked: root.controller.setSeatReady(!root.controller.seatReady)
+                            Button { id: participantReadyButton; visible: !root.controller.isObserver && root.controller.currentSeatType !== "commander" && root.tacticalViewIndex === 0; Layout.fillWidth: true; enabled: (root.seatById(root.controller.currentSeatId) || ({})).deployed === true; text: root.controller.seatReady ? "取消战位就绪" : enabled ? "确认部署并就绪" : "等待指挥官部署"; onClicked: root.controller.setSeatReady(!root.controller.seatReady)
                                 contentItem: Text { text: participantReadyButton.text; color: root.page; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
                                 background: Rectangle { color: participantReadyButton.enabled ? (root.controller.seatReady ? root.orange : root.cyan) : root.line; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
                             }
                             Button {
                                 id: redeployRequestButton
-                                visible: !root.controller.isObserver && root.controller.currentSeatType !== "commander" && root.controller.matchPhase === "preparing"
+                                visible: !root.controller.isObserver && root.controller.currentSeatType !== "commander" && root.controller.matchPhase === "preparing" && root.tacticalViewIndex === 0
                                 Layout.fillWidth: true
                                 property var ownSeat: root.seatById(root.controller.currentSeatId) || ({})
                                 enabled: ownSeat.deployed === true && !ownSeat.redeployRequested
@@ -1629,7 +1880,7 @@ Item {
                             }
                             TextField {
                                 id: unitNameField
-                                visible: !root.controller.isObserver && root.controller.matchPhase === "preparing" && root.controller.currentSeatId !== ""
+                                visible: !root.controller.isObserver && root.controller.matchPhase === "preparing" && root.controller.currentSeatId !== "" && root.tacticalViewIndex === 0
                                 Layout.fillWidth: true
                                 placeholderText: "本单位画布显示名称"
                                 maximumLength: 128
@@ -1657,6 +1908,7 @@ Item {
                                 contentItem: Text { text: unitNameButton.text; color: unitNameButton.enabled ? root.cyan : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
                                 background: Rectangle { color: root.panel; border.color: root.line; radius: 4 }
                             }
+                        }
                         }
                         }
                     }

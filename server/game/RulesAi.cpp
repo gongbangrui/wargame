@@ -7,6 +7,7 @@
 #include <limits>
 #include <QHash>
 #include <QJsonValue>
+#include <QSet>
 
 namespace {
 
@@ -15,6 +16,9 @@ constexpr double kDefaultMapHeight = 15000.0;
 constexpr double kMinimumCommandDisplacement = 50.0;
 constexpr double kSpeedChangeThreshold = 0.5;
 constexpr double kSpeedSettlingSeconds = 8.0;
+constexpr double kImmediateThreatSeconds = 8.0;
+constexpr double kFuelReturnSafetyFactor = 1.25;
+constexpr double kFuelServiceRatio = 0.40;
 
 double clampCoordinate(double value, double extent) {
     if (!std::isfinite(value)) return 0.0;
@@ -145,6 +149,38 @@ QPair<double, double> clampPoint(double x, double y, double width, double height
     return {clampCoordinate(x, width), clampCoordinate(y, height)};
 }
 
+QPair<double, double> optimalFiringPosition(const gbr::AiSeatState& seat,
+                                            double targetX, double targetY,
+                                            double mapWidth, double mapHeight) {
+    const double dx = seat.x - targetX;
+    const double dy = seat.y - targetY;
+    const double currentDistance = std::hypot(dx, dy);
+    if (!std::isfinite(currentDistance) || currentDistance <= 1e-9) {
+        return clampPoint(seat.x, seat.y, mapWidth, mapHeight);
+    }
+
+    double desiredDistance = seat.optimalAttackRange;
+    if (!std::isfinite(desiredDistance) || desiredDistance <= 0.0) {
+        desiredDistance = seat.maximumAttackRange;
+    }
+    if (!std::isfinite(desiredDistance) || desiredDistance <= 0.0) {
+        return clampPoint(seat.x, seat.y, mapWidth, mapHeight);
+    }
+    if (std::isfinite(seat.minimumAttackRange) && seat.minimumAttackRange >= 0.0) {
+        desiredDistance = std::max(desiredDistance, seat.minimumAttackRange);
+    }
+    if (std::isfinite(seat.maximumAttackRange) && seat.maximumAttackRange > 0.0) {
+        desiredDistance = std::min(desiredDistance, seat.maximumAttackRange);
+    }
+
+    // Keep the attacker on the line through the target, at the configured
+    // firing distance. This works both when closing in and when backing out
+    // of the minimum range envelope.
+    const double scale = desiredDistance / currentDistance;
+    return clampPoint(targetX + dx * scale, targetY + dy * scale,
+                      mapWidth, mapHeight);
+}
+
 QPair<double, double> deterministicRegion(const gbr::AiSeatState& seat,
                                           const gbr::AiObservedTarget* contact,
                                           const gbr::AiKnowledgeState& knowledge,
@@ -192,6 +228,241 @@ bool targetIsFresh(const gbr::AiObservedTarget& target, double now, int memorySe
         && target.confidence > 0.05;
 }
 
+double nominalCruiseFuelBurn(const gbr::AiSeatState& seat) {
+    if (seat.kind == QLatin1String("attackuav")) return 4.0;
+    if (seat.kind == QLatin1String("reconuav")) return 3.5;
+    if (seat.kind == QLatin1String("jammeruav")) return 4.5;
+    if (seat.kind == QLatin1String("groundscout")) return 3.0;
+    return 0.0;
+}
+
+bool limitedCountermeasureDepleted(const gbr::AiSeatState& seat) {
+    return seat.countermeasureSupported && seat.countermeasureCapacity > 0
+        && seat.countermeasureRemaining <= 0;
+}
+
+bool needsService(const gbr::AiSeatState& seat) {
+    const bool lowFuel = seat.fuelCapacity > 0.0 && seat.fuelRemaining >= 0.0
+        && seat.fuelRemaining / seat.fuelCapacity <= kFuelServiceRatio;
+    return seat.ammoRemaining == 0 || limitedCountermeasureDepleted(seat)
+        || seat.hpRatio < 0.40 || seat.lowestSubsystemHealth < 0.35 || lowFuel;
+}
+
+double fuelRequiredToCommandPost(const gbr::AiSeatState& seat) {
+    if (!seat.commandPostAlive || seat.fuelCapacity <= 0.0 || seat.fuelRemaining < 0.0) {
+        return 0.0;
+    }
+    const double cruise = std::max(1.0, std::isfinite(seat.cruiseSpeed)
+        && seat.cruiseSpeed > 0.0 ? seat.cruiseSpeed : seat.speed);
+    const double burnRate = std::max(
+        std::max(0.0, seat.fuelBurnRate), nominalCruiseFuelBurn(seat));
+    const double travelSeconds = distance(seat.x, seat.y,
+                                          seat.commandPostX, seat.commandPostY) / cruise;
+    return travelSeconds * burnRate * kFuelReturnSafetyFactor;
+}
+
+bool fuelRequiresReturn(const gbr::AiSeatState& seat) {
+    return seat.fuelCapacity > 0.0 && seat.fuelRemaining >= 0.0
+        && seat.fuelRemaining <= fuelRequiredToCommandPost(seat) + 1e-9;
+}
+
+struct ThreatEstimate {
+    const gbr::AiObservedProjectile* projectile = nullptr;
+    double eta = std::numeric_limits<double>::infinity();
+    double distance = std::numeric_limits<double>::infinity();
+};
+
+ThreatEstimate nearestIncomingThreat(const gbr::AiSeatState& seat) {
+    ThreatEstimate nearest;
+    for (const gbr::AiObservedProjectile& projectile : seat.visibleProjectiles) {
+        if (!projectile.active || projectile.side == QLatin1String("blue")
+            || !std::isfinite(projectile.x) || !std::isfinite(projectile.y)
+            || !std::isfinite(projectile.headingRad) || !std::isfinite(projectile.speed)
+            || projectile.speed <= 1e-9) {
+            continue;
+        }
+        const bool explicitlyIncoming = projectile.targetId == seat.unitId;
+        if (!projectile.targetId.isEmpty() && !explicitlyIncoming) continue;
+
+        const double dx = seat.x - projectile.x;
+        const double dy = seat.y - projectile.y;
+        const double range = std::hypot(dx, dy);
+        double eta = range / projectile.speed;
+        if (!explicitlyIncoming) {
+            const double velocityX = std::cos(projectile.headingRad) * projectile.speed;
+            const double velocityY = std::sin(projectile.headingRad) * projectile.speed;
+            const double speedSquared = projectile.speed * projectile.speed;
+            eta = (dx * velocityX + dy * velocityY) / speedSquared;
+            if (eta < 0.0) continue;
+            const double closestX = projectile.x + velocityX * eta;
+            const double closestY = projectile.y + velocityY * eta;
+            if (distance(closestX, closestY, seat.x, seat.y)
+                > gbr::SimulationEngine::kProjectileCollisionRadiusMeters) {
+                continue;
+            }
+        }
+        const double remainingLife = std::max(0.0, projectile.lifetime - projectile.age);
+        if (!std::isfinite(eta) || eta < 0.0 || eta > remainingLife + 1e-9) continue;
+        if (eta < nearest.eta - 1e-9
+            || (std::abs(eta - nearest.eta) <= 1e-9
+                && (!nearest.projectile
+                    || projectile.projectileId < nearest.projectile->projectileId))) {
+            nearest = ThreatEstimate{&projectile, eta, range};
+        }
+    }
+    return nearest;
+}
+
+QPair<double, double> evasionDestination(const gbr::AiSeatState& seat,
+                                         const gbr::AiObservedProjectile& projectile,
+                                         double mapWidth, double mapHeight) {
+    const double evadeDistance = std::clamp(
+        std::max(1.0, seat.cruiseSpeed) * kImmediateThreatSeconds, 600.0, 1800.0);
+    const double perpendicularX = -std::sin(projectile.headingRad);
+    const double perpendicularY = std::cos(projectile.headingRad);
+    const QPair<double, double> left = clampPoint(
+        seat.x + perpendicularX * evadeDistance,
+        seat.y + perpendicularY * evadeDistance, mapWidth, mapHeight);
+    const QPair<double, double> right = clampPoint(
+        seat.x - perpendicularX * evadeDistance,
+        seat.y - perpendicularY * evadeDistance, mapWidth, mapHeight);
+    const double leftDisplacement = distance2(seat.x, seat.y, left.first, left.second);
+    const double rightDisplacement = distance2(seat.x, seat.y, right.first, right.second);
+    if (std::abs(leftDisplacement - rightDisplacement) > 1e-9) {
+        return leftDisplacement > rightDisplacement ? left : right;
+    }
+    return (stableHash(seat.unitId + projectile.projectileId) & 1ULL) == 0 ? left : right;
+}
+
+bool hasFreshIntel(const gbr::AiKnowledgeState& knowledge, double now) {
+    for (const gbr::AiObservedTarget& contact : knowledge.contacts) {
+        if (contact.confidence <= 0.05 || !std::isfinite(contact.lastSeenAt)
+            || contact.lastSeenAt > now + 1e-9) {
+            continue;
+        }
+        if (now - contact.lastSeenAt <= kImmediateThreatSeconds) return true;
+    }
+    for (const gbr::AiSeatState& seat : knowledge.seats) {
+        if (!seat.visibleTargets.isEmpty()) return true;
+    }
+    return false;
+}
+
+double friendlyInFlightExpectedDamage(const QList<gbr::AiSeatState>& seats,
+                                      const QString& targetId) {
+    if (targetId.isEmpty()) return 0.0;
+    QSet<QString> counted;
+    double expectedDamage = 0.0;
+    for (const gbr::AiSeatState& seat : seats) {
+        for (const gbr::AiObservedProjectile& projectile : seat.visibleProjectiles) {
+            if (projectile.active && projectile.side == QLatin1String("blue")
+                && projectile.targetId == targetId
+                && !counted.contains(projectile.projectileId)) {
+                counted.insert(projectile.projectileId);
+                expectedDamage += projectile.expectedDamage > 0.0
+                    ? projectile.expectedDamage : 68.4;
+            }
+        }
+    }
+    return expectedDamage;
+}
+
+QList<gbr::AiCommand> tacticalCommands(const gbr::AiKnowledgeState& knowledge,
+                                       const QList<gbr::AiSeatState>& sourceSeats,
+                                       double now, double mapWidth, double mapHeight,
+                                       QSet<QString>* overriddenSeats) {
+    QList<gbr::AiCommand> commands;
+    QList<gbr::AiSeatState> seats = sourceSeats;
+    std::sort(seats.begin(), seats.end(), [](const gbr::AiSeatState& left,
+                                             const gbr::AiSeatState& right) {
+        return left.seatId < right.seatId;
+    });
+    const bool staleIntel = !hasFreshIntel(knowledge, now);
+    for (const gbr::AiSeatState& seat : seats) {
+        if (!seat.alive || seat.unitId.isEmpty()
+            || !seat.seatId.startsWith(QLatin1String("blue_"))) {
+            continue;
+        }
+        const ThreatEstimate threat = nearestIncomingThreat(seat);
+        const bool immediateThreat = threat.projectile
+            && threat.eta <= kImmediateThreatSeconds + 1e-9;
+        if (immediateThreat) {
+            if (overriddenSeats) overriddenSeats->insert(seat.seatId);
+            if (seat.countermeasureAvailable
+                && threat.distance <= seat.countermeasureRange + 1e-9) {
+                commands.append(gbr::AiCommand{
+                    seat.seatId, QStringLiteral("activateCountermeasure"),
+                    {{QStringLiteral("unitId"), seat.unitId}}, 1200});
+            }
+            if (seat.movable && seat.communicationAvailable && seat.fuelRemaining > 1e-9) {
+                if (seat.serviceRequested) {
+                    commands.append(gbr::AiCommand{
+                        seat.seatId, QStringLiteral("cancelService"),
+                        {{QStringLiteral("unitId"), seat.unitId}}, 1195});
+                }
+                const auto destination = evasionDestination(
+                    seat, *threat.projectile, mapWidth, mapHeight);
+                const double cruise = std::clamp(seat.cruiseSpeed, 0.0,
+                    gbr::SimulationEngine::kMaximumCommandedUnitSpeedMps);
+                if (cruise > 0.0
+                    && std::abs(cruise - seat.commandedSpeed) >= kSpeedChangeThreshold) {
+                    commands.append(gbr::AiCommand{
+                        seat.seatId, QStringLiteral("setSpeed"),
+                        {{QStringLiteral("unitId"), seat.unitId},
+                         {QStringLiteral("speed"), cruise}}, 1190});
+                }
+                commands.append(gbr::AiCommand{
+                    seat.seatId, QStringLiteral("moveTo"),
+                    {{QStringLiteral("unitId"), seat.unitId},
+                     {QStringLiteral("pos"),
+                      QVariantMap{{QStringLiteral("x"), destination.first},
+                                  {QStringLiteral("y"), destination.second}}}}, 1185});
+            }
+            continue;
+        }
+
+        if (seat.serviceRequested) {
+            if (overriddenSeats) overriddenSeats->insert(seat.seatId);
+            continue;
+        }
+
+        const bool serviceNeeded = needsService(seat);
+        const bool returnNeeded = serviceNeeded || fuelRequiresReturn(seat);
+        if (seat.serviceEligible && serviceNeeded) {
+            commands.append(gbr::AiCommand{
+                seat.seatId, QStringLiteral("service"),
+                {{QStringLiteral("unitId"), seat.unitId}}, 1100});
+            if (overriddenSeats) overriddenSeats->insert(seat.seatId);
+            continue;
+        }
+        if (returnNeeded) {
+            if (overriddenSeats) overriddenSeats->insert(seat.seatId);
+            if (seat.commandPostAlive && seat.movable
+                && seat.communicationAvailable && seat.fuelRemaining > 1e-9) {
+                commands.append(gbr::AiCommand{
+                    seat.seatId, QStringLiteral("withdraw"),
+                    {{QStringLiteral("unitId"), seat.unitId},
+                     {QStringLiteral("pos"),
+                      QVariantMap{{QStringLiteral("x"), seat.commandPostX},
+                                  {QStringLiteral("y"), seat.commandPostY}}}}, 1050});
+            }
+            continue;
+        }
+
+        if (seat.repairAvailable && seat.lowestSubsystemHealth < 0.70) {
+            commands.append(gbr::AiCommand{
+                seat.seatId, QStringLiteral("attemptFieldRepair"),
+                {{QStringLiteral("unitId"), seat.unitId}}, 800});
+        }
+        if (seat.scanAvailable && (staleIntel || knowledge.commandPostThreat)) {
+            commands.append(gbr::AiCommand{
+                seat.seatId, QStringLiteral("activateScan"),
+                {{QStringLiteral("unitId"), seat.unitId}}, 790});
+        }
+    }
+    return commands;
+}
+
 }
 
 namespace gbr {
@@ -205,6 +476,8 @@ QJsonObject AiObservedTarget::toJson() const {
             {QStringLiteral("velocityY"), velocityY},
             {QStringLiteral("confidence"), confidence},
             {QStringLiteral("lastSeenAt"), lastSeenAt},
+            {QStringLiteral("hp"), hp},
+            {QStringLiteral("maxHp"), maxHp},
             {QStringLiteral("visible"), visible},
             {QStringLiteral("privileged"), privileged},
             {QStringLiteral("commandPost"), commandPost}};
@@ -230,9 +503,13 @@ bool AiObservedTarget::fromJson(const QJsonObject& object, AiObservedTarget* tar
     const double confidence = object.value(QStringLiteral("confidence")).toDouble(0.0);
     const double lastSeenAt = object.value(QStringLiteral("lastSeenAt")).toDouble(
         std::numeric_limits<double>::quiet_NaN());
+    const double hp = object.value(QStringLiteral("hp")).toDouble(100.0);
+    const double maxHp = object.value(QStringLiteral("maxHp")).toDouble(100.0);
     if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(vx) || !std::isfinite(vy)
         || !std::isfinite(confidence) || confidence < 0.0 || confidence > 1.0
-        || !std::isfinite(lastSeenAt) || lastSeenAt < 0.0) {
+        || !std::isfinite(lastSeenAt) || lastSeenAt < 0.0
+        || !std::isfinite(hp) || !std::isfinite(maxHp)
+        || hp < 0.0 || maxHp <= 0.0 || hp > maxHp) {
         return fail(QStringLiteral("AI 接触数值无效"));
     }
     if (target) {
@@ -244,6 +521,8 @@ bool AiObservedTarget::fromJson(const QJsonObject& object, AiObservedTarget* tar
         target->velocityY = vy;
         target->confidence = confidence;
         target->lastSeenAt = lastSeenAt;
+        target->hp = hp;
+        target->maxHp = maxHp;
         target->visible = object.value(QStringLiteral("visible")).toBool(false);
         target->privileged = object.value(QStringLiteral("privileged")).toBool(false);
         target->commandPost = object.value(QStringLiteral("commandPost")).toBool(false);
@@ -551,10 +830,16 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
                                           const QList<AiSeatState>& seats,
                                           double now,
                                           double mapWidth,
-                                          double mapHeight) {
+                                          double mapHeight,
+                                          const AiKnowledgeState* knowledge) {
     QList<AiCommand> commands;
     if (!std::isfinite(mapWidth) || mapWidth <= 0.0) mapWidth = kDefaultMapWidth;
     if (!std::isfinite(mapHeight) || mapHeight <= 0.0) mapHeight = kDefaultMapHeight;
+    QSet<QString> tacticallyOverridden;
+    if (knowledge) {
+        commands = tacticalCommands(*knowledge, seats, now, mapWidth, mapHeight,
+                                    &tacticallyOverridden);
+    }
     QList<AiObjectiveV1> objectives = plan.objectives;
     std::stable_sort(objectives.begin(), objectives.end(), [](const AiObjectiveV1& left,
                                                                const AiObjectiveV1& right) {
@@ -564,6 +849,7 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
     for (const AiObjectiveV1& objective : objectives) {
         if (objective.validUntil < now) continue;
         if (!objective.seatId.startsWith(QLatin1String("blue_"))) continue;
+        if (tacticallyOverridden.contains(objective.seatId)) continue;
         const auto it = std::find_if(seats.cbegin(), seats.cend(),
                                      [&objective](const AiSeatState& seat) {
                                          return seat.seatId == objective.seatId;
@@ -591,11 +877,45 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
             const AiObservedTarget* liveTarget = visibleTarget(*it, targetId);
             const bool legacyVisible = hasVisibleTarget(*it) && it->targetId == targetId;
             if (!liveTarget && !legacyVisible) continue;
-            if (liveTarget) {
-                appendSpeedCommand(&commands, *it, liveTarget->x, liveTarget->y,
+            const double remainingHp = liveTarget ? liveTarget->hp : 100.0;
+            if (friendlyInFlightExpectedDamage(seats, targetId)
+                >= std::max(0.0, remainingHp) - 1e-9) {
+                continue;
+            }
+            const double targetX = liveTarget ? liveTarget->x : it->targetX;
+            const double targetY = liveTarget ? liveTarget->y : it->targetY;
+            const bool validTargetPosition = std::isfinite(targetX)
+                && std::isfinite(targetY);
+            const bool hasFiringEnvelope = validTargetPosition
+                && std::isfinite(it->optimalAttackRange)
+                && it->optimalAttackRange > 0.0;
+            if (hasFiringEnvelope) {
+                const double targetDistance = distance(it->x, it->y, targetX, targetY);
+                const double minimumRange = std::isfinite(it->minimumAttackRange)
+                    ? std::max(0.0, it->minimumAttackRange) : 0.0;
+                const double optimalRange = it->optimalAttackRange;
+                if (std::abs(targetDistance - optimalRange) > kMinimumCommandDisplacement
+                    || targetDistance < minimumRange - kMinimumCommandDisplacement) {
+                    const auto firingPosition = optimalFiringPosition(
+                        *it, targetX, targetY, mapWidth, mapHeight);
+                    if (distance2(firingPosition.first, firingPosition.second,
+                                  it->x, it->y)
+                        >= kMinimumCommandDisplacement * kMinimumCommandDisplacement) {
+                        command.action = QStringLiteral("moveTo");
+                        command.args = {{QStringLiteral("unitId"), it->unitId},
+                                        {QStringLiteral("attackTargetId"), targetId},
+                                        {QStringLiteral("pos"),
+                                         QVariantMap{{QStringLiteral("x"), firingPosition.first},
+                                                     {QStringLiteral("y"), firingPosition.second}}}};
+                        commands.append(command);
+                        continue;
+                    }
+                }
+            } else if (liveTarget) {
+                appendSpeedCommand(&commands, *it, targetX, targetY,
                                    objective.priority);
             } else if (hasVisibleTargetPosition(*it)) {
-                appendSpeedCommand(&commands, *it, it->targetX, it->targetY,
+                appendSpeedCommand(&commands, *it, targetX, targetY,
                                    objective.priority);
             }
             command.action = QStringLiteral("engageTarget");

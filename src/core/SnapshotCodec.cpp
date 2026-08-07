@@ -88,14 +88,47 @@ void SnapshotCodec::decodeRuntimeUnits(SimulationEngine& engine, const QJsonArra
         if (u.contains(QStringLiteral("subsystems"))) {
             unit->restoreSubsystemState(u.value(QStringLiteral("subsystems")).toObject());
         }
-        unit->requestService(u.value(QStringLiteral("serviceRequested")).toBool(false));
+        QJsonObject commonRuntime = unit->runtimeStateJson();
+        if (u.contains(QStringLiteral("fuelCapacity"))) {
+            commonRuntime[QStringLiteral("fuelCapacity")] =
+                u.value(QStringLiteral("fuelCapacity")).toDouble();
+        }
+        if (u.contains(QStringLiteral("fuelRemaining"))) {
+            commonRuntime[QStringLiteral("fuelRemaining")] =
+                u.value(QStringLiteral("fuelRemaining")).toDouble();
+        }
+        if (u.contains(QStringLiteral("economyCruiseSpeed"))) {
+            commonRuntime[QStringLiteral("economyCruiseSpeed")] =
+                u.value(QStringLiteral("economyCruiseSpeed")).toDouble();
+        }
+        if (u.contains(QStringLiteral("fuelBurnRate"))) {
+            commonRuntime[QStringLiteral("fuelBurnRate")] =
+                u.value(QStringLiteral("fuelBurnRate")).toDouble();
+        }
+        if (u.contains(QStringLiteral("abilities"))) {
+            commonRuntime[QStringLiteral("abilities")] =
+                u.value(QStringLiteral("abilities")).toObject();
+        }
+        if (u.contains(QStringLiteral("serviceDuration"))
+            && u.contains(QStringLiteral("serviceElapsed"))) {
+            QJsonObject service = commonRuntime.value(QStringLiteral("service")).toObject();
+            service[QStringLiteral("active")] =
+                u.value(QStringLiteral("serviceRequested")).toBool(false);
+            service[QStringLiteral("cpId")] = u.value(QStringLiteral("serviceCpId")).toString();
+            service[QStringLiteral("elapsed")] = u.value(QStringLiteral("serviceElapsed")).toDouble();
+            service[QStringLiteral("duration")] = u.value(QStringLiteral("serviceDuration")).toDouble();
+            commonRuntime[QStringLiteral("service")] = service;
+        }
+        if (!unit->restoreRuntimeState(commonRuntime, nullptr)) {
+            unit->requestService(u.value(QStringLiteral("serviceRequested")).toBool(false));
+        }
         if (auto* attacker = qobject_cast<AttackUAV*>(unit);
             attacker && u.contains(QStringLiteral("ammoRemaining"))) {
             attacker->restoreRuntimeWeaponState(
                 u.value(QStringLiteral("ammoRemaining")).toInt(-1),
                 u.value(QStringLiteral("cooldownRemaining")).toDouble(0.0),
                 u.value(QStringLiteral("lastShotOutcome")).toString(),
-                u.value(QStringLiteral("fuelRemaining")).toDouble(-1.0),
+                -1.0,
                 u.value(QStringLiteral("turnaroundElapsed")).toDouble(0.0));
             attacker->restoreRemoteAttackState(
                 u.contains(QStringLiteral("targetId"))
@@ -201,6 +234,16 @@ bool SnapshotCodec::decodeCheckpointUnits(SimulationEngine& engine,
         return false;
     }
     return true;
+}
+
+QJsonObject SnapshotCodec::encodeGlobalCheckpoint(const SimulationEngine& engine) {
+    return engine.collectGlobalCheckpointState();
+}
+
+bool SnapshotCodec::decodeGlobalCheckpoint(SimulationEngine& engine,
+                                           const QJsonObject& state,
+                                           QString* error) {
+    return engine.restoreGlobalCheckpointState(state, error);
 }
 
 } // namespace gbr

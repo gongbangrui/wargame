@@ -199,21 +199,21 @@ Scenario ScenarioIo::fromJson(const QJsonObject& o, QString* err) {
                                          &parseError, context)
             || !readOptionalFiniteDouble(u, "optimalRange", su.attackRange, &su.optimalRange,
                                          &parseError, context)
-            || !readOptionalFiniteDouble(u, "minAttackRange", 0.0, &su.minAttackRange,
+            || !readOptionalFiniteDouble(u, "minAttackRange", 300.0, &su.minAttackRange,
                                          &parseError, context)
-            || !readOptionalFiniteDouble(u, "cooldownSec", 4.0, &su.cooldownSec,
+            || !readOptionalFiniteDouble(u, "cooldownSec", 5.0, &su.cooldownSec,
                                          &parseError, context)
-            || !readOptionalFiniteDouble(u, "damageMin", su.attackPower, &su.damageMin,
+            || !readOptionalFiniteDouble(u, "damageMin", 80.0, &su.damageMin,
                                          &parseError, context)
-            || !readOptionalFiniteDouble(u, "damageMax", su.attackPower, &su.damageMax,
+            || !readOptionalFiniteDouble(u, "damageMax", 110.0, &su.damageMax,
                                          &parseError, context)
-            || !readOptionalFiniteDouble(u, "rangeFalloff", 0.0, &su.rangeFalloff,
+            || !readOptionalFiniteDouble(u, "rangeFalloff", 0.25, &su.rangeFalloff,
                                          &parseError, context)
             || !readOptionalFiniteDouble(u, "fuelCapacitySec", 1800.0, &su.fuelCapacitySec,
                                          &parseError, context)
             || !readOptionalFiniteDouble(u, "initialFuelSec", su.fuelCapacitySec,
                                          &su.initialFuelSec, &parseError, context)
-            || !readOptionalFiniteDouble(u, "rearmDurationSec", 12.0, &su.rearmDurationSec,
+            || !readOptionalFiniteDouble(u, "rearmDurationSec", 8.0, &su.rearmDurationSec,
                                          &parseError, context)) {
             return reject(parseError);
         }

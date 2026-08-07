@@ -1,0 +1,16 @@
+{
+  "nextUnit": "Tab",
+  "prevUnit": "Shift+Tab",
+  "locate": "F",
+  "fitMap": "Ctrl+F",
+  "sidebar": "B",
+  "cancel": "Escape",
+  "slowDown": "[",
+  "speedUp": "]",
+  "countermeasure": "C",
+  "scan": "S",
+  "repair": "R",
+  "halt": "H",
+  "engage": "Return",
+  "trajectory": "T"
+}

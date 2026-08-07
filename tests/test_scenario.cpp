@@ -199,14 +199,14 @@ TEST(ScenarioTest, FromJsonUsesCurrentOptionalWeaponDefaults) {
     const ScenarioUnit& unit = parsed.units.front();
     EXPECT_EQ(unit.ammoCapacity, 4);
     EXPECT_EQ(unit.initialAmmo, 4);
-    EXPECT_DOUBLE_EQ(unit.hitProbability, 0.70);
+    EXPECT_DOUBLE_EQ(unit.hitProbability, 0.72);
     EXPECT_DOUBLE_EQ(unit.optimalRange, 2000.0);
-    EXPECT_DOUBLE_EQ(unit.minAttackRange, 0.0);
-    EXPECT_DOUBLE_EQ(unit.cooldownSec, 4.0);
-    EXPECT_DOUBLE_EQ(unit.damageMin, 250.0);
-    EXPECT_DOUBLE_EQ(unit.damageMax, 250.0);
-    EXPECT_DOUBLE_EQ(unit.rangeFalloff, 0.0);
+    EXPECT_DOUBLE_EQ(unit.minAttackRange, 300.0);
+    EXPECT_DOUBLE_EQ(unit.cooldownSec, 5.0);
+    EXPECT_DOUBLE_EQ(unit.damageMin, 80.0);
+    EXPECT_DOUBLE_EQ(unit.damageMax, 110.0);
+    EXPECT_DOUBLE_EQ(unit.rangeFalloff, 0.25);
     EXPECT_DOUBLE_EQ(unit.fuelCapacitySec, 1800.0);
     EXPECT_DOUBLE_EQ(unit.initialFuelSec, 1800.0);
-    EXPECT_DOUBLE_EQ(unit.rearmDurationSec, 12.0);
+    EXPECT_DOUBLE_EQ(unit.rearmDurationSec, 8.0);
 }

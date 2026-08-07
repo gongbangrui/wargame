@@ -268,8 +268,10 @@ private:
 
 void sendClientEnvelope(QWebSocket& socket, const QString& type, const QString& messageId,
                         const QJsonObject& payload) {
-    socket.sendTextMessage(QJsonDocument(QJsonObject{{QStringLiteral("protocolVersion"), 3},
-                                                      {QStringLiteral("schemaVersion"), 2},
+    socket.sendTextMessage(QJsonDocument(QJsonObject{{QStringLiteral("protocolVersion"),
+                                                       Protocol::Version},
+                                                      {QStringLiteral("schemaVersion"),
+                                                       Protocol::SchemaVersion},
                                                       {QStringLiteral("type"), type},
                                                       {QStringLiteral("messageId"), messageId},
                                                       {QStringLiteral("payload"), payload}})
@@ -1021,6 +1023,143 @@ TEST(GameServerCommandTest, SharedUnitSpeedLimitIsEnforcedByAuthority) {
         &code, &reason));
     EXPECT_EQ(code, QStringLiteral("INVALID_ARGUMENT"));
     EXPECT_EQ(reason, QStringLiteral("速度必须大于 0 且不超过 240"));
+}
+
+TEST(GameServerCommandTest, AbilityAndServiceAuthorizationMatchesRuntimeState) {
+    int argc = 1;
+    char applicationName[] = "authoritative_ability_command_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red-commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        3, QStringLiteral("blue-commander"), QStringLiteral("blue_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        2, QStringLiteral("red-pilot"), QStringLiteral("red_attack_1"),
+        QStringLiteral("attackuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        4, QStringLiteral("red-scout"), QStringLiteral("red_recon_1"),
+        QStringLiteral("reconuav")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_commander"), GeoPos{1000.0, 1000.0, 0.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_attack_1"), GeoPos{1200.0, 1000.0, 2000.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        1, QStringLiteral("red_recon_1"), GeoPos{1300.0, 1000.0, 2000.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+        3, QStringLiteral("blue_commander"), GeoPos{19000.0, 1000.0, 0.0}).ok);
+    server.syncAuthoritativeSeats();
+    QString scenarioError;
+    ASSERT_TRUE(server.applyDeployedScenario(&scenarioError)) << scenarioError.toStdString();
+
+    auto sessionFor = [&server](qint64 userId, const QString& seatId,
+                                const QString& seatType) {
+        GameServer::ClientSession session;
+        session.authenticated = true;
+        session.userId = userId;
+        session.roomId = server.m_roomId;
+        session.seatId = seatId;
+        session.seatType = seatType;
+        session.side = QStringLiteral("red");
+        session.role = seatId;
+        return session;
+    };
+    const auto commander = sessionFor(1, QStringLiteral("red_commander"),
+                                      QStringLiteral("commander"));
+    const auto attack = sessionFor(2, QStringLiteral("red_attack_1"),
+                                   QStringLiteral("attack"));
+    const auto recon = sessionFor(4, QStringLiteral("red_recon_1"),
+                                  QStringLiteral("recon"));
+    const QString commandPostId = server.m_authoritativeRoom
+                                      .seat(QStringLiteral("red_commander")).unitId;
+    const QString attackId = server.m_authoritativeRoom
+                                 .seat(QStringLiteral("red_attack_1")).unitId;
+    const QString reconId = server.m_authoritativeRoom
+                                .seat(QStringLiteral("red_recon_1")).unitId;
+    UnitBase* commandPost = server.m_engine.unit(commandPostId);
+    UnitBase* attackUnit = server.m_engine.unit(attackId);
+    ASSERT_NE(commandPost, nullptr);
+    ASSERT_NE(attackUnit, nullptr);
+
+    QString code;
+    QString reason;
+    EXPECT_TRUE(server.validateCommandOwnership(
+        commander, QStringLiteral("activateCountermeasure"),
+        QVariantMap{{QStringLiteral("unitId"), commandPostId}}, &code, &reason));
+    EXPECT_FALSE(server.validateCommandOwnership(
+        commander, QStringLiteral("activateScan"),
+        QVariantMap{{QStringLiteral("unitId"), commandPostId}}, &code, &reason));
+    EXPECT_EQ(code, QStringLiteral("UNIT_NOT_MOVABLE"));
+
+    EXPECT_FALSE(server.validateCommandOwnership(
+        commander, QStringLiteral("attemptFieldRepair"),
+        QVariantMap{{QStringLiteral("unitId"), commandPostId}}, &code, &reason));
+    EXPECT_EQ(code, QStringLiteral("WEAPON_UNAVAILABLE"));
+    commandPost->applyDamageDelta(commandPost->assessDamage(10.0, 0));
+    EXPECT_TRUE(server.validateCommandOwnership(
+        commander, QStringLiteral("attemptFieldRepair"),
+        QVariantMap{{QStringLiteral("unitId"), commandPostId}}, &code, &reason));
+
+    EXPECT_TRUE(server.validateCommandOwnership(
+        recon, QStringLiteral("activateScan"),
+        QVariantMap{{QStringLiteral("unitId"), reconId}}, &code, &reason));
+    EXPECT_FALSE(server.validateCommandOwnership(
+        attack, QStringLiteral("activateScan"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}, &code, &reason));
+    EXPECT_EQ(code, QStringLiteral("INVALID_UNIT_KIND"));
+
+    EXPECT_TRUE(server.validateCommandOwnership(
+        attack, QStringLiteral("service"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}, &code, &reason));
+    ASSERT_TRUE(server.m_engine.executeCommand(
+        QStringLiteral("service"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}).accepted);
+    EXPECT_TRUE(server.validateCommandOwnership(
+        attack, QStringLiteral("cancelService"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}, &code, &reason));
+    ASSERT_TRUE(server.m_engine.executeCommand(
+        QStringLiteral("cancelService"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}).accepted);
+    EXPECT_FALSE(server.validateCommandOwnership(
+        attack, QStringLiteral("cancelService"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}, &code, &reason));
+    EXPECT_EQ(code, QStringLiteral("INVALID_ARGUMENT"));
+
+    attackUnit->setPosition(GeoPos{1800.0, 1000.0, 2000.0});
+    EXPECT_FALSE(server.validateCommandOwnership(
+        attack, QStringLiteral("service"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}, &code, &reason));
+    EXPECT_EQ(code, QStringLiteral("INVALID_ARGUMENT"));
+
+    EXPECT_TRUE(server.validateCommandOwnership(
+        attack, QStringLiteral("activateCountermeasure"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}, &code, &reason));
+    ASSERT_TRUE(server.m_engine.executeCommand(
+        QStringLiteral("activateCountermeasure"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}).accepted);
+    EXPECT_FALSE(server.validateCommandOwnership(
+        attack, QStringLiteral("activateCountermeasure"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}, &code, &reason));
+    EXPECT_EQ(code, QStringLiteral("WEAPON_UNAVAILABLE"));
+
+    UnitBase::Params commandPostParams = commandPost->params();
+    commandPostParams.commRange = 0.0;
+    commandPost->setParams(commandPostParams);
+    EXPECT_FALSE(server.validateCommandOwnership(
+        commander, QStringLiteral("activateCountermeasure"),
+        QVariantMap{{QStringLiteral("unitId"), attackId}}, &code, &reason));
+    EXPECT_EQ(code, QStringLiteral("COMMUNICATION_LOST"));
 }
 
 TEST(GameServerCommandTest, UnitNameRevisionChangesAndUnitOrderTargetsOwnedUnit) {

@@ -5,6 +5,7 @@
 #include "../core/UnitFsm.h"
 #include "../core/CombatResolver.h"
 #include <QVariantList>
+#include <QSet>
 #include <optional>
 #include <vector>
 
@@ -19,6 +20,7 @@ class AttackUAV : public UnitBase {
     Q_PROPERTY(int ammoCapacity READ ammoCapacity NOTIFY weaponStateChanged)
     Q_PROPERTY(double cooldownRemaining READ cooldownRemaining NOTIFY weaponStateChanged)
     Q_PROPERTY(QString lastShotOutcome READ lastShotOutcome NOTIFY weaponStateChanged)
+    Q_PROPERTY(int activeProjectileCount READ activeProjectileCount NOTIFY weaponStateChanged)
     Q_PROPERTY(double fuelRemaining READ fuelRemaining NOTIFY weaponStateChanged)
     Q_PROPERTY(double fuelCapacity READ fuelCapacity NOTIFY weaponStateChanged)
     Q_PROPERTY(double serviceProgress READ turnaroundProgress NOTIFY weaponStateChanged)
@@ -37,13 +39,19 @@ public:
     int ammoRemaining() const { return m_ammoRemaining; }
     int ammoCapacity() const { return m_ammoCapacity; }
     double cooldownRemaining() const { return m_cooldown; }
+    double optimalAttackRange() const { return m_optimalRange; }
+    double minimumAttackRange() const { return m_minAttackRange; }
     QString lastShotOutcome() const { return m_lastShotOutcome; }
-    double fuelRemaining() const { return m_fuelRemaining; }
-    double fuelCapacity() const { return m_fuelCapacity; }
+    double fuelRemaining() const { return UnitBase::fuelRemaining(); }
+    double fuelCapacity() const { return UnitBase::fuelCapacity(); }
     double turnaroundProgress() const;
-    double turnaroundElapsed() const { return m_turnaroundElapsed; }
+    double turnaroundElapsed() const { return serviceElapsed(); }
     QString rulesOfEngagement() const { return m_rulesOfEngagement; }
     quint64 shotSequence() const { return m_shotSequence; }
+    QString activeProjectileId() const;
+    int activeProjectileCount() const { return m_activeProjectileIds.size(); }
+    bool hasActiveProjectile() const { return !m_activeProjectileIds.isEmpty(); }
+    QSet<QString> activeProjectileIds() const { return m_activeProjectileIds; }
 
     void configureWeapon(const ScenarioUnit& unit);
     std::optional<CombatRequest> takePendingShot();
@@ -55,6 +63,10 @@ public:
     bool restoreRemoteAttackState(const QString& targetId, bool armed,
                                   const QString& rulesOfEngagement);
     bool serviceTick(double dt) override;
+    void markProjectileLaunched(const QString& projectileId);
+    void rejectProjectileLaunch(const QString& reason);
+    void restoreActiveProjectile(const QString& projectileId);
+    void clearActiveProjectiles();
     void cancelEngagement();
     void setRulesOfEngagement(const QString& value);
 
@@ -64,6 +76,9 @@ protected:
     void onMessage(const Message& m) override;
     QJsonObject behaviorCheckpoint() const override;
     bool restoreBehaviorCheckpoint(const QJsonObject& state, QString* error) override;
+    double ammunitionDeficit() const override;
+    double rearmDurationContribution() const override;
+    void restoreServiceSpecificResources() override;
 
 signals:
     void targetChanged();
@@ -87,17 +102,15 @@ private:
     double m_hitProbability = kDefaultAttackUavHitProbability;
     double m_optimalRange = 1500.0;
     double m_minAttackRange = 0.0;
-    double m_cooldownSec = 4.0;
-    double m_damageMin = 100.0;
-    double m_damageMax = 100.0;
-    double m_rangeFalloff = 0.0;
+    double m_cooldownSec = 5.0;
+    double m_damageMin = 80.0;
+    double m_damageMax = 110.0;
+    double m_rangeFalloff = 0.25;
     quint64 m_shotSequence = 0;
     QString m_lastShotOutcome;
-    double m_fuelCapacity = 1800.0;
-    double m_fuelRemaining = 1800.0;
-    double m_rearmDurationSec = 12.0;
-    double m_turnaroundElapsed = 0.0;
+    double m_rearmDurationSec = 8.0;
     QString m_rulesOfEngagement = QStringLiteral("free");
+    QSet<QString> m_activeProjectileIds;
     std::optional<CombatRequest> m_pendingShot;
     UnitFsm m_fsm;
 };

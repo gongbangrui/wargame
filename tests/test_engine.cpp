@@ -401,6 +401,17 @@ TEST_F(EngineTest, CannotRunWhenCommandPostsAreInvalid) {
 }
 
 TEST_F(EngineTest, CommandPostDestructionReportsOutcomeOnce) {
+    Scenario scenario = engine.scenario();
+    for (ScenarioUnit& unit : scenario.units) {
+        unit.schedule.clear();
+        if (unit.id == QLatin1String("red_a1")) {
+            unit.hitProbability = 1.0;
+            unit.minAttackRange = 0.0;
+            unit.damageMin = 250.0;
+            unit.damageMax = 250.0;
+        }
+    }
+    ASSERT_TRUE(engine.setScenario(scenario));
     auto* attacker = engine.unit("red_a1");
     auto* blueCp = engine.unit("blue_cp");
     ASSERT_NE(attacker, nullptr);
@@ -426,6 +437,17 @@ TEST_F(EngineTest, CommandPostDestructionReportsOutcomeOnce) {
 }
 
 TEST_F(EngineTest, SimultaneousCommandPostKillsProduceDraw) {
+    Scenario scenario = engine.scenario();
+    for (ScenarioUnit& unit : scenario.units) {
+        unit.schedule.clear();
+        if (unit.kind == QLatin1String("attackuav")) {
+            unit.hitProbability = 1.0;
+            unit.minAttackRange = 0.0;
+            unit.damageMin = 500.0;
+            unit.damageMax = 500.0;
+        }
+    }
+    ASSERT_TRUE(engine.setScenario(scenario));
     auto* redAttacker = engine.unit("red_a1");
     auto* blueAttacker = engine.unit("blue_a1");
     auto* redCp = engine.unit("red_cp");
@@ -437,8 +459,6 @@ TEST_F(EngineTest, SimultaneousCommandPostKillsProduceDraw) {
 
     redAttacker->clearSchedule();
     blueAttacker->clearSchedule();
-    redAttacker->setAttackPower(redCp->maxHp() + blueCp->maxHp());
-    blueAttacker->setAttackPower(redCp->maxHp() + blueCp->maxHp());
     redAttacker->setPosition(blueCp->pos());
     blueAttacker->setPosition(redCp->pos());
 
@@ -517,14 +537,23 @@ TEST_F(EngineTest, PostedDestroyNotificationCannotKillLiveUnit) {
 TEST_F(EngineTest, DestroyedTargetLeavesAttackerInPlaceWithoutAutoWithdraw) {
     // 修复后的设计：摧毁目标后，攻击方不应被 CP 自动派单撤回；
     // 而是保留原地等待新指令，由指挥员手动决定下一步。
+    Scenario scenario = engine.scenario();
+    for (ScenarioUnit& unit : scenario.units) {
+        unit.schedule.clear();
+        if (unit.id == QLatin1String("red_a1")) {
+            unit.hitProbability = 1.0;
+            unit.minAttackRange = 0.0;
+            unit.damageMin = 100.0;
+            unit.damageMax = 100.0;
+        }
+    }
+    ASSERT_TRUE(engine.setScenario(scenario));
     auto* attacker = engine.unit("red_a1");
     auto* target = engine.unit("blue_r1");
     auto* home = engine.unit("red_cp");
     ASSERT_NE(attacker, nullptr);
     ASSERT_NE(target, nullptr);
     ASSERT_NE(home, nullptr);
-    target->clearSchedule();
-    attacker->clearSchedule();
     attacker->setPosition(target->pos());
     target->setHp(50.0);
 
@@ -562,7 +591,7 @@ TEST_F(EngineTest, AttackUavRepursuesTargetLeavingAttackPosition) {
     attacker->clearSchedule();
     target->clearSchedule();
     attacker->setPosition(GeoPos{0, 0, 2000});
-    target->setPosition(GeoPos{100, 0, 2000});
+    target->setPosition(GeoPos{500, 0, 2000});
 
     // Set ROE to "hold" so the UAV monitors in attack position without firing.
     // This keeps the target alive for the repursuit test after it moves away.
@@ -725,8 +754,8 @@ TEST_F(EngineTest, MutualJammerEffectsAreOrderIndependent) {
 
     engine.stepOnce(0.05);
 
-    EXPECT_DOUBLE_EQ(redJammer->jamFactor(), 0.4);
-    EXPECT_DOUBLE_EQ(blueJammer->jamFactor(), 0.4);
+    EXPECT_DOUBLE_EQ(redJammer->jamFactor(), 0.5);
+    EXPECT_DOUBLE_EQ(blueJammer->jamFactor(), 0.5);
     EXPECT_DOUBLE_EQ(redTarget->jamFactor(), 1.0);
     EXPECT_DOUBLE_EQ(blueTarget->jamFactor(), 1.0);
 }
@@ -808,6 +837,188 @@ TEST_F(EngineTest, ScenarioRejectsExcessiveUnitCount) {
 
     EXPECT_FALSE(engine.setScenario(invalid));
     EXPECT_TRUE(engine.lastError().contains(QStringLiteral("数量")));
+}
+
+TEST(ProjectileDomainTest, MovesAtConstantSpeedAndObeysTurnRadius) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& configured : scenario.units) {
+        configured.schedule.clear();
+        if (configured.id == QLatin1String("red_a1")) {
+            configured.pos = GeoPos{5000.0, 5000.0, 2000.0};
+            configured.attackRange = 5000.0;
+            configured.optimalRange = 2500.0;
+        } else if (configured.id == QLatin1String("blue_r1")) {
+            configured.pos = GeoPos{6500.0, 5000.0, 2000.0};
+        }
+    }
+    SimulationEngine engine;
+    ASSERT_TRUE(engine.setScenario(scenario));
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("engageTarget"),
+        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
+                    {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
+
+    engine.stepOnce(0.1);
+    QJsonArray projectiles = engine.projectilesSnapshot();
+    ASSERT_EQ(projectiles.size(), 1);
+    QJsonObject first = projectiles.first().toObject();
+    EXPECT_TRUE(first.value(QStringLiteral("active")).toBool());
+    EXPECT_DOUBLE_EQ(first.value(QStringLiteral("speed")).toDouble(), 420.0);
+    EXPECT_NEAR(first.value(QStringLiteral("position")).toArray().at(0).toDouble(),
+                5042.0, 1e-6);
+
+    engine.unit(QStringLiteral("blue_r1"))->setPosition(GeoPos{6500.0, 6000.0, 2000.0});
+    engine.stepOnce(0.1);
+    projectiles = engine.projectilesSnapshot();
+    ASSERT_EQ(projectiles.size(), 1);
+    const QJsonObject second = projectiles.first().toObject();
+    EXPECT_NEAR(second.value(QStringLiteral("headingRad")).toDouble(), 0.06, 1e-6);
+    const QJsonArray p0 = first.value(QStringLiteral("position")).toArray();
+    const QJsonArray p1 = second.value(QStringLiteral("position")).toArray();
+    EXPECT_NEAR(std::hypot(p1.at(0).toDouble() - p0.at(0).toDouble(),
+                           p1.at(1).toDouble() - p0.at(1).toDouble()),
+                42.0, 1e-6);
+}
+
+TEST(ProjectileDomainTest, ExpiresWhenTargetCannotBeReachedWithinLifetime) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& configured : scenario.units) {
+        configured.schedule.clear();
+        if (configured.id == QLatin1String("red_a1")) {
+            configured.pos = GeoPos{1000.0, 7500.0, 2000.0};
+            configured.attackRange = 19000.0;
+            configured.optimalRange = 10000.0;
+        } else if (configured.id == QLatin1String("blue_r1")) {
+            configured.pos = GeoPos{19000.0, 7500.0, 2000.0};
+        }
+    }
+    SimulationEngine engine;
+    ASSERT_TRUE(engine.setScenario(scenario));
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("engageTarget"),
+        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
+                    {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
+    engine.stepOnce(0.05);
+    for (int i = 0; i < 160; ++i) engine.stepOnce(0.1);
+
+    const QJsonArray projectiles = engine.projectilesSnapshot();
+    ASSERT_EQ(projectiles.size(), 1);
+    EXPECT_FALSE(projectiles.first().toObject().value(QStringLiteral("active")).toBool());
+    EXPECT_EQ(projectiles.first().toObject().value(QStringLiteral("terminalReason")).toString(),
+              QStringLiteral("expired"));
+}
+
+TEST(AbilityDomainTest, CountermeasureConsumesChargeAndTerminatesAllMissilesInRange) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& configured : scenario.units) {
+        configured.schedule.clear();
+        if (configured.id == QLatin1String("blue_a1")) {
+            configured.pos = GeoPos{11000.0, 5000.0, 2000.0};
+        } else if (configured.id == QLatin1String("red_r1")) {
+            configured.pos = GeoPos{10000.0, 5000.0, 2000.0};
+        }
+    }
+    SimulationEngine engine;
+    ASSERT_TRUE(engine.setScenario(scenario));
+    UnitBase* defender = engine.unit(QStringLiteral("red_r1"));
+    ASSERT_NE(defender, nullptr);
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("engageTarget"),
+        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("blue_a1")},
+                    {QStringLiteral("targetId"), QStringLiteral("red_r1")}}).accepted);
+    engine.stepOnce(0.05);
+    ASSERT_EQ(engine.projectilesSnapshot().size(), 1);
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("activateCountermeasure"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")}}).accepted);
+
+    const QJsonObject projectile = engine.projectilesSnapshot().first().toObject();
+    EXPECT_FALSE(projectile.value(QStringLiteral("active")).toBool());
+    EXPECT_EQ(projectile.value(QStringLiteral("terminalReason")).toString(),
+              QStringLiteral("countermeasured"));
+    EXPECT_EQ(defender->countermeasureState().remaining, 1);
+    EXPECT_DOUBLE_EQ(defender->hp(), defender->maxHp());
+}
+
+TEST(AbilityDomainTest, ScanLocksContactsAndRepairRollIsReplayStable) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& configured : scenario.units) {
+        configured.schedule.clear();
+        if (configured.id == QLatin1String("red_r1")) {
+            configured.pos = GeoPos{5000.0, 5000.0, 2000.0};
+        } else if (configured.id == QLatin1String("blue_r1")) {
+            configured.pos = GeoPos{8000.0, 5000.0, 2000.0};
+        }
+    }
+    SimulationEngine first;
+    SimulationEngine second;
+    ASSERT_TRUE(first.setScenario(scenario));
+    ASSERT_TRUE(second.setScenario(scenario));
+    first.restoreCombatSeed(0x12345678ULL);
+    second.restoreCombatSeed(0x12345678ULL);
+    ASSERT_TRUE(first.executeCommand(
+        QStringLiteral("activateScan"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")}}).accepted);
+    bool foundTarget = false;
+    for (const QJsonValue& contact : first.activeScanContacts()) {
+        foundTarget |= contact.toObject().value(QStringLiteral("targetId")).toString()
+            == QLatin1String("blue_r1");
+    }
+    EXPECT_TRUE(foundTarget);
+
+    const QJsonObject damage{{QStringLiteral("sensor"), 0.4},
+                             {QStringLiteral("comms"), 0.8},
+                             {QStringLiteral("mobility"), 0.9},
+                             {QStringLiteral("weapon"), 0.7}};
+    ASSERT_TRUE(first.unit(QStringLiteral("red_r1"))->restoreSubsystemState(damage));
+    ASSERT_TRUE(second.unit(QStringLiteral("red_r1"))->restoreSubsystemState(damage));
+    EXPECT_EQ(first.executeCommand(
+                  QStringLiteral("attemptFieldRepair"),
+                  QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")}}).accepted,
+              second.executeCommand(
+                  QStringLiteral("attemptFieldRepair"),
+                  QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")}}).accepted);
+    EXPECT_EQ(first.unit(QStringLiteral("red_r1"))->subsystemStateJson(),
+              second.unit(QStringLiteral("red_r1"))->subsystemStateJson());
+    EXPECT_EQ(first.unit(QStringLiteral("red_r1"))->repairAttemptSequence(), 1u);
+    EXPECT_EQ(second.unit(QStringLiteral("red_r1"))->repairAttemptSequence(), 1u);
+}
+
+TEST(ResourceDomainTest, FuelUsesEconomicCruiseBaselineAndZeroFuelRejectsMovement) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& configured : scenario.units) configured.schedule.clear();
+    SimulationEngine engine;
+    ASSERT_TRUE(engine.setScenario(scenario));
+    UnitBase* attacker = engine.unit(QStringLiteral("red_a1"));
+    ASSERT_NE(attacker, nullptr);
+    const double initialFuel = attacker->fuelRemaining();
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("moveTo"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_a1")},
+                    {QStringLiteral("pos"),
+                     QVariantMap{{QStringLiteral("x"), attacker->pos().x + 1000.0},
+                                 {QStringLiteral("y"), attacker->pos().y}}}}).accepted);
+    engine.stepOnce(1.0);
+    EXPECT_DOUBLE_EQ(attacker->fuelBurnRate(), 4.0);
+    EXPECT_DOUBLE_EQ(attacker->fuelRemaining(), initialFuel - 4.0);
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("halt"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_a1")}}).accepted);
+    engine.stepOnce(1.0);
+    EXPECT_DOUBLE_EQ(attacker->fuelBurnRate(), 0.5);
+
+    Scenario emptyFuel = scenario;
+    for (ScenarioUnit& configured : emptyFuel.units) {
+        if (configured.id == QLatin1String("red_r1")) configured.initialFuelSec = 0.0;
+    }
+    SimulationEngine stopped;
+    ASSERT_TRUE(stopped.setScenario(emptyFuel));
+    EXPECT_FALSE(stopped.executeCommand(
+        QStringLiteral("moveTo"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")},
+                    {QStringLiteral("pos"),
+                     QVariantMap{{QStringLiteral("x"), 6000.0},
+                                 {QStringLiteral("y"), 6000.0}}}}).accepted);
 }
 
 TEST(MessageLogRecorderTest, EnableFailureIsReportedAndNestedPathIsCreated) {

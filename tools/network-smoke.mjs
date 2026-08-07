@@ -68,6 +68,7 @@ class GameSession {
         const byId = new Map(this.state.units.map(unit => [unit.id, unit]));
         for (const unit of message.payload.units || []) byId.set(unit.id, unit);
         this.state.units = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+        if (message.payload.projectiles) this.state.projectiles = structuredClone(message.payload.projectiles);
         this.state.roomState = message.payload.roomState;
         if (message.payload.messages) this.state.messages = message.payload.messages;
         if (message.payload.mapMarks) this.state.mapMarks = message.payload.mapMarks;
@@ -87,7 +88,7 @@ class GameSession {
   sendWithId(messageId, type, payload) {
     this.socket.send(JSON.stringify({
       protocolVersion: 3,
-      schemaVersion: 2,
+      schemaVersion: 3,
       type,
       messageId,
       payload,

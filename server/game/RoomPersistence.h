@@ -19,6 +19,12 @@ struct AiCheckpointState {
     QString aiDifficulty = QStringLiteral("normal");
     QString providerMode = QStringLiteral("auto");
     QString providerModel = QStringLiteral("auto");
+    QString selectedProvider = QStringLiteral("rules");
+    QString selectedModel;
+    QString resolvedModel;
+    quint64 roomConfigVersion = 1;
+    quint64 ollamaConfigVersion = 1;
+    QString fallbackReason;
     double nextDecisionAt = 0.0;
     double nextReplanAt = 0.0;
     std::optional<AiPlanV1> currentPlan;
@@ -39,9 +45,11 @@ struct AiCheckpointState {
 };
 
 struct RoomCheckpoint {
+    int sourceSchemaVersion = 4;
     Scenario scenario;
     Scenario runInitialScenario;
     QJsonArray runtimeUnits;
+    QJsonObject engineState;
     QJsonArray commandHistory;
     QJsonArray mapMarks;
     QJsonObject authoritativeRoom;

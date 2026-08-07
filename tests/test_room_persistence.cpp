@@ -31,6 +31,9 @@ TEST(RoomPersistenceTest, CheckpointRoundTripIsAtomicAndVersioned) {
     source.runInitialScenario = source.scenario;
     source.runtimeUnits = QJsonArray{QJsonObject{{QStringLiteral("id"),
                                                   QStringLiteral("red_cp")}}};
+    source.engineState = QJsonObject{{QStringLiteral("schema"), 3},
+                                     {QStringLiteral("projectiles"), QJsonArray{}},
+                                     {QStringLiteral("scanContacts"), QJsonArray{}}};
     source.phase = QStringLiteral("running");
     source.running = true;
     source.simTime = 42.5;
@@ -45,11 +48,13 @@ TEST(RoomPersistenceTest, CheckpointRoundTripIsAtomicAndVersioned) {
     ASSERT_TRUE(persistence.saveCheckpoint(source, &error)) << error.toStdString();
     RoomCheckpoint loaded;
     ASSERT_TRUE(persistence.loadCheckpoint(&loaded, &error)) << error.toStdString();
+    EXPECT_EQ(loaded.sourceSchemaVersion, 4);
     EXPECT_EQ(loaded.phase, source.phase);
     EXPECT_DOUBLE_EQ(loaded.simTime, source.simTime);
     EXPECT_EQ(loaded.scenarioRevision, source.scenarioRevision);
     EXPECT_EQ(loaded.eventSequence, source.eventSequence);
     EXPECT_EQ(loaded.mapMarks, source.mapMarks);
+    EXPECT_EQ(loaded.engineState, source.engineState);
     EXPECT_EQ(loaded.scenario.units.size(), source.scenario.units.size());
 }
 
@@ -95,7 +100,7 @@ TEST(RoomPersistenceTest, AiStateRoundTripsWithoutChangingCheckpointSchema) {
     QFile file(checkpointPath);
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));
     const QJsonObject saved = QJsonDocument::fromJson(file.readAll()).object();
-    EXPECT_EQ(saved.value(QStringLiteral("checkpointSchemaVersion")).toInt(), 2);
+    EXPECT_EQ(saved.value(QStringLiteral("checkpointSchemaVersion")).toInt(), 4);
     EXPECT_TRUE(saved.value(QStringLiteral("aiState")).isObject());
 
     RoomCheckpoint loaded;
@@ -115,6 +120,34 @@ TEST(RoomPersistenceTest, AiStateRoundTripsWithoutChangingCheckpointSchema) {
     EXPECT_EQ(loaded.aiState->providerSuccesses, ai.providerSuccesses);
     EXPECT_EQ(loaded.aiState->providerFailures, ai.providerFailures);
     EXPECT_EQ(loaded.aiState->effectiveEngine, ai.effectiveEngine);
+}
+
+TEST(RoomPersistenceTest, SchemaTwoCheckpointLoadsWithMigrationSourceVersion) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    const QString checkpointPath = temporary.filePath(QStringLiteral("checkpoint.json"));
+    RoomPersistence persistence(checkpointPath,
+                                temporary.filePath(QStringLiteral("events.jsonl")));
+    RoomCheckpoint source;
+    source.scenario = ScenarioIo::defaultScenario();
+    source.runInitialScenario = source.scenario;
+
+    QString error;
+    ASSERT_TRUE(persistence.saveCheckpoint(source, &error)) << error.toStdString();
+    QFile file(checkpointPath);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    QJsonObject legacy = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    legacy[QStringLiteral("checkpointSchemaVersion")] = 2;
+    legacy.remove(QStringLiteral("engineState"));
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_GT(file.write(QJsonDocument(legacy).toJson()), 0);
+    file.close();
+
+    RoomCheckpoint loaded;
+    ASSERT_TRUE(persistence.loadCheckpoint(&loaded, &error)) << error.toStdString();
+    EXPECT_EQ(loaded.sourceSchemaVersion, 2);
+    EXPECT_TRUE(loaded.engineState.isEmpty());
 }
 
 TEST(RoomPersistenceTest, MissingProviderModelUsesLegacyCheckpointCompatibilityValue) {

@@ -7,6 +7,7 @@
 
 #include <QSet>
 
+#include <algorithm>
 #include <cmath>
 
 using namespace gbr;
@@ -22,6 +23,30 @@ AiSeatState seat(const QString& id, const QString& unitId, const QString& kind,
     value.x = x;
     value.y = y;
     return value;
+}
+
+bool hasAction(const QList<AiCommand>& commands, const QString& action) {
+    return std::any_of(commands.cbegin(), commands.cend(), [&action](const AiCommand& command) {
+        return command.action == action;
+    });
+}
+
+const AiCommand* commandWithAction(const QList<AiCommand>& commands,
+                                   const QString& action) {
+    const auto it = std::find_if(commands.cbegin(), commands.cend(),
+                                 [&action](const AiCommand& command) {
+                                     return command.action == action;
+                                 });
+    return it == commands.cend() ? nullptr : &*it;
+}
+
+AiKnowledgeState knowledgeFor(const QList<AiSeatState>& seats, double now = 10.0) {
+    AiKnowledgeState knowledge;
+    knowledge.seats = seats;
+    knowledge.now = now;
+    knowledge.mapWidth = 10000.0;
+    knowledge.mapHeight = 8000.0;
+    return knowledge;
 }
 
 }
@@ -402,6 +427,34 @@ TEST(RulesAiTest, StrategicPlannerScoresCommandPostAndUsesOnlyVisibleFireTargets
               QStringLiteral("red_cp"));
 }
 
+TEST(RulesAiTest, AttackUsesOptimalRangeAsFiringPosition) {
+    AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
+                                QStringLiteral("attackuav"), 100.0, 100.0);
+    attacker.ammoRemaining = 4;
+    attacker.weaponHealth = 1.0;
+    attacker.speed = 100.0;
+    attacker.cruiseSpeed = 100.0;
+    attacker.minimumAttackRange = 500.0;
+    attacker.optimalAttackRange = 1500.0;
+    attacker.maximumAttackRange = 3000.0;
+    attacker.visibleTargets = {
+        AiObservedTarget{QStringLiteral("red_a1"), QStringLiteral("attackuav"),
+                         3100.0, 100.0, 0.0, 0.0, 1.0, 10.0, true, false, false}};
+
+    AiPlanV1 plan;
+    plan.objectives.append(AiObjectiveV1{QStringLiteral("attack"), 20,
+                                         attacker.seatId, QStringLiteral("red_a1"), {}, 30.0});
+    const QList<AiCommand> commands = RulesAi::commandsForPlan(
+        plan, {attacker}, 10.0, 10000.0, 8000.0);
+    ASSERT_EQ(commands.size(), 1);
+    ASSERT_EQ(commands.at(0).action, QStringLiteral("moveTo"));
+    const QVariantMap position = commands.at(0).args.value(QStringLiteral("pos")).toMap();
+    EXPECT_NEAR(std::hypot(position.value(QStringLiteral("x")).toDouble() - 3100.0,
+                           position.value(QStringLiteral("y")).toDouble() - 100.0),
+                1500.0, 1e-9);
+    EXPECT_FALSE(hasAction(commands, QStringLiteral("engageTarget")));
+}
+
 TEST(RulesAiTest, StrategicMemoryContactCreatesSearchInsteadOfIllegalEngagement) {
     AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
                                 QStringLiteral("attackuav"), 100.0, 100.0);
@@ -468,4 +521,170 @@ TEST(RulesAiTest, ContactMemoryCheckpointRoundTripPreservesConfidenceAndPrivileg
     EXPECT_DOUBLE_EQ(restored.confidence, original.confidence);
     EXPECT_TRUE(restored.privileged);
     EXPECT_TRUE(restored.commandPost);
+}
+
+TEST(RulesAiTest, VisibleIncomingProjectileTriggersCountermeasureAndLateralOverrideOnly) {
+    AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
+                                QStringLiteral("attackuav"), 5000.0, 4000.0);
+    attacker.speed = 60.0;
+    attacker.commandedSpeed = 40.0;
+    attacker.cruiseSpeed = 80.0;
+    attacker.fuelRemaining = 900.0;
+    attacker.fuelCapacity = 1000.0;
+    attacker.commandPostAlive = true;
+    attacker.commandPostX = 1000.0;
+    attacker.commandPostY = 1000.0;
+    attacker.countermeasureSupported = true;
+    attacker.countermeasureAvailable = true;
+    attacker.countermeasureRange = 900.0;
+    attacker.countermeasureRemaining = 3;
+    attacker.countermeasureCapacity = 3;
+    attacker.repairAvailable = true;
+    attacker.lowestSubsystemHealth = 0.60;
+    attacker.visibleProjectiles.append(AiObservedProjectile{
+        QStringLiteral("track-visible"), QStringLiteral("red"), attacker.unitId,
+        5600.0, 4000.0, 3.14159265358979323846, 360.0, 1.0, 18.0, true});
+
+    AiPlanV1 plan;
+    plan.objectives.append(AiObjectiveV1{
+        QStringLiteral("patrol"), 20, attacker.seatId, {},
+        QJsonObject{{QStringLiteral("x"), 8000.0},
+                    {QStringLiteral("y"), 4000.0}}, 30.0});
+    AiKnowledgeState knowledge = knowledgeFor({attacker});
+    const QList<AiCommand> commands = RulesAi::commandsForPlan(
+        plan, {attacker}, 10.0, 10000.0, 8000.0, &knowledge);
+
+    EXPECT_TRUE(hasAction(commands, QStringLiteral("activateCountermeasure")));
+    EXPECT_TRUE(hasAction(commands, QStringLiteral("setSpeed")));
+    EXPECT_TRUE(hasAction(commands, QStringLiteral("moveTo")));
+    EXPECT_FALSE(hasAction(commands, QStringLiteral("attemptFieldRepair")));
+    const AiCommand* evasion = commandWithAction(commands, QStringLiteral("moveTo"));
+    ASSERT_NE(evasion, nullptr);
+    const QVariantMap destination = evasion->args.value(QStringLiteral("pos")).toMap();
+    EXPECT_NE(destination.value(QStringLiteral("y")).toDouble(), attacker.y);
+
+    attacker.visibleProjectiles.clear();
+    knowledge.seats = {attacker};
+    AiPlanV1 defend;
+    defend.objectives.append(AiObjectiveV1{
+        QStringLiteral("defend"), 20, attacker.seatId, {}, {}, 30.0});
+    const QList<AiCommand> withoutProjectedThreat = RulesAi::commandsForPlan(
+        defend, {attacker}, 10.0, 10000.0, 8000.0, &knowledge);
+    EXPECT_FALSE(hasAction(withoutProjectedThreat, QStringLiteral("activateCountermeasure")));
+    EXPECT_FALSE(hasAction(withoutProjectedThreat, QStringLiteral("moveTo")));
+    EXPECT_TRUE(hasAction(withoutProjectedThreat, QStringLiteral("attemptFieldRepair")));
+    EXPECT_TRUE(hasAction(withoutProjectedThreat, QStringLiteral("halt")));
+}
+
+TEST(RulesAiTest, FuelReserveReturnsToCommandPostAndStartsServiceInRange) {
+    AiSeatState recon = seat(QStringLiteral("blue_recon_1"), QStringLiteral("blue_r1"),
+                             QStringLiteral("reconuav"), 16000.0, 1000.0);
+    recon.speed = 100.0;
+    recon.commandedSpeed = 100.0;
+    recon.cruiseSpeed = 100.0;
+    recon.fuelRemaining = 600.0;
+    recon.fuelCapacity = 1000.0;
+    recon.fuelBurnRate = 3.5;
+    recon.commandPostAlive = true;
+    recon.commandPostX = 1000.0;
+    recon.commandPostY = 1000.0;
+
+    AiPlanV1 plan;
+    plan.objectives.append(AiObjectiveV1{
+        QStringLiteral("defend"), 10, recon.seatId, {}, {}, 30.0});
+    AiKnowledgeState knowledge = knowledgeFor({recon});
+    knowledge.mapWidth = 20000.0;
+    const QList<AiCommand> lowFuel = RulesAi::commandsForPlan(
+        plan, {recon}, 10.0, 20000.0, 8000.0, &knowledge);
+    const AiCommand* withdraw = commandWithAction(lowFuel, QStringLiteral("withdraw"));
+    ASSERT_NE(withdraw, nullptr);
+    EXPECT_EQ(withdraw->args.value(QStringLiteral("pos")).toMap(),
+              (QVariantMap{{QStringLiteral("x"), 1000.0},
+                           {QStringLiteral("y"), 1000.0}}));
+    EXPECT_FALSE(hasAction(lowFuel, QStringLiteral("halt")));
+
+    recon.fuelRemaining = 700.0;
+    knowledge.seats = {recon};
+    const QList<AiCommand> sufficientReserve = RulesAi::commandsForPlan(
+        plan, {recon}, 10.0, 20000.0, 8000.0, &knowledge);
+    EXPECT_FALSE(hasAction(sufficientReserve, QStringLiteral("withdraw")));
+    EXPECT_TRUE(hasAction(sufficientReserve, QStringLiteral("halt")));
+
+    recon.x = 1200.0;
+    recon.fuelRemaining = 300.0;
+    recon.serviceEligible = true;
+    knowledge.seats = {recon};
+    const QList<AiCommand> atCommandPost = RulesAi::commandsForPlan(
+        plan, {recon}, 10.0, 20000.0, 8000.0, &knowledge);
+    EXPECT_TRUE(hasAction(atCommandPost, QStringLiteral("service")));
+    EXPECT_FALSE(hasAction(atCommandPost, QStringLiteral("withdraw")));
+    EXPECT_FALSE(hasAction(atCommandPost, QStringLiteral("halt")));
+
+    recon.x = 16000.0;
+    recon.fuelRemaining = 0.0;
+    recon.serviceEligible = false;
+    knowledge.seats = {recon};
+    const QList<AiCommand> stranded = RulesAi::commandsForPlan(
+        plan, {recon}, 10.0, 20000.0, 8000.0, &knowledge);
+    EXPECT_TRUE(stranded.isEmpty());
+}
+
+TEST(RulesAiTest, RepairAndScanUseThreatAndFreshnessGates) {
+    AiSeatState recon = seat(QStringLiteral("blue_recon_1"), QStringLiteral("blue_r1"),
+                             QStringLiteral("reconuav"), 1000.0, 1000.0);
+    recon.fuelRemaining = 900.0;
+    recon.fuelCapacity = 1000.0;
+    recon.cruiseSpeed = 80.0;
+    recon.commandedSpeed = 80.0;
+    recon.commandPostAlive = true;
+    recon.commandPostX = 500.0;
+    recon.commandPostY = 500.0;
+    recon.repairAvailable = true;
+    recon.lowestSubsystemHealth = 0.60;
+    recon.scanSupported = true;
+    recon.scanAvailable = true;
+
+    AiPlanV1 plan;
+    plan.objectives.append(AiObjectiveV1{
+        QStringLiteral("defend"), 10, recon.seatId, {}, {}, 30.0});
+    AiKnowledgeState stale = knowledgeFor({recon});
+    const QList<AiCommand> staleCommands = RulesAi::commandsForPlan(
+        plan, {recon}, 10.0, 10000.0, 8000.0, &stale);
+    EXPECT_TRUE(hasAction(staleCommands, QStringLiteral("attemptFieldRepair")));
+    EXPECT_TRUE(hasAction(staleCommands, QStringLiteral("activateScan")));
+
+    AiKnowledgeState fresh = stale;
+    fresh.contacts = {AiObservedTarget{
+        QStringLiteral("red_r1"), QStringLiteral("reconuav"),
+        2000.0, 1000.0, 0.0, 0.0, 1.0, 10.0, true, false, false}};
+    const QList<AiCommand> freshCommands = RulesAi::commandsForPlan(
+        plan, {recon}, 10.0, 10000.0, 8000.0, &fresh);
+    EXPECT_TRUE(hasAction(freshCommands, QStringLiteral("attemptFieldRepair")));
+    EXPECT_FALSE(hasAction(freshCommands, QStringLiteral("activateScan")));
+
+    fresh.commandPostThreat = true;
+    const QList<AiCommand> commandPostThreat = RulesAi::commandsForPlan(
+        plan, {recon}, 10.0, 10000.0, 8000.0, &fresh);
+    EXPECT_TRUE(hasAction(commandPostThreat, QStringLiteral("activateScan")));
+}
+
+TEST(RulesAiTest, FriendlyInFlightProjectileSuppressesDuplicateEngagement) {
+    AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
+                                QStringLiteral("attackuav"), 100.0, 100.0);
+    attacker.targetVisible = true;
+    attacker.targetId = QStringLiteral("red_cp");
+    attacker.targetKind = QStringLiteral("commandpost");
+    attacker.visibleProjectiles.append(AiObservedProjectile{
+        QStringLiteral("blue-shot"), QStringLiteral("blue"), QStringLiteral("red_cp"),
+        200.0, 100.0, 0.0, 420.0, 1.0, 16.0, true, 100.0});
+    AiPlanV1 plan;
+    plan.objectives.append(AiObjectiveV1{
+        QStringLiteral("attack"), 10, attacker.seatId, QStringLiteral("red_cp"), {}, 30.0});
+
+    EXPECT_TRUE(RulesAi::commandsForPlan(plan, {attacker}, 10.0).isEmpty());
+    attacker.visibleProjectiles.first().active = false;
+    const QList<AiCommand> afterResolution = RulesAi::commandsForPlan(
+        plan, {attacker}, 10.0);
+    ASSERT_EQ(afterResolution.size(), 1);
+    EXPECT_EQ(afterResolution.first().action, QStringLiteral("engageTarget"));
 }

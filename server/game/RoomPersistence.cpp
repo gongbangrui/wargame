@@ -32,7 +32,8 @@ namespace gbr {
 
 namespace {
 
-constexpr int kCheckpointSchemaVersion = 2;
+constexpr int kCheckpointSchemaVersion = 4;
+constexpr int kOldestSupportedCheckpointSchemaVersion = 2;
 constexpr qint64 kMaxEventLogBytes = 16 * 1024 * 1024;
 constexpr qint64 kMaxCheckpointBytes = 64 * 1024 * 1024;
 
@@ -156,6 +157,12 @@ QJsonObject aiStateToJson(const AiCheckpointState& state) {
         {QStringLiteral("aiDifficulty"), state.aiDifficulty},
         {QStringLiteral("providerMode"), state.providerMode},
         {QStringLiteral("providerModel"), state.providerModel},
+        {QStringLiteral("selectedProvider"), state.selectedProvider},
+        {QStringLiteral("selectedModel"), state.selectedModel},
+        {QStringLiteral("resolvedModel"), state.resolvedModel},
+        {QStringLiteral("roomConfigVersion"), QString::number(state.roomConfigVersion)},
+        {QStringLiteral("ollamaConfigVersion"), QString::number(state.ollamaConfigVersion)},
+        {QStringLiteral("fallbackReason"), state.fallbackReason},
         {QStringLiteral("nextDecisionAt"), state.nextDecisionAt},
         {QStringLiteral("nextReplanAt"), state.nextReplanAt},
         {QStringLiteral("consecutiveFailures"), state.consecutiveFailures},
@@ -232,6 +239,23 @@ bool aiStateFromJson(const QJsonObject& object, AiCheckpointState* state, QStrin
                               .toString(QStringLiteral("auto"));
     parsed.providerModel = object.value(QStringLiteral("providerModel"))
                                .toString(QStringLiteral("qwen3:4b"));
+    parsed.selectedProvider = object.value(QStringLiteral("selectedProvider"))
+                                 .toString(parsed.providerMode == QLatin1String("rules")
+                                               ? QStringLiteral("rules")
+                                               : QStringLiteral("ollama"));
+    parsed.selectedModel = object.value(QStringLiteral("selectedModel")).toString();
+    parsed.resolvedModel = object.value(QStringLiteral("resolvedModel")).toString();
+    parsed.fallbackReason = object.value(QStringLiteral("fallbackReason")).toString();
+    if (object.contains(QStringLiteral("roomConfigVersion"))
+        && !unsignedField(object, QStringLiteral("roomConfigVersion"),
+                          &parsed.roomConfigVersion)) {
+        return fail(QStringLiteral("AI 房间配置版本无效"));
+    }
+    if (object.contains(QStringLiteral("ollamaConfigVersion"))
+        && !unsignedField(object, QStringLiteral("ollamaConfigVersion"),
+                          &parsed.ollamaConfigVersion)) {
+        return fail(QStringLiteral("AI Ollama 配置版本无效"));
+    }
     parsed.strategyPhase = object.value(QStringLiteral("strategyPhase"))
                                .toString(QStringLiteral("recon"));
     parsed.replanReason = object.value(QStringLiteral("replanReason")).toString();
@@ -265,6 +289,11 @@ bool aiStateFromJson(const QJsonObject& object, AiCheckpointState* state, QStrin
             && parsed.providerMode != QLatin1String("auto")
             && parsed.providerMode != QLatin1String("ollama"))
         || parsed.providerModel.isEmpty() || parsed.providerModel.size() > 128
+        || (parsed.selectedProvider != QLatin1String("rules")
+            && parsed.selectedProvider != QLatin1String("ollama"))
+        || parsed.selectedModel.size() > 128
+        || parsed.resolvedModel.size() > 128
+        || parsed.fallbackReason.size() > 256
         || parsed.strategyPhase.isEmpty() || parsed.strategyPhase.size() > 64
         || parsed.replanReason.size() > 128
         || !lastLatencyMs.isDouble() || parsed.lastLatencyMs < 0
@@ -315,6 +344,7 @@ QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
         {QStringLiteral("scenario"), ScenarioIo::toJson(checkpoint.scenario)},
         {QStringLiteral("runInitialScenario"), ScenarioIo::toJson(checkpoint.runInitialScenario)},
         {QStringLiteral("runtimeUnits"), checkpoint.runtimeUnits},
+        {QStringLiteral("engineState"), checkpoint.engineState},
         {QStringLiteral("commandHistory"), checkpoint.commandHistory},
         {QStringLiteral("authoritativeRoom"), checkpoint.authoritativeRoom},
         {QStringLiteral("roomState"),
@@ -343,16 +373,24 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
         if (error) *error = message;
         return false;
     };
-    if (object.value(QStringLiteral("checkpointSchemaVersion")).toInt()
-        != kCheckpointSchemaVersion) {
+    const int checkpointSchemaVersion = object.value(
+        QStringLiteral("checkpointSchemaVersion")).toInt();
+    if (checkpointSchemaVersion < kOldestSupportedCheckpointSchemaVersion
+        || checkpointSchemaVersion > kCheckpointSchemaVersion) {
         return fail(QStringLiteral("检查点结构版本不兼容"));
     }
-    if (object.value(QStringLiteral("protocolVersion")).toInt() != Protocol::Version) {
+    const int storedProtocolVersion = object.value(QStringLiteral("protocolVersion")).toInt();
+    const bool compatibleProtocol = checkpointSchemaVersion >= 4
+        ? storedProtocolVersion == 4
+        : storedProtocolVersion == 3 || storedProtocolVersion == 4;
+    if (!compatibleProtocol) {
         return fail(QStringLiteral("检查点协议版本不兼容"));
     }
     if (!object.value(QStringLiteral("scenario")).isObject()
         || !object.value(QStringLiteral("runInitialScenario")).isObject()
         || !object.value(QStringLiteral("runtimeUnits")).isArray()
+        || (checkpointSchemaVersion >= 3
+            && !object.value(QStringLiteral("engineState")).isObject())
         || !object.value(QStringLiteral("commandHistory")).isArray()
         || !object.value(QStringLiteral("authoritativeRoom")).isObject()
         || !object.value(QStringLiteral("roomState")).isObject()) {
@@ -398,9 +436,12 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
         return fail(QStringLiteral("检查点缺少开局场景"));
     }
 
+    checkpoint->sourceSchemaVersion = checkpointSchemaVersion;
     checkpoint->scenario = scenario;
     checkpoint->runInitialScenario = runInitialScenario;
     checkpoint->runtimeUnits = runtimeUnits;
+    checkpoint->engineState = checkpointSchemaVersion >= 3
+        ? object.value(QStringLiteral("engineState")).toObject() : QJsonObject{};
     checkpoint->commandHistory = object.value(QStringLiteral("commandHistory")).toArray();
     checkpoint->authoritativeRoom = object.value(QStringLiteral("authoritativeRoom")).toObject();
     checkpoint->phase = phase;

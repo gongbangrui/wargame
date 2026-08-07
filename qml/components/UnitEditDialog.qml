@@ -35,10 +35,10 @@ Dialog {
         "commandpost": { detectRange: 5000, attackRange: 0,    commRange: 20000, speed: 0,    maxHp: 200, attackPower: 0,   alt: 50, armor: 0.2, repairRate: 3, subsystemRepairRate: 0.03 },
         "reconuav":    { detectRange: 8000, attackRange: 0,    commRange: 20000, speed: 80,   maxHp: 100, attackPower: 0,   alt: 3000, armor: 0.05, repairRate: 2, subsystemRepairRate: 0.02 },
         "attackuav":   { detectRange: 4000, attackRange: 2500, commRange: 15000, speed: 100,  maxHp: 120, attackPower: 100, alt: 2000,
-                          ammoCapacity: 4, initialAmmo: 4, hitProbability: 0.7, optimalRange: 1800,
-                          minAttackRange: 0, cooldownSec: 4, damageMin: 80, damageMax: 120, rangeFalloff: 0.35,
+                          ammoCapacity: 4, initialAmmo: 4, hitProbability: 0.72, optimalRange: 1500,
+                          minAttackRange: 300, cooldownSec: 5, damageMin: 80, damageMax: 110, rangeFalloff: 0.25,
                           armor: 0.1, repairRate: 2, subsystemRepairRate: 0.02,
-                          fuelCapacitySec: 1800, initialFuelSec: 1800, rearmDurationSec: 12 },
+                          fuelCapacitySec: 1800, initialFuelSec: 1800, rearmDurationSec: 8 },
         "groundscout": { detectRange: 3000, attackRange: 0,    commRange: 10000, speed: 6,    maxHp: 80,  attackPower: 0,   alt: 0, armor: 0.15, repairRate: 2, subsystemRepairRate: 0.02 },
         "jammeruav":   { detectRange: 6000, attackRange: 0,    commRange: 20000, speed: 60,   maxHp: 80,  attackPower: 0,   alt: 4000, armor: 0.05, repairRate: 2, subsystemRepairRate: 0.02 }
     })

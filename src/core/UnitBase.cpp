@@ -8,8 +8,32 @@
 
 #include <QDateTime>
 #include <QJsonArray>
+#include <QByteArray>
+
+#include <limits>
 
 namespace gbr {
+
+namespace {
+
+quint64 mix64(quint64 value) {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31U);
+}
+
+double deterministicUnitSample(quint64 seed, const QString& id, quint64 sequence) {
+    quint64 value = mix64(seed ^ sequence);
+    for (const unsigned char byte : id.toUtf8()) value = mix64(value ^ byte);
+    return static_cast<double>(value >> 11U) * (1.0 / 9007199254740992.0);
+}
+
+bool finiteNonNegative(double value) {
+    return std::isfinite(value) && value >= 0.0;
+}
+
+} // namespace
 
 UnitBase::UnitBase(const QString& id, UnitKind kind, Side side, MessageBus* bus,
                      QObject* parent, UnitOwner owner)
@@ -18,6 +42,7 @@ UnitBase::UnitBase(const QString& id, UnitKind kind, Side side, MessageBus* bus,
     m_lastNotifiedHp = m_hp;
     m_baseDetectRange = m_params.detectRange;
     m_baseCommRange = m_params.commRange;
+    configureAbilitiesAndFuelEconomy();
     if (m_bus) {
         m_bus->subscribe(m_id, [this](const Message& m){ this->handleMessage(m); });
         m_bus->updateUnitPosition(m_id, m_params.pos.toPointF(), m_params.commRange, sideName(m_side));
@@ -191,32 +216,336 @@ void UnitBase::applyDamageDelta(const DamageDelta& delta) {
     m_commsHealth = std::clamp(m_commsHealth - std::max(0.0, delta.commsLoss), 0.0, 1.0);
     m_mobilityHealth = std::clamp(m_mobilityHealth - std::max(0.0, delta.mobilityLoss), 0.0, 1.0);
     m_weaponHealth = std::clamp(m_weaponHealth - std::max(0.0, delta.weaponLoss), 0.0, 1.0);
+    if (hullDamage > 0.0 || delta.sensorLoss > 0.0 || delta.commsLoss > 0.0
+        || delta.mobilityLoss > 0.0 || delta.weaponLoss > 0.0) {
+        cancelService();
+    }
     recomputeEffectiveParameters();
     emit damageStateChanged();
 }
 
-bool UnitBase::serviceTick(double dt) {
-    if (!std::isfinite(dt) || dt <= 0.0 || !alive()) return false;
-    const double previousHp = hp();
-    setHp(hp() + m_repairRate * dt);
-    const double restore = m_subsystemRepairRate * dt;
-    m_sensorHealth = std::min(1.0, m_sensorHealth + restore);
-    m_commsHealth = std::min(1.0, m_commsHealth + restore);
-    m_mobilityHealth = std::min(1.0, m_mobilityHealth + restore);
-    m_weaponHealth = std::min(1.0, m_weaponHealth + restore);
+void UnitBase::configureAbilitiesAndFuelEconomy() {
+    m_countermeasure = {};
+    m_scan = {};
+    switch (m_kind) {
+    case UnitKind::CommandPost:
+        m_countermeasure = AbilityState{2000.0, 60.0, 0.0, -1, -1};
+        break;
+    case UnitKind::AttackUAV:
+        m_countermeasure = AbilityState{900.0, 35.0, 0.0, 3, 3};
+        m_fuelIdleRate = 0.50;
+        m_fuelMoveCoefficient = 3.50;
+        break;
+    case UnitKind::ReconUAV:
+        m_countermeasure = AbilityState{1100.0, 45.0, 0.0, 2, 2};
+        m_scan = AbilityState{9000.0, 45.0, 0.0, -1, -1};
+        m_fuelIdleRate = 0.40;
+        m_fuelMoveCoefficient = 3.10;
+        break;
+    case UnitKind::JammerUAV:
+        m_countermeasure = AbilityState{1800.0, 30.0, 0.0, 4, 4};
+        m_fuelIdleRate = 0.80;
+        m_fuelMoveCoefficient = 3.70;
+        break;
+    case UnitKind::GroundScout:
+        m_countermeasure = AbilityState{650.0, 50.0, 0.0, 2, 2};
+        m_fuelIdleRate = 0.0;
+        m_fuelMoveCoefficient = 3.0;
+        break;
+    }
+}
+
+void UnitBase::configureFuel(double capacity, double initialFuel,
+                             double economyCruiseSpeed) {
+    if (!movable() || !std::isfinite(capacity) || capacity <= 0.0
+        || !std::isfinite(initialFuel) || !std::isfinite(economyCruiseSpeed)
+        || economyCruiseSpeed <= 0.0) {
+        if (!movable()) {
+            m_fuelCapacity = 0.0;
+            m_fuelRemaining = 0.0;
+            m_fuelBurnRate = 0.0;
+        }
+        return;
+    }
+    m_fuelCapacity = capacity;
+    m_fuelRemaining = std::clamp(initialFuel, 0.0, capacity);
+    m_economyCruiseSpeed = economyCruiseSpeed;
+    const double ratio = m_fuelRemaining / m_fuelCapacity;
+    m_fuelWarningStage = ratio <= 0.10 ? 2 : (ratio <= 0.20 ? 1 : 0);
+    emit runtimeStateChanged();
+}
+
+void UnitBase::advanceRuntimeState(double dt, double actualSpeed) {
+    if (!std::isfinite(dt) || dt <= 0.0) return;
+    auto advanceCooldown = [dt](double& value) {
+        value = std::max(0.0, value - dt);
+    };
+    advanceCooldown(m_countermeasure.cooldownRemaining);
+    advanceCooldown(m_scan.cooldownRemaining);
+    advanceCooldown(m_repairCooldownRemaining);
+
+    if (movable() && m_fuelCapacity > 0.0) {
+        const double speedRatio = std::max(0.0, actualSpeed)
+            / std::max(1e-6, m_economyCruiseSpeed);
+        const double rawBurnRate = m_fuelIdleRate + m_fuelMoveCoefficient
+            * std::min(3.0, speedRatio * speedRatio);
+        // Quantize derived telemetry so replaying a serialized position cannot
+        // create insignificant IEEE-754 drift in checkpoints.
+        m_fuelBurnRate = std::round(rawBurnRate * 1e9) / 1e9;
+        const double previousFuel = m_fuelRemaining;
+        m_fuelRemaining = std::max(0.0, m_fuelRemaining - m_fuelBurnRate * dt);
+        const double ratio = m_fuelRemaining / m_fuelCapacity;
+        const int warningStage = ratio <= 0.10 ? 2 : (ratio <= 0.20 ? 1 : 0);
+        if (warningStage > m_fuelWarningStage) {
+            emit notifyEvent(QStringLiteral("燃油告警"),
+                             QStringLiteral("%1 燃油低于 %2%")
+                                 .arg(id()).arg(warningStage == 2 ? 10 : 20),
+                             warningStage == 2 ? QStringLiteral("warn")
+                                               : QStringLiteral("info"));
+        }
+        m_fuelWarningStage = warningStage;
+        if (previousFuel > 0.0 && m_fuelRemaining <= 0.0) {
+            cancelWaypointMotion();
+            setStatus(QStringLiteral("燃油耗尽，停止移动"));
+        }
+    }
+    emit runtimeStateChanged();
+}
+
+double UnitBase::estimatedFuelEndurance() const {
+    if (!movable() || m_fuelCapacity <= 0.0) return 0.0;
+    if (m_fuelBurnRate <= 1e-9) return std::numeric_limits<double>::infinity();
+    return m_fuelRemaining / m_fuelBurnRate;
+}
+
+bool UnitBase::activateCountermeasure() {
+    if (!alive() || !m_countermeasure.available()) return false;
+    if (!m_countermeasure.unlimited()) --m_countermeasure.remaining;
+    m_countermeasure.cooldownRemaining = m_countermeasure.cooldownSec;
+    emit runtimeStateChanged();
+    return true;
+}
+
+bool UnitBase::activateScan() {
+    if (!alive() || !m_scan.available()) return false;
+    if (!m_scan.unlimited()) --m_scan.remaining;
+    m_scan.cooldownRemaining = m_scan.cooldownSec;
+    emit runtimeStateChanged();
+    return true;
+}
+
+bool UnitBase::attemptFieldRepair(quint64 battleSeed) {
+    if (!alive() || m_repairCooldownRemaining > 1e-9) return false;
+    const quint64 sequence = m_repairAttemptSequence++;
+    m_repairCooldownRemaining = m_repairCooldownSec;
+    const bool success = deterministicUnitSample(battleSeed, id(), sequence) < 0.70;
+    if (success) {
+        double* lowest = &m_sensorHealth;
+        if (m_commsHealth < *lowest) lowest = &m_commsHealth;
+        if (m_mobilityHealth < *lowest) lowest = &m_mobilityHealth;
+        if (m_weaponHealth < *lowest) lowest = &m_weaponHealth;
+        *lowest = std::min(1.0, *lowest + 0.30);
+        recomputeEffectiveParameters();
+        emit damageStateChanged();
+    }
+    emit runtimeStateChanged();
+    return success;
+}
+
+QJsonObject UnitBase::abilityStateJson() const {
+    const auto encode = [](const AbilityState& state) {
+        return QJsonObject{{QStringLiteral("range"), state.range},
+                           {QStringLiteral("cooldownSec"), state.cooldownSec},
+                           {QStringLiteral("cooldownRemaining"), state.cooldownRemaining},
+                           {QStringLiteral("capacity"), state.capacity},
+                           {QStringLiteral("remaining"), state.remaining},
+                           {QStringLiteral("available"), state.available()}};
+    };
+    return {{QStringLiteral("countermeasure"), encode(m_countermeasure)},
+            {QStringLiteral("scan"), encode(m_scan)},
+            {QStringLiteral("fieldRepair"),
+             QJsonObject{{QStringLiteral("cooldownSec"), m_repairCooldownSec},
+                         {QStringLiteral("cooldownRemaining"), m_repairCooldownRemaining},
+                         {QStringLiteral("attemptSequence"),
+                          QString::number(m_repairAttemptSequence)},
+                         {QStringLiteral("available"),
+                          alive() && m_repairCooldownRemaining <= 1e-9}}}};
+}
+
+bool UnitBase::beginService(const QString& serviceCpId) {
+    if (!alive() || !movable() || serviceCpId.isEmpty()) return false;
+    const double hullLoss = 1.0 - hp() / std::max(1.0, maxHp());
+    const double subsystemLoss = 1.0
+        - (m_sensorHealth + m_commsHealth + m_mobilityHealth + m_weaponHealth) / 4.0;
+    const double fuelLoss = m_fuelCapacity > 0.0
+        ? 1.0 - m_fuelRemaining / m_fuelCapacity : 0.0;
+    const double countermeasureLoss = m_countermeasure.capacity > 0
+        ? 1.0 - static_cast<double>(m_countermeasure.remaining)
+                    / m_countermeasure.capacity : 0.0;
+    m_serviceDuration = std::clamp(3.0 + 15.0 * hullLoss
+        + 10.0 * subsystemLoss + rearmDurationContribution()
+        + 8.0 * fuelLoss + 6.0 * countermeasureLoss, 3.0, 45.0);
+    m_serviceElapsed = 0.0;
+    m_serviceCpId = serviceCpId;
+    m_serviceRequested = true;
+    setStatus(QStringLiteral("开始补充"));
+    emit runtimeStateChanged();
+    return true;
+}
+
+void UnitBase::requestService(bool value) {
+    if (!value) {
+        cancelService();
+        return;
+    }
+    m_serviceRequested = true;
+    if (m_serviceCpId.isEmpty()) m_serviceCpId = m_cpId;
+        if (m_serviceDuration < 3.0) {
+        m_serviceDuration = std::max(3.0, m_serviceElapsed);
+    }
+    emit runtimeStateChanged();
+}
+
+void UnitBase::cancelService() {
+    if (!m_serviceRequested && m_serviceElapsed <= 0.0 && m_serviceDuration <= 0.0) return;
+    m_serviceRequested = false;
+    m_serviceCpId.clear();
+    m_serviceElapsed = 0.0;
+    m_serviceDuration = 0.0;
+    emit runtimeStateChanged();
+}
+
+bool UnitBase::advanceService(double dt) {
+    if (!m_serviceRequested || !alive() || !std::isfinite(dt) || dt <= 0.0
+        || m_serviceDuration <= 0.0) return false;
+    m_serviceElapsed = std::min(m_serviceDuration, m_serviceElapsed + dt);
+    if (m_serviceElapsed + 1e-9 < m_serviceDuration) {
+        emit runtimeStateChanged();
+        return false;
+    }
+    completeService();
+    return true;
+}
+
+void UnitBase::completeService() {
+    setHp(maxHp());
+    m_sensorHealth = 1.0;
+    m_commsHealth = 1.0;
+    m_mobilityHealth = 1.0;
+    m_weaponHealth = 1.0;
+    if (movable()) m_fuelRemaining = m_fuelCapacity;
+    if (!m_countermeasure.unlimited()) m_countermeasure.remaining = m_countermeasure.capacity;
+    restoreServiceSpecificResources();
+    m_fuelWarningStage = 0;
+    m_serviceRequested = false;
+    m_serviceCpId.clear();
     recomputeEffectiveParameters();
-    if (hp() != previousHp || restore > 0.0) emit damageStateChanged();
-    const bool complete = hp() >= maxHp() - 1e-6
-        && m_sensorHealth >= 1.0 - 1e-6 && m_commsHealth >= 1.0 - 1e-6
-        && m_mobilityHealth >= 1.0 - 1e-6 && m_weaponHealth >= 1.0 - 1e-6;
-    if (complete) m_serviceRequested = false;
-    return complete;
+    emit damageStateChanged();
+    emit runtimeStateChanged();
+}
+
+bool UnitBase::serviceTick(double dt) {
+    return advanceService(dt);
 }
 
 double UnitBase::serviceProgress() const {
-    const double hull = hp() / std::max(1.0, maxHp());
-    return std::clamp((hull + m_sensorHealth + m_commsHealth
-                       + m_mobilityHealth + m_weaponHealth) / 5.0, 0.0, 1.0);
+    if (m_serviceDuration <= 0.0) return 0.0;
+    return std::clamp(m_serviceElapsed / m_serviceDuration, 0.0, 1.0);
+}
+
+QJsonObject UnitBase::runtimeStateJson() const {
+    return {{QStringLiteral("schema"), 3},
+            {QStringLiteral("fuelCapacity"), m_fuelCapacity},
+            {QStringLiteral("fuelRemaining"), m_fuelRemaining},
+            {QStringLiteral("economyCruiseSpeed"), m_economyCruiseSpeed},
+            {QStringLiteral("fuelBurnRate"), m_fuelBurnRate},
+            {QStringLiteral("fuelWarningStage"), m_fuelWarningStage},
+            {QStringLiteral("abilities"), abilityStateJson()},
+            {QStringLiteral("service"),
+             QJsonObject{{QStringLiteral("active"), m_serviceRequested},
+                         {QStringLiteral("cpId"), m_serviceCpId},
+                         {QStringLiteral("elapsed"), m_serviceElapsed},
+                         {QStringLiteral("duration"), m_serviceDuration}}}};
+}
+
+bool UnitBase::restoreRuntimeState(const QJsonObject& state, QString* error) {
+    if (error) error->clear();
+    if (state.isEmpty()) {
+        cancelService();
+        return true;
+    }
+    auto fail = [error, this](const QString& detail) {
+        if (error) *error = QStringLiteral("检查点资源状态无效: %1 (%2)").arg(id(), detail);
+        return false;
+    };
+    const double fuelCapacity = state.value(QStringLiteral("fuelCapacity")).toDouble(m_fuelCapacity);
+    const double fuelRemaining = state.value(QStringLiteral("fuelRemaining")).toDouble(m_fuelRemaining);
+    const double economySpeed = state.value(QStringLiteral("economyCruiseSpeed"))
+                                    .toDouble(m_economyCruiseSpeed);
+    const double burnRate = state.value(QStringLiteral("fuelBurnRate")).toDouble(0.0);
+    if (!finiteNonNegative(fuelCapacity) || !finiteNonNegative(fuelRemaining)
+        || fuelRemaining > fuelCapacity + 1e-9 || !std::isfinite(economySpeed)
+        || economySpeed <= 0.0 || !finiteNonNegative(burnRate)) {
+        return fail(QStringLiteral("燃油"));
+    }
+
+    const QJsonObject abilities = state.value(QStringLiteral("abilities")).toObject();
+    const QJsonObject countermeasure = abilities.value(QStringLiteral("countermeasure")).toObject();
+    const QJsonObject scan = abilities.value(QStringLiteral("scan")).toObject();
+    const QJsonObject repair = abilities.value(QStringLiteral("fieldRepair")).toObject();
+    const double counterCooldown = countermeasure.value(QStringLiteral("cooldownRemaining"))
+                                       .toDouble(m_countermeasure.cooldownRemaining);
+    const int counterRemaining = countermeasure.value(QStringLiteral("remaining"))
+                                     .toInt(m_countermeasure.remaining);
+    const double scanCooldown = scan.value(QStringLiteral("cooldownRemaining"))
+                                    .toDouble(m_scan.cooldownRemaining);
+    const double repairCooldown = repair.value(QStringLiteral("cooldownRemaining"))
+                                      .toDouble(m_repairCooldownRemaining);
+    bool sequenceOk = true;
+    quint64 repairSequence = m_repairAttemptSequence;
+    if (repair.contains(QStringLiteral("attemptSequence"))) {
+        repairSequence = repair.value(QStringLiteral("attemptSequence")).toString()
+                             .toULongLong(&sequenceOk);
+    }
+    if (!finiteNonNegative(counterCooldown)
+        || counterCooldown > m_countermeasure.cooldownSec + 1e-9
+        || (m_countermeasure.capacity >= 0
+            && (counterRemaining < 0 || counterRemaining > m_countermeasure.capacity))
+        || !finiteNonNegative(scanCooldown)
+        || scanCooldown > m_scan.cooldownSec + 1e-9
+        || !finiteNonNegative(repairCooldown)
+        || repairCooldown > m_repairCooldownSec + 1e-9 || !sequenceOk) {
+        return fail(QStringLiteral("技能"));
+    }
+
+    const QJsonObject service = state.value(QStringLiteral("service")).toObject();
+    const bool serviceActive = service.value(QStringLiteral("active")).toBool(false);
+    const QString serviceCpId = service.value(QStringLiteral("cpId")).toString();
+    const double serviceElapsed = service.value(QStringLiteral("elapsed")).toDouble(0.0);
+    const double serviceDuration = service.value(QStringLiteral("duration")).toDouble(0.0);
+    if (!finiteNonNegative(serviceElapsed) || !finiteNonNegative(serviceDuration)
+        || serviceElapsed > serviceDuration + 1e-9
+        || (serviceActive && (serviceCpId.isEmpty() || serviceDuration < 3.0
+                              || serviceDuration > 45.0))) {
+        return fail(QStringLiteral("补充"));
+    }
+
+    m_fuelCapacity = fuelCapacity;
+    m_fuelRemaining = fuelRemaining;
+    m_economyCruiseSpeed = economySpeed;
+    m_fuelBurnRate = burnRate;
+    m_fuelWarningStage = state.value(QStringLiteral("fuelWarningStage")).toInt(0);
+    m_countermeasure.cooldownRemaining = counterCooldown;
+    m_countermeasure.remaining = counterRemaining;
+    m_scan.cooldownRemaining = scanCooldown;
+    m_repairCooldownRemaining = repairCooldown;
+    m_repairAttemptSequence = repairSequence;
+    m_serviceRequested = serviceActive;
+    m_serviceCpId = serviceActive ? serviceCpId : QString();
+    m_serviceElapsed = serviceElapsed;
+    m_serviceDuration = serviceDuration;
+    emit runtimeStateChanged();
+    return true;
 }
 
 QVariantList UnitBase::position() const {
@@ -289,6 +618,7 @@ QJsonObject UnitBase::checkpointState() const {
             {QStringLiteral("jamFactor"), m_jamFactor},
             {QStringLiteral("subsystems"), subsystemStateJson()},
             {QStringLiteral("serviceRequested"), m_serviceRequested},
+            {QStringLiteral("runtimeState"), runtimeStateJson()},
             {QStringLiteral("behavior"), behaviorCheckpoint()}};
 }
 
@@ -355,7 +685,12 @@ bool UnitBase::restoreCheckpointState(const QJsonObject& state, QString* error) 
     m_commsHealth = restoredComms;
     m_mobilityHealth = restoredMobility;
     m_weaponHealth = restoredWeapon;
-    m_serviceRequested = state.value(QStringLiteral("serviceRequested")).toBool(false);
+    // Schema-2 checkpoints did not have the atomic service model. They are
+    // upgraded by cancelling any legacy in-progress service action.
+    m_serviceRequested = false;
+    m_serviceCpId.clear();
+    m_serviceElapsed = 0.0;
+    m_serviceDuration = 0.0;
     setSchedule(restoredSchedule);
     m_sharedKnowledge = state.value(QStringLiteral("sharedKnowledge")).toObject();
     m_recentPath.clear();
@@ -373,12 +708,16 @@ bool UnitBase::restoreCheckpointState(const QJsonObject& state, QString* error) 
         m_recentPath.emplace_back(x, y);
     }
     m_lastSampleTime = restoredLastSampleTime;
+    if (!restoreRuntimeState(state.value(QStringLiteral("runtimeState")).toObject(), error)) {
+        return false;
+    }
     applyJamming(restoredJamFactor);
     recomputeEffectiveParameters();
     setStatus(state.value(QStringLiteral("status")).toString());
     emit sharedKnowledgeChanged();
     emit recentPathChanged();
     emit damageStateChanged();
+    emit runtimeStateChanged();
     return true;
 }
 

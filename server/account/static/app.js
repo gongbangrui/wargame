@@ -1,7 +1,7 @@
 const storedUiScaleValue = localStorage.getItem("wargameUiScale");
 const storedUiScale = storedUiScaleValue === null ? Number.NaN : Number(storedUiScaleValue);
 const roomOperationTimeoutMs = 25000;
-const state = { token: sessionStorage.getItem("adminToken") || "", users: [], rooms: [], roomsLoaded: false, deleteId: null, roomDeleteId: null, roomOperations: {}, autoPausingRooms: new Set(), autoPausedOperations: {}, roomKickRequests: new Set(), roomStatusFilter: "all", openRoomMenuId: "", roomSaving: false, overview: null, events: [], terminalUnlocked: false, terminalSocket: null, monitorTimer: null, monitorRequestGeneration: 0, roomTimer: null, roomRefreshInFlight: false, occupantsRoomId: "", occupants: [], occupantsTimer: null, activeModal: null, modalReturnFocus: null, aiConfigDirty: false, aiConfigSaving: false, aiHistory: { status: "all", items: [], nextBefore: null, hasMore: false, listState: "idle", listError: "", selectedId: "", detail: null, detailState: "empty", detailError: "", activeTab: "prompts", requestGeneration: 0, detailGeneration: 0, pageSize: 24 }, uiScale: Number.isFinite(storedUiScale) ? Math.max(0.85, Math.min(1.15, storedUiScale)) : 1 };
+const state = { token: sessionStorage.getItem("adminToken") || "", users: [], rooms: [], roomsLoaded: false, deleteId: null, roomDeleteId: null, roomOperations: {}, autoPausingRooms: new Set(), autoPausedOperations: {}, roomKickRequests: new Set(), roomStatusFilter: "all", openRoomMenuId: "", roomSaving: false, overview: null, events: [], terminalUnlocked: false, terminalSocket: null, monitorTimer: null, monitorRequestGeneration: 0, roomTimer: null, roomRefreshInFlight: false, occupantsRoomId: "", occupants: [], occupantsTimer: null, activeModal: null, modalReturnFocus: null, activePage: "users", aiConfigDirty: false, aiConfigSaving: false, ollamaModels: { state: "idle", baseUrl: "", modelNames: [], checkedAt: "", error: "", request: null, generation: 0 }, roomModalRoom: null, aiHistory: { status: "all", items: [], nextBefore: null, hasMore: false, listState: "idle", listError: "", selectedId: "", detail: null, detailState: "empty", detailError: "", activeTab: "prompts", requestGeneration: 0, detailGeneration: 0, pageSize: 24 }, uiScale: Number.isFinite(storedUiScale) ? Math.max(0.85, Math.min(1.15, storedUiScale)) : 1 };
 const $ = (id) => document.getElementById(id);
 const seatDefinitions = [
   ["red_commander", "红方指挥官", true], ["red_attack", "红方攻击机", false], ["red_recon", "红方侦察机", false], ["red_ground", "红方地面单位", false], ["red_jammer", "红方干扰机", false],
@@ -225,11 +225,13 @@ function logout(callServer = true) {
   state.aiHistory.activeTab = "prompts";
   state.aiHistory.requestGeneration += 1;
   state.aiHistory.detailGeneration += 1;
-  state.monitorRequestGeneration += 1;
-  window.clearInterval(state.monitorTimer);
-  window.clearInterval(state.roomTimer);
-  state.roomTimer = null;
-  state.roomRefreshInFlight = false;
+  stopMonitorRefresh();
+  stopRoomRefresh();
+  state.ollamaModels.generation += 1;
+  state.ollamaModels.request = null;
+  state.ollamaModels.state = "idle";
+  state.ollamaModels.modelNames = [];
+  state.ollamaModels.checkedAt = "";
   closeOccupants();
   closeRoomModal();
   closeUserModal();
@@ -498,7 +500,10 @@ function renderRooms() {
     setTextWithTitle(card.querySelector(".room-readiness"), readiness);
     const mode = room.mode === "pve" ? "pve" : "pvp";
     const difficulty = aiDifficultyLabels[room.aiDifficulty] || aiDifficultyLabels.normal;
-    setTextWithTitle(card.querySelector(".room-mode"), mode === "pve" ? `${roomModeLabels[mode]} · ${difficulty}` : roomModeLabels[mode]);
+    const provider = room.aiProvider === "ollama" ? "Ollama" : "规则引擎";
+    const model = room.aiModel || room.aiResolvedModel;
+    const aiDetail = mode === "pve" ? ` · ${provider}${model ? ` · ${model}` : ""}` : "";
+    setTextWithTitle(card.querySelector(".room-mode"), mode === "pve" ? `${roomModeLabels[mode]} · ${difficulty}${aiDetail}` : roomModeLabels[mode]);
     const operationNode = card.querySelector(".room-operation");
     if (operation) {
       const timedOut = operation.state === "pending" && operationTimedOut(operation);
@@ -633,6 +638,7 @@ function openOccupants(room) {
 function openRoomModal(room = null) {
   clearToast();
   $("roomForm").reset();
+  state.roomModalRoom = room;
   $("roomModalTitle").textContent = room ? "编辑房间" : "创建房间";
   $("roomId").value = room ? room.roomId : "";
   $("roomKey").value = room ? room.roomId : "";
@@ -645,9 +651,18 @@ function openRoomModal(room = null) {
   $("roomModePve").checked = room?.mode === "pve";
   $("roomModePvp").checked = room?.mode !== "pve";
   $("roomAiDifficulty").value = room?.aiDifficulty || "normal";
+  const globalAi = state.overview?.aiConfig || {};
+  const defaultProvider = room?.aiProvider
+    || (["rules"].includes(globalAi.provider) ? "rules" : "ollama");
+  const defaultModel = room ? (room.aiModel || "") : (typeof globalAi.model === "string" ? globalAi.model : "");
+  $("roomAiProvider").value = defaultProvider === "ollama" ? "ollama" : "rules";
+  $("roomAiModel").value = defaultModel;
+  const resolved = room?.aiResolvedModel || "";
+  $("roomAiResolved").textContent = resolved ? `本局已探测模型：${resolved}` : "进入准备阶段时由兵棋服务校验并冻结模型";
   $("roomForm").dataset.modeLocked = room && room.status !== "stopped" ? "true" : "false";
   updateRoomModeEditor();
   renderSeatEditors(room);
+  if (!room || room.mode === "pve") ensureOllamaModelsLoaded();
   openModal($("roomModal"), $("roomName"));
 }
 
@@ -656,13 +671,18 @@ function updateRoomModeEditor() {
   const mode = $("roomModePve").checked ? "pve" : "pvp";
   $("roomModePvp").disabled = locked;
   $("roomModePve").disabled = locked;
+  $("roomAiFields").classList.toggle("hidden", mode !== "pve");
   $("roomAiDifficultyField").classList.toggle("hidden", mode !== "pve");
+  $("roomAiProvider").disabled = locked || mode !== "pve";
+  $("roomAiModel").disabled = locked || mode !== "pve";
   $("roomAiDifficulty").disabled = locked || mode !== "pve";
   $("roomModeLockHint").classList.toggle("hidden", !locked);
+  if (mode !== "pve") $("roomAiResolved").textContent = "PVP 房间固定使用规则引擎";
 }
 
 function closeRoomModal() {
   closeModal($("roomModal"));
+  state.roomModalRoom = null;
   state.roomSaving = false;
   const save = $("roomSave");
   if (save) save.disabled = false;
@@ -687,12 +707,16 @@ async function loadRooms() {
 }
 
 function startRoomRefresh() {
+  if (!roomsPageIsVisible() || document.hidden) return;
   window.clearInterval(state.roomTimer);
-  state.roomTimer = window.setInterval(() => {
-    if (state.roomRefreshInFlight || document.hidden) return;
+  state.roomTimer = null;
+  const refresh = () => {
+    if (!roomsPageIsVisible() || document.hidden || state.roomRefreshInFlight) return;
     state.roomRefreshInFlight = true;
     loadRooms().catch(() => {}).finally(() => { state.roomRefreshInFlight = false; });
-  }, 2000);
+  };
+  refresh();
+  state.roomTimer = window.setInterval(refresh, 2000);
 }
 
 function monitorStateLabel(value) {
@@ -747,6 +771,94 @@ function aiConnectionLabel(value) {
   return aiConnectionLabels[value] || aiConnectionLabels.unknown;
 }
 
+function formatLocalTime(value) {
+  if (typeof value !== "string" || !value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function renderOllamaModels(inventory = state.ollamaModels) {
+  const list = $("ollamaModelList");
+  if (list) {
+    list.replaceChildren();
+    const names = Array.isArray(inventory?.modelNames) ? inventory.modelNames : [];
+    for (const name of names) {
+      if (typeof name !== "string" || !name) continue;
+      const option = document.createElement("option");
+      option.value = name;
+      list.appendChild(option);
+    }
+  }
+  const stateNode = $("ollamaModelsState");
+  if (!stateNode) return;
+  const names = Array.isArray(inventory?.modelNames) ? inventory.modelNames : [];
+  if (inventory?.state === "loading") {
+    stateNode.textContent = "正在读取服务器 Ollama 模型目录…";
+    return;
+  }
+  if (inventory?.state === "error") {
+    stateNode.textContent = inventory.error || "Ollama 模型目录读取失败";
+    return;
+  }
+  if (!inventory?.checkedAt) {
+    stateNode.textContent = "尚未读取模型目录；可手工填写模型名称。";
+    return;
+  }
+  const checked = formatLocalTime(inventory.checkedAt) || "刚刚";
+  if (inventory.connected) {
+    stateNode.textContent = `已连接 · ${names.length} 个模型 · ${checked} 检查`;
+  } else {
+    stateNode.textContent = `无法连接 Ollama · ${inventory.error || "可手工填写模型名称"} · ${checked} 检查`;
+  }
+}
+
+async function loadOllamaModels(refresh = false, showError = false) {
+  const models = state.ollamaModels;
+  if (models.request) return models.request;
+  const generation = ++models.generation;
+  models.state = "loading";
+  models.error = "";
+  renderOllamaModels();
+  const path = `/api/admin/ollama-models${refresh ? "?refresh=true" : ""}`;
+  const request = api(path, {}, { token: state.token })
+    .then((data) => {
+      if (generation !== models.generation || state.token === "") return data;
+      models.state = "ready";
+      models.baseUrl = typeof data.baseUrl === "string" ? data.baseUrl : "";
+      models.connected = data.connected === true;
+      models.connectionStatus = data.connectionStatus || "unknown";
+      models.modelNames = Array.isArray(data.modelNames) ? data.modelNames.filter((name) => typeof name === "string") : [];
+      models.models = Array.isArray(data.models) ? data.models : [];
+      models.checkedAt = typeof data.checkedAt === "string" ? data.checkedAt : "";
+      models.error = typeof data.error === "string" ? data.error : "";
+      renderOllamaModels();
+      return data;
+    })
+    .catch((error) => {
+      if (generation === models.generation && state.token !== "") {
+        models.state = "error";
+        models.error = error.message || "Ollama 模型目录读取失败";
+        renderOllamaModels();
+        if (showError) toast(models.error, true);
+      }
+      throw error;
+    })
+    .finally(() => {
+      if (models.request === request) models.request = null;
+    });
+  models.request = request;
+  return request;
+}
+
+function ensureOllamaModelsLoaded() {
+  const models = state.ollamaModels;
+  if (models.state === "idle" || models.state === "error") {
+    loadOllamaModels(false).catch(() => {});
+  } else {
+    renderOllamaModels();
+  }
+}
+
 function renderAiConfiguration(config, status) {
   const provider = config?.provider;
   const model = config?.model;
@@ -771,8 +883,9 @@ function renderAiConfiguration(config, status) {
   const stateText = version <= 0 ? "未读取" : state.aiConfigSaving ? "保存中" : state.aiConfigDirty ? "有未保存修改" : syncState === "synced" ? `已同步 v${version}` : `等待同步 v${version}`;
   stateNode.className = `config-state state-${syncState}`;
   stateNode.textContent = stateText;
-  syncNode.textContent = state?.lastProbeAt ? `最近探测：${new Date(state.lastProbeAt).toLocaleString("zh-CN", { hour12: false })}` : connection === "checking" ? "正在检查 Ollama 服务" : "保存后自动同步到游戏服务";
+  syncNode.textContent = status?.checkedAt ? `最近探测：${formatLocalTime(status.checkedAt)}` : connection === "checking" ? "正在检查 Ollama 服务" : "保存后自动同步到游戏服务";
   $("aiConfigSave").disabled = state.aiConfigSaving;
+  ensureOllamaModelsLoaded();
 }
 
 function openTerminal(ticket) {
@@ -1175,6 +1288,7 @@ async function loadAiHistory({ reset = false, preserveSelection = false, showErr
 }
 
 async function loadMonitor(showError = false) {
+  if (!monitorPageIsVisible() || document.hidden) return;
   const requestGeneration = ++state.monitorRequestGeneration;
   const requestGuard = { generation: requestGeneration, token: state.token };
   try {
@@ -1197,16 +1311,49 @@ function monitorPageIsVisible() {
   return !$("monitorPage")?.classList.contains("hidden");
 }
 
+function roomsPageIsVisible() {
+  return !$("roomsPage")?.classList.contains("hidden");
+}
+
+function stopMonitorRefresh() {
+  window.clearInterval(state.monitorTimer);
+  state.monitorTimer = null;
+  state.monitorRequestGeneration += 1;
+  state.aiHistory.requestGeneration += 1;
+  state.aiHistory.detailGeneration += 1;
+}
+
+function stopRoomRefresh() {
+  window.clearInterval(state.roomTimer);
+  state.roomTimer = null;
+  state.roomRefreshInFlight = false;
+}
+
+function syncPageRefresh() {
+  if (!state.token || document.hidden) {
+    stopRoomRefresh();
+    stopMonitorRefresh();
+    return;
+  }
+  if (roomsPageIsVisible()) startRoomRefresh();
+  else stopRoomRefresh();
+  if (monitorPageIsVisible()) startMonitorRefresh();
+  else stopMonitorRefresh();
+}
+
 function refreshVisibleAiHistory() {
   if (!monitorPageIsVisible() || state.aiHistory.listState === "loading") return;
   loadAiHistory({ reset: true, preserveSelection: true });
 }
 
 function startMonitorRefresh() {
+  if (!monitorPageIsVisible() || document.hidden) return;
   window.clearInterval(state.monitorTimer);
+  state.monitorTimer = null;
   loadMonitor(true);
   refreshVisibleAiHistory();
   state.monitorTimer = window.setInterval(() => {
+    if (!monitorPageIsVisible() || document.hidden) return;
     loadMonitor(false);
     refreshVisibleAiHistory();
   }, 5000);
@@ -1247,8 +1394,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       sessionStorage.setItem("adminToken", state.token);
       showAdmin(data.username);
       await Promise.all([loadUsers(), loadRooms()]);
-      startRoomRefresh();
-      startMonitorRefresh();
+      syncPageRefresh();
     } catch (error) { $("loginError").textContent = error.message; }
   });
 
@@ -1265,6 +1411,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("roomModal")?.addEventListener("click", (event) => { if (event.target === $("roomModal")) closeRoomModal(); });
   $("roomStatusFilter")?.addEventListener("change", (event) => { state.roomStatusFilter = event.target.value; renderRooms(); });
   document.querySelectorAll("input[name='roomMode']").forEach((input) => input.addEventListener("change", updateRoomModeEditor));
+  $("roomAiProvider")?.addEventListener("change", updateRoomModeEditor);
   $("roomForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (state.roomSaving) return;
@@ -1274,7 +1421,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const seatLimits = collectSeatLimits();
       const seatParameters = collectSeatParameters();
       const roomId = $("roomId").value || $("roomKey").value.trim();
-      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_limits: seatLimits, seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value };
+      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_limits: seatLimits, seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value, ai_provider: $("roomAiProvider").value, ai_model: $("roomAiModel").value.trim() };
       await api(roomId && $("roomId").value ? `/api/admin/rooms/${encodeURIComponent(roomId)}` : "/api/admin/rooms", { method: roomId && $("roomId").value ? "PUT" : "POST", body: JSON.stringify(body) });
       closeRoomModal(); await loadRooms(); toast("房间已保存");
     } catch (error) { toast(error.message || "房间配置 JSON 无效", true); state.roomSaving = false; $("roomSave").disabled = false; }
@@ -1313,6 +1460,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("monitorPage").classList.toggle("hidden", page !== "monitor");
     $("securityPage").classList.toggle("hidden", page !== "security");
     $("pageTitle").textContent = page === "users" ? "兵棋账号" : page === "rooms" ? "推演房间" : page === "monitor" ? "服务器监控" : "安全设置";
+    state.activePage = page;
+    syncPageRefresh();
     if (page === "rooms") loadRooms().catch((error) => toast(error.message, true));
     if (page === "monitor") {
       loadMonitor(true);
@@ -1324,7 +1473,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadMonitor(true);
     loadAiHistory({ reset: true, showError: true });
   });
+  $("ollamaModelsRefresh")?.addEventListener("click", () => {
+    loadOllamaModels(true, true).catch(() => {});
+  });
   $("monitorFilter").addEventListener("change", () => loadMonitor(true));
+  document.addEventListener("visibilitychange", () => syncPageRefresh());
   $("aiHistoryRefresh")?.addEventListener("click", () => loadAiHistory({ reset: true, preserveSelection: true, showError: true }));
   $("aiHistoryStatusFilter")?.addEventListener("change", () => loadAiHistory({ reset: true, showError: true }));
   $("aiHistoryLoadMore")?.addEventListener("click", () => loadAiHistory({ reset: false, showError: true }));
@@ -1340,7 +1493,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.aiConfigSaving = true;
     renderAiConfiguration(state.overview?.aiConfig || {}, state.overview?.aiStatus || {});
     try {
-      const data = await api("/api/admin/ai-config", {
+      const data = await api("/api/admin/ollama-config", {
         method: "PUT",
         body: JSON.stringify({
           provider: $("aiProvider").value,
@@ -1353,8 +1506,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       state.aiConfigDirty = false;
       state.aiConfigSaving = false;
       state.overview = { ...(state.overview || {}), aiConfig: data.aiConfig };
+      state.ollamaModels.state = "idle";
+      state.ollamaModels.checkedAt = "";
+      state.ollamaModels.modelNames = [];
+      state.ollamaModels.error = "";
       renderMonitor();
       toast(data.message || "AI 配置已保存");
+      loadOllamaModels(true).catch(() => {});
       await loadMonitor(true);
     } catch (error) {
       state.aiConfigSaving = false;
@@ -1401,8 +1559,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const me = await api("/api/admin/me");
       showAdmin(me.username);
       await Promise.all([loadUsers(), loadRooms()]);
-      startRoomRefresh();
-      startMonitorRefresh();
+      syncPageRefresh();
     } catch (_) { logout(false); }
   }
 });

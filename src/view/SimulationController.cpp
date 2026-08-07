@@ -109,6 +109,9 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
         ++m_unitStateRevision;
         emit unitsForward();
     });
+    connect(&m_engine, &SimulationEngine::projectilesChanged, this, [this]() {
+        if (!isNetworked()) emit projectilesForward();
+    });
     connect(&m_engine, &SimulationEngine::messagesChanged, this, &SimulationController::messagesForward);
     connect(&m_engine, &SimulationEngine::timelineChanged, this, &SimulationController::timelineForward);
     connect(&m_engine, &SimulationEngine::mapChanged, this, &SimulationController::mapInfoForward);
@@ -296,6 +299,10 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
             });
     connect(&m_networkClient, &NetworkClient::snapshotReceived,
             this, &SimulationController::applyRemoteSnapshot);
+    connect(&m_networkClient, &NetworkClient::deltaSnapshotReceived, this,
+            [this](const QJsonObject& payload, const QStringList& changedUnitIds) {
+                applyRemoteState(payload, changedUnitIds, true);
+            });
     connect(&m_networkClient, &NetworkClient::chatHistoryReceived, this,
             [this](const QJsonArray& messages) {
                 m_chatMessages = messages.toVariantList();
@@ -1370,6 +1377,7 @@ void SimulationController::useLocalMode() {
     m_userRole.clear();
     m_serverAddress.clear();
     m_remoteMessages.clear();
+    m_remoteProjectiles.clear();
     m_chatMessages.clear();
     m_remoteScenarioRevision = -1;
     m_lastCommandId.clear();
@@ -1378,6 +1386,8 @@ void SimulationController::useLocalMode() {
     m_onlineRooms.clear();
     m_onlineSeats.clear();
     m_onlineMapMarks.clear();
+    const bool hadObserverTrajectories = !m_observerTrajectories.isEmpty();
+    m_observerTrajectories = {};
     m_pendingSeatTransfers.clear();
     m_communicationState = QStringLiteral("disconnected");
     m_currentRoomId.clear();
@@ -1392,11 +1402,13 @@ void SimulationController::useLocalMode() {
     emit sessionChanged();
     emit networkStatusChanged();
     emit messagesForward();
+    emit projectilesForward();
     emit chatMessagesChanged();
     emit commandStatusChanged();
     emit onlineRoomsChanged();
     emit onlineSeatsChanged();
     emit onlineMapMarksChanged();
+    if (hadObserverTrajectories) emit observerTrajectoriesChanged();
     emit pendingSeatTransfersChanged();
     emit onlineStateChanged();
     if (wasLeaveRoomPending) emit leaveRoomPendingChanged();
@@ -1575,6 +1587,23 @@ void SimulationController::markOnlineMap(const QVariantMap& position, const QStr
     if (isNetworked() && !m_isObserver) m_networkClient.sendMapMark(position, label, recipientSeatIds);
 }
 
+void SimulationController::setObserverTrajectories(const QStringList& unitIds) {
+    if (!isNetworked() || !m_isObserver) return;
+    QSet<QString> unique;
+    QStringList normalized;
+    for (const QString& value : unitIds) {
+        const QString unitId = value.trimmed();
+        if (unitId.isEmpty() || unique.contains(unitId)) continue;
+        unique.insert(unitId);
+        normalized.append(unitId);
+    }
+    if (normalized.size() > Protocol::MaxObserverTrajectoryUnits) {
+        emit errorForward(QStringLiteral("最多选择 8 个单位轨迹"));
+        return;
+    }
+    m_networkClient.setObserverTrajectories(normalized);
+}
+
 QString SimulationController::connectToPeer(const QString& host, int port) {
     const QString message = QStringLiteral("请通过联网登录界面连接账号服务器: http://%1:%2")
                                 .arg(host).arg(port);
@@ -1616,8 +1645,12 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_communicationState = QStringLiteral("disconnected");
     m_onlineSeats.clear();
     m_onlineMapMarks.clear();
+    const bool hadObserverTrajectories = !m_observerTrajectories.isEmpty();
+    m_observerTrajectories = {};
     m_pendingSeatTransfers.clear();
     m_remoteMessages.clear();
+    const bool hadProjectiles = !m_remoteProjectiles.isEmpty();
+    m_remoteProjectiles.clear();
     m_chatMessages.clear();
     m_remoteScenarioRevision = -1;
     m_lastCommandId.clear();
@@ -1636,8 +1669,10 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     ensureFocusedConsistent();
     emit onlineSeatsChanged();
     emit onlineMapMarksChanged();
+    if (hadObserverTrajectories) emit observerTrajectoriesChanged();
     emit pendingSeatTransfersChanged();
     emit messagesForward();
+    if (hadProjectiles) emit projectilesForward();
     emit chatMessagesChanged();
     emit commandStatusChanged();
     emit readyForSimForward();
@@ -1654,6 +1689,12 @@ QJsonObject SimulationController::scenarioUnitJson(const ScenarioUnit& unit) con
 }
 
 void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
+    applyRemoteState(payload, {}, false);
+}
+
+void SimulationController::applyRemoteState(const QJsonObject& payload,
+                                            const QStringList& changedUnitIds,
+                                            bool partialRuntime) {
     if (!isNetworked()) return;
     Protocol::SnapshotProjection projection;
     const Protocol::ValidationResult validation = Protocol::projectSnapshot(payload, &projection);
@@ -1747,15 +1788,21 @@ void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
     const qint64 revision = room.scenarioRevision;
 
     const QJsonObject scenarioObject = payload.value(QStringLiteral("scenario")).toObject();
-    Scenario incomingScenario = ScenarioIo::fromJson(scenarioObject);
-    if (!roomSelectionConfirmed) incomingScenario.units.clear();
     QStringList incomingIds;
-    incomingIds.reserve(static_cast<qsizetype>(incomingScenario.units.size()));
-    for (const auto& unit : incomingScenario.units) incomingIds.append(unit.id);
+    if (roomSelectionConfirmed) {
+        const QJsonArray scenarioUnits = scenarioObject.value(QStringLiteral("units")).toArray();
+        incomingIds.reserve(scenarioUnits.size());
+        for (const QJsonValue& value : scenarioUnits) {
+            const QString id = value.toObject().value(QStringLiteral("id")).toString();
+            if (!id.isEmpty()) incomingIds.append(id);
+        }
+    }
     QStringList currentIds = m_engine.unitIds();
     std::sort(incomingIds.begin(), incomingIds.end());
     std::sort(currentIds.begin(), currentIds.end());
     if (revision != m_remoteScenarioRevision || incomingIds != currentIds) {
+        Scenario incomingScenario = ScenarioIo::fromJson(scenarioObject);
+        if (!roomSelectionConfirmed) incomingScenario.units.clear();
         if (!m_engine.setRemoteScenario(incomingScenario)) {
             m_remoteLastError = m_engine.lastError();
             emit errorForward(m_remoteLastError);
@@ -1769,10 +1816,35 @@ void SimulationController::applyRemoteSnapshot(const QJsonObject& payload) {
     m_onlineMapMarks = roomSelectionConfirmed
         ? payload.value(QStringLiteral("mapMarks")).toArray().toVariantList() : QVariantList{};
     emit onlineMapMarksChanged();
-    const QJsonArray runtimeUnits = roomSelectionConfirmed
+    const QJsonObject incomingTrajectories = room.observer
+        ? payload.value(QStringLiteral("observerTrajectories")).toObject()
+        : QJsonObject{};
+    if (incomingTrajectories != m_observerTrajectories) {
+        m_observerTrajectories = incomingTrajectories;
+        emit observerTrajectoriesChanged();
+    }
+    const QJsonArray allRuntimeUnits = roomSelectionConfirmed
         ? payload.value(QStringLiteral("units")).toArray() : QJsonArray{};
+    QJsonArray runtimeUnits = allRuntimeUnits;
+    if (partialRuntime) {
+        const QSet<QString> changed(changedUnitIds.cbegin(), changedUnitIds.cend());
+        runtimeUnits = {};
+        for (const QJsonValue& value : allRuntimeUnits) {
+            if (changed.contains(value.toObject().value(QStringLiteral("id")).toString())) {
+                runtimeUnits.append(value);
+            }
+        }
+    }
+    const QVariantList incomingProjectiles = roomSelectionConfirmed
+        ? payload.value(QStringLiteral("projectiles")).toArray().toVariantList()
+        : QVariantList{};
+    if (incomingProjectiles != m_remoteProjectiles) {
+        m_remoteProjectiles = incomingProjectiles;
+        emit projectilesForward();
+    }
     m_engine.applyRemoteRuntimeState(runtimeUnits,
-                                     room.simTime, room.running, room.speed);
+                                     room.simTime, room.running, room.speed,
+                                     partialRuntime);
     invalidateCaches();
     ensureFocusedConsistent();
     emit messagesForward();

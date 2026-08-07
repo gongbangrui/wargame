@@ -15,8 +15,13 @@ QJsonObject snapshot(qint64 revision) {
             {QStringLiteral("stateRevision"), revision},
             {QStringLiteral("scenario"),
              QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                         {QStringLiteral("map"),
+                          QJsonObject{{QStringLiteral("name"), QStringLiteral("test")},
+                                      {QStringLiteral("widthMeters"), 1000.0},
+                                      {QStringLiteral("heightMeters"), 800.0}}},
                          {QStringLiteral("units"), QJsonArray{}}}},
             {QStringLiteral("units"), QJsonArray{}},
+            {QStringLiteral("projectiles"), QJsonArray{}},
             {QStringLiteral("messages"), QJsonArray{}},
             {QStringLiteral("roomState"),
              QJsonObject{{QStringLiteral("scenarioRevision"), 1},
@@ -96,6 +101,7 @@ QJsonObject observerSnapshot(qint64 revision, bool observer = true) {
                                       {QStringLiteral("backgroundResource"), QStringLiteral("")}}},
                          {QStringLiteral("units"), scenarioUnits}}},
             {QStringLiteral("units"), units},
+            {QStringLiteral("projectiles"), QJsonArray{}},
             {QStringLiteral("roomState"),
              QJsonObject{{QStringLiteral("observer"), observer},
                          {QStringLiteral("scenarioRevision"), 1},
@@ -301,6 +307,49 @@ TEST(ClientStateStoreTest, AppliesContiguousSnapshotAndDelta) {
     EXPECT_EQ(store.snapshot(), current);
 }
 
+TEST(ClientStateStoreTest, ProjectileRemovalInDeltaClearsRenderedState) {
+    ClientStateStore store;
+    store.beginConnection();
+    ASSERT_EQ(store.applyEnvelope(welcome(1)).disposition,
+              ClientStateStore::Disposition::Accepted);
+
+    QJsonObject base = snapshot(10);
+    base[QStringLiteral("projectiles")] = QJsonArray{QJsonObject{
+        {QStringLiteral("id"), QStringLiteral("missile_1")},
+        {QStringLiteral("side"), QStringLiteral("red")},
+        {QStringLiteral("position"), QJsonArray{500.0, 400.0, 120.0}},
+        {QStringLiteral("headingRad"), 0.25},
+        {QStringLiteral("speed"), 420.0},
+        {QStringLiteral("age"), 1.0},
+        {QStringLiteral("lifetime"), 16.0},
+        {QStringLiteral("active"), true},
+        {QStringLiteral("terminalReason"), QString{}},
+        {QStringLiteral("terminalAge"), 0.0},
+        {QStringLiteral("resultSettled"), false},
+        {QStringLiteral("threatRadius"), 1300.0}}};
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("snapshot"), 2, base)).disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+    ASSERT_EQ(store.snapshot().value(QStringLiteral("projectiles")).toArray().size(), 1);
+
+    QJsonObject current = base;
+    current[QStringLiteral("stateRevision")] = 11;
+    current[QStringLiteral("projectiles")] = QJsonArray{};
+    current[QStringLiteral("roomState")] =
+        QJsonObject{{QStringLiteral("scenarioRevision"), 1},
+                    {QStringLiteral("stateRevision"), 11},
+                    {QStringLiteral("simTime"), 0.1}};
+    const QJsonObject delta = StateDelta::create(base, current);
+    ASSERT_TRUE(delta.contains(QStringLiteral("projectiles")));
+    ASSERT_TRUE(delta.value(QStringLiteral("projectiles")).toArray().isEmpty());
+
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("delta"), 3, delta)).disposition,
+              ClientStateStore::Disposition::DeltaApplied);
+    EXPECT_TRUE(store.snapshot().value(QStringLiteral("projectiles")).toArray().isEmpty());
+    EXPECT_EQ(store.snapshot(), current);
+}
+
 TEST(ClientStateStoreTest, GapDoesNotAdvanceCursorAndSnapshotRecovers) {
     ClientStateStore store;
     store.beginConnection();
@@ -422,7 +471,7 @@ TEST(ClientStateStoreTest, RejectedDeltaPreservesStateAndRequiresSnapshot) {
     EXPECT_EQ(store.snapshot(), recoveredCurrent);
 }
 
-TEST(ClientStateStoreTest, ProjectionRejectedDeltaRollsBackAndBlocksFollowingDeltas) {
+TEST(ClientStateStoreTest, InvalidMergedStateRollsBackAndBlocksFollowingDeltas) {
     ClientStateStore store;
     store.beginConnection();
     ASSERT_EQ(store.applyEnvelope(welcome(1)).disposition,
@@ -443,11 +492,17 @@ TEST(ClientStateStoreTest, ProjectionRejectedDeltaRollsBackAndBlocksFollowingDel
     current[QStringLiteral("stateRevision")] = 11;
     Protocol::SnapshotProjection directProjection;
     ASSERT_FALSE(Protocol::projectSnapshot(current, &directProjection).valid);
-    const QJsonObject projectionInvalidDelta = StateDelta::create(base, current);
+    const QJsonObject projectionInvalidDelta{
+        {QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+        {QStringLiteral("baseStateRevision"), 10},
+        {QStringLiteral("stateRevision"), 11},
+        {QStringLiteral("scenarioRevision"), 1},
+        {QStringLiteral("units"), QJsonArray{}},
+        {QStringLiteral("roomState"), current.value(QStringLiteral("roomState"))}};
     const ClientStateStore::Result rejected = store.applyEnvelope(
         Protocol::makeServerEnvelope(QStringLiteral("delta"), 3, projectionInvalidDelta));
     EXPECT_EQ(rejected.disposition, ClientStateStore::Disposition::ResyncRequired);
-    EXPECT_EQ(rejected.code, QStringLiteral("STATE_PROJECTION_REJECTED"));
+    EXPECT_EQ(rejected.code, QStringLiteral("DELTA_REJECTED"));
     EXPECT_EQ(store.snapshot(), beforeSnapshot);
     expectSameLifecycle(store.lifecycle(), beforeLifecycle);
     EXPECT_EQ(store.lastSequence(), 2u);

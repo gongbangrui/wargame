@@ -48,6 +48,7 @@ public:
                     const QString& note = QString());
     void sendMapMark(const QVariantMap& position, const QString& label,
                      const QStringList& recipientSeatIds = {});
+    void setObserverTrajectories(const QStringList& unitIds);
     void sendScenarioUpsert(const QJsonObject& unit);
     void sendScenarioRemove(const QString& unitId);
     void sendScenarioReplace(const QJsonObject& scenario);
@@ -70,6 +71,8 @@ signals:
     void intelShareReceived(const QJsonObject& share);
     void transferEventReceived(const QJsonObject& event);
     void snapshotReceived(const QJsonObject& payload);
+    void deltaSnapshotReceived(const QJsonObject& payload,
+                               const QStringList& changedUnitIds);
     void chatHistoryReceived(const QJsonArray& messages);
     void chatReceived(const QJsonObject& message);
     void eventReceived(const QJsonObject& event);

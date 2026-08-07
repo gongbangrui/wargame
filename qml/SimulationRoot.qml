@@ -59,17 +59,67 @@ Item {
         autoFit: "Ctrl+F", cancelTrack: "P"
     })
     property var ks_seqs: ks_loadAll()
+    property var online_ks_defaults: ({
+        nextUnit: "Tab", prevUnit: "Shift+Tab", locate: "F", fitMap: "Ctrl+F",
+        sidebar: "B", cancel: "Escape", slowDown: "[", speedUp: "]",
+        countermeasure: "C", scan: "S", repair: "R", halt: "H",
+        engage: "Return", trajectory: "T"
+    })
+    property var online_ks_seqs: online_ks_loadAll()
 
     function ks_loadAll() {
         var result = ({})
+        var namespace = "shortcuts/local/"
         for (var i = 0; i < ks_actions.length; i++) {
             var a = ks_actions[i]
-            result[a] = root.controller.loadSetting("shortcuts/" + a, ks_defaults[a])
+            var fallback = root.ks_defaults[a]
+            var value = root.controller.loadSetting(namespace + a, undefined)
+            if (value === undefined || value === null || value === "") {
+                // Migrate the pre-v4 flat namespace on first access.
+                value = root.controller.loadSetting("shortcuts/" + a, fallback)
+                root.controller.saveSetting(namespace + a, value)
+            }
+            result[a] = value
         }
         return result
     }
 
-    function reloadAllShortcuts() { ks_seqs = ks_loadAll() }
+    function online_ks_loadAll() {
+        var result = ({})
+        for (var key in root.online_ks_defaults) {
+            var value = root.controller.loadSetting("shortcuts/online/" + key, undefined)
+            result[key] = value === undefined || value === null || value === ""
+                ? root.online_ks_defaults[key] : value
+        }
+        return result
+    }
+
+    function reloadAllShortcuts() {
+        ks_seqs = ks_loadAll()
+        online_ks_seqs = online_ks_loadAll()
+    }
+
+    function shortcutBlocked() {
+        function popupOpen(popup) {
+            return popup && (popup.opened === true || popup.visible === true)
+        }
+        if (popupOpen(cpIssueDialog) || popupOpen(errorDialog)
+                || popupOpen(shortcutHelpDialog) || popupOpen(simEndDialog)
+                || popupOpen(settingsPanel) || popupOpen(sessionDialog)
+                || popupOpen(chatPanel)) return true
+        if (root.activePage && root.activePage.shortcutsBlocked
+                && root.activePage.shortcutsBlocked()) return true
+        var item = root.appWindow ? root.appWindow.activeFocusItem : null
+        if (!item) return false
+        // Text editors and editable combo boxes own their keystrokes. Menus
+        // and modal dialogs expose the same active popup focus boundary.
+        if (item.selectByMouse !== undefined || item.inputMethodHints !== undefined)
+            return true
+        if (item.popup && (item.popup.visible || item.popup.opened)) return true
+        // A focused combo box consumes navigation keys even when its popup is
+        // closed; do not let a global tactical shortcut submit a command then.
+        return item.popup !== undefined && item.activeFocus === true
+    }
 
     function toSeqList(s) {
         if (typeof s !== "string" || s.trim().length === 0) return []
@@ -81,32 +131,37 @@ Item {
     // 整个 Shortcut 实例；这里采用简化方案：用分组 Shortcut，每个绑定 ks_seqs[action]
     // ks_seqs 整体重新赋值会触发所有 Shortcut 的 sequences 重新求值
 
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["toggleRun"]   || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed && root.directorCanStart; onActivated: { if (!root.controller.readyForSim) { cpIssueDialog.refreshAndOpen(); return } root.controller.setRunning(!root.controller.running) }}
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed0"]      || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: { root.controller.setSpeed(0); speedCombo.currentIndex = 0 }}
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed1"]      || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: { root.controller.setSpeed(1); speedCombo.currentIndex = 1 }}
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed2"]      || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: { root.controller.setSpeed(2); speedCombo.currentIndex = 2 }}
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed4"]      || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: { root.controller.setSpeed(4); speedCombo.currentIndex = 3 }}
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed8"]      || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: { root.controller.setSpeed(8); speedCombo.currentIndex = 4 }}
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["step"]        || ""); context: Qt.WindowShortcut; enabled: root.simulationControlAllowed; onActivated: root.controller.stepOnce() }
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speedUp"]     || ""); context: Qt.WindowShortcut; enabled: root.unitControlAllowed && root.controller.viewMode !== "editor"; onActivated: root.adjustFocusedUnitSpeed(10) }
-    Shortcut { sequences: root.toSeqList(root.ks_seqs["speedDown"]   || ""); context: Qt.WindowShortcut; enabled: root.unitControlAllowed && root.controller.viewMode !== "editor"; onActivated: root.adjustFocusedUnitSpeed(-10) }
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["toggleRun"]   || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.simulationControlAllowed && root.directorCanStart && !root.shortcutBlocked(); onActivated: { if (!root.controller.readyForSim) { cpIssueDialog.refreshAndOpen(); return } root.controller.setRunning(!root.controller.running) }}
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed0"]      || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.simulationControlAllowed && !root.shortcutBlocked(); onActivated: { root.controller.setSpeed(0); speedCombo.currentIndex = 0 }}
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed1"]      || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.simulationControlAllowed && !root.shortcutBlocked(); onActivated: { root.controller.setSpeed(1); speedCombo.currentIndex = 1 }}
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed2"]      || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.simulationControlAllowed && !root.shortcutBlocked(); onActivated: { root.controller.setSpeed(2); speedCombo.currentIndex = 2 }}
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed4"]      || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.simulationControlAllowed && !root.shortcutBlocked(); onActivated: { root.controller.setSpeed(4); speedCombo.currentIndex = 3 }}
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speed8"]      || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.simulationControlAllowed && !root.shortcutBlocked(); onActivated: { root.controller.setSpeed(8); speedCombo.currentIndex = 4 }}
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["step"]        || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.simulationControlAllowed && !root.shortcutBlocked(); onActivated: root.controller.stepOnce() }
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speedUp"]     || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.unitControlAllowed && root.controller.viewMode !== "editor" && !root.shortcutBlocked(); onActivated: root.adjustFocusedUnitSpeed(10) }
+    Shortcut { sequences: root.toSeqList(root.ks_seqs["speedDown"]   || ""); context: Qt.WindowShortcut; enabled: !root.controller.networked && root.unitControlAllowed && root.controller.viewMode !== "editor" && !root.shortcutBlocked(); onActivated: root.adjustFocusedUnitSpeed(-10) }
     Shortcut { sequences: root.toSeqList(root.ks_seqs["prevUnit"]    || ""); context: Qt.WindowShortcut
         onActivated: root.switchActiveUnit(-1)
-        enabled: root.controller.viewMode === "commandpost-red" || root.controller.viewMode === "commandpost-blue"
+        enabled: !root.controller.networked && !root.shortcutBlocked()
+                 && (root.controller.viewMode === "commandpost-red" || root.controller.viewMode === "commandpost-blue")
     }
     Shortcut { sequences: root.toSeqList(root.ks_seqs["nextUnit"]    || ""); context: Qt.WindowShortcut
         onActivated: root.switchActiveUnit(1)
-        enabled: root.controller.viewMode === "commandpost-red" || root.controller.viewMode === "commandpost-blue"
+        enabled: !root.controller.networked && !root.shortcutBlocked()
+                 && (root.controller.viewMode === "commandpost-red" || root.controller.viewMode === "commandpost-blue")
     }
     Shortcut { sequences: root.toSeqList(root.ks_seqs["nextUnitTab"] || ""); context: Qt.WindowShortcut
         onActivated: root.switchActiveUnit(1)
+        enabled: !root.controller.networked && !root.shortcutBlocked()
     }
     Shortcut { sequences: root.toSeqList(root.ks_seqs["prevUnitSh"]  || ""); context: Qt.WindowShortcut
         onActivated: root.switchActiveUnit(-1)
+        enabled: !root.controller.networked && !root.shortcutBlocked()
     }
     Shortcut { sequences: root.toSeqList(root.ks_seqs["autoFit"]     || ""); context: Qt.WindowShortcut
         onActivated: root.fitActivePage()
-        enabled: root.controller.viewMode === "commandpost-red" || root.controller.viewMode === "commandpost-blue"
+        enabled: !root.controller.networked && !root.shortcutBlocked()
+                 && (root.controller.viewMode === "commandpost-red" || root.controller.viewMode === "commandpost-blue")
     }
     Shortcut { sequences: root.toSeqList(root.ks_seqs["cancelTrack"] || ""); context: Qt.WindowShortcut
         onActivated: {
@@ -114,8 +169,73 @@ Item {
             if (canvas) canvas.setTrackingTarget("", "")
             if (root.controller.focusedUnitId) root.controller.command("halt", { unitId: root.controller.focusedUnitId })
         }
-        enabled: !root.controller.isObserver && root.controller.viewMode !== "editor"
+        enabled: !root.controller.networked && !root.controller.isObserver
+                 && root.controller.viewMode !== "editor" && !root.shortcutBlocked()
     }
+
+    // Online controls use a separate namespace and are enabled only after a
+    // room snapshot is authoritative. The Enter action deliberately uses the
+    // explicitly selected target; it never falls back to the first list item.
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.nextUnit || "Tab"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: root.switchActiveUnit(1) }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.prevUnit || "Shift+Tab"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: root.switchActiveUnit(-1) }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.locate || "F"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: {
+            var canvas = root.activeCanvas()
+            var id = root.controller.focusedUnitId
+            if (root.activePage && root.activePage.shortcutUnitId) id = root.activePage.shortcutUnitId()
+            if (canvas && id) canvas.focusOnUnit(id)
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.fitMap || "Ctrl+F"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: root.fitActivePage() }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.sidebar || "B"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: if (root.activePage && root.activePage.openTacticalDrawer) root.activePage.openTacticalDrawer() }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.cancel || "Escape"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: {
+            if (root.activePage && root.activePage.cancelOnlineShortcut) root.activePage.cancelOnlineShortcut()
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.slowDown || "["); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.controller.isObserver && root.controller.matchPhase === "running" && !root.shortcutBlocked(); onActivated: {
+            if (root.activePage && root.activePage.adjustShortcutUnitSpeed)
+                root.activePage.adjustShortcutUnitSpeed(-10)
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.speedUp || "]"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.controller.isObserver && root.controller.matchPhase === "running" && !root.shortcutBlocked(); onActivated: {
+            if (root.activePage && root.activePage.adjustShortcutUnitSpeed)
+                root.activePage.adjustShortcutUnitSpeed(10)
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.countermeasure || "C"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
+            var id = root.activePage && root.activePage.shortcutUnitId ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
+            if (id) root.controller.command("activateCountermeasure", { unitId: id })
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.scan || "S"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
+            var id = root.activePage && root.activePage.shortcutUnitId ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
+            if (id) root.controller.command("activateScan", { unitId: id })
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.repair || "R"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
+            var id = root.activePage && root.activePage.shortcutUnitId ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
+            if (id) root.controller.command("attemptFieldRepair", { unitId: id })
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.halt || "H"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
+            var id = root.activePage && root.activePage.shortcutUnitId ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
+            if (id) root.controller.command("halt", { unitId: id })
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.engage || "Return"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
+            if (root.activePage && root.activePage.engageFocusedTarget) root.activePage.engageFocusedTarget()
+        } }
+    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.trajectory || "T"); context: Qt.WindowShortcut
+        enabled: root.controller.networked && root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
+            var id = root.activePage && root.activePage.shortcutUnitId
+                ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
+            if (id && root.activePage && root.activePage.toggleObserverTrajectory)
+                root.activePage.toggleObserverTrajectory(id)
+        } }
 
     // ── Settings state (loaded from QSettings) ──
     property bool settShowMinimap: true
@@ -626,6 +746,7 @@ Item {
         // Shortcut items re-bind immediately, without waiting for the
         // settings panel to close.
         function onShortcutsChanged() { root.reloadAllShortcuts() }
+        function onNetworkedChanged() { root.reloadAllShortcuts() }
     }
 
     Binding {

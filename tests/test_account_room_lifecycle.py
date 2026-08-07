@@ -136,17 +136,69 @@ class AccountRoomLifecycleTest(unittest.TestCase):
         with self.app.database() as db:
             db.execute("UPDATE rooms SET status='paused' WHERE room_id='main'")
 
+        with self.assertRaises(HTTPException) as start_rejected:
+            self.app.room_action("main", "start", None)
+        self.assertEqual(start_rejected.exception.status_code, 409)
+
         resumed = self.app.room_action("main", "resume", None)
 
         self.assertEqual(resumed["operation"]["action"], "resume")
         self.assertEqual(resumed["operation"]["expectedStatus"], "running")
-        self.assertEqual(resumed["room"]["status"], "running")
+        self.assertEqual(resumed["operation"]["state"], "pending")
+        self.assertEqual(resumed["room"]["status"], "paused")
+
+        acknowledged = self.app.internal_room_operation_ack(
+            "main",
+            resumed["operation"]["operationId"],
+            self.app.InternalOperationAckBody(
+                state="acknowledged",
+                revision=resumed["operation"]["requestedRevision"] + 1,
+                code="",
+            ),
+            self.app.INTERNAL_KEY,
+        )
+        self.assertEqual(acknowledged["room"]["status"], "running")
 
         with self.app.database() as db:
             db.execute("UPDATE rooms SET status='preparing' WHERE room_id='main'")
         with self.assertRaises(HTTPException) as rejected:
             self.app.room_action("main", "resume", None)
         self.assertEqual(rejected.exception.status_code, 409)
+
+    def test_status_heartbeat_cannot_commit_a_pending_open(self) -> None:
+        with self.app.database() as db:
+            db.execute(
+                "UPDATE rooms SET status='finished',winner='blue',status_reason='completed' "
+                "WHERE room_id='main'"
+            )
+
+        requested = self.app.room_action("main", "open", None)
+        heartbeat = self.app.internal_room_status(
+            "main",
+            self.app.InternalRoomStatusBody(
+                status="preparing", reason="game process is preparing"
+            ),
+            self.app.INTERNAL_KEY,
+        )
+
+        self.assertEqual(heartbeat["reason"], "pending operation")
+        self.assertEqual(heartbeat["room"]["status"], "finished")
+        self.assertEqual(heartbeat["room"]["winner"], "blue")
+        self.assertEqual(heartbeat["room"]["operation"]["state"], "pending")
+
+        failed = self.app.internal_room_operation_ack(
+            "main",
+            requested["operation"]["operationId"],
+            self.app.InternalOperationAckBody(
+                state="failed",
+                revision=requested["operation"]["requestedRevision"],
+                code="AI_PROBE_FAILED",
+            ),
+            self.app.INTERNAL_KEY,
+        )
+        self.assertEqual(failed["room"]["status"], "stopped")
+        self.assertEqual(failed["room"]["winner"], "")
+        self.assertEqual(failed["room"]["statusReason"], "AI_PROBE_FAILED")
 
     def test_finished_status_writes_back_winner_and_reason(self) -> None:
         response = self.app.internal_room_status(

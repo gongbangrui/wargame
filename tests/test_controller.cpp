@@ -420,6 +420,12 @@ TEST(SimulationControllerTest, UnitStateRevisionRefreshesRuntimePositionAmmoAndC
         unit[QStringLiteral("position")] = QJsonArray{4321.0, 8765.0, 2000.0};
         unit[QStringLiteral("ammoRemaining")] = 2;
         unit[QStringLiteral("cooldownRemaining")] = 2.5;
+        unit[QStringLiteral("actions")] = QJsonObject{
+            {QStringLiteral("engageTarget"),
+             QJsonObject{{QStringLiteral("visible"), true},
+                          {QStringLiteral("enabled"), false}}}};
+        unit[QStringLiteral("incomingThreatCount")] = 1;
+        unit[QStringLiteral("minimumThreatEta")] = 4.0;
         runtime.replace(i, unit);
         break;
     }
@@ -432,6 +438,19 @@ TEST(SimulationControllerTest, UnitStateRevisionRefreshesRuntimePositionAmmoAndC
     EXPECT_DOUBLE_EQ(updated.value(QStringLiteral("position")).toArray().at(1).toDouble(), 8765.0);
     EXPECT_EQ(updated.value(QStringLiteral("ammoRemaining")).toInt(), 2);
     EXPECT_DOUBLE_EQ(updated.value(QStringLiteral("cooldownRemaining")).toDouble(), 2.5);
+    EXPECT_FALSE(updated.value(QStringLiteral("actions")).toObject()
+                     .value(QStringLiteral("engageTarget")).toObject()
+                     .value(QStringLiteral("enabled")).toBool());
+    ASSERT_EQ(controller.units().size(), runtime.size());
+    bool foundThreat = false;
+    for (const QVariant& value : controller.units()) {
+        const QVariantMap candidate = value.toMap();
+        if (candidate.value(QStringLiteral("id")).toString() == QLatin1String("red_a1")) {
+            EXPECT_EQ(candidate.value(QStringLiteral("incomingThreatCount")).toInt(), 1);
+            foundThreat = true;
+        }
+    }
+    EXPECT_TRUE(foundThreat);
 }
 
 TEST(SimulationControllerTest, UnseatedRunningSnapshotStaysInRoomSelectionAndHidesRuntime) {
