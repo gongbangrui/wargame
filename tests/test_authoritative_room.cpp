@@ -1451,6 +1451,22 @@ TEST(AuthoritativeRoomTest, DisconnectPromotesDeterministicallyAndPersistsChoice
     EXPECT_EQ(restored.rngState(), room.rngState());
 }
 
+TEST(AuthoritativeRoomTest, RestoresHighBitRngStateSerializedAsSignedJson) {
+    AuthoritativeRoom room(0xfedcba9876543210ULL);
+    QString error;
+    ASSERT_TRUE(room.setTemplateCatalog(AuthoritativeRoom::defaultTemplateCatalog(), &error))
+        << error.toStdString();
+
+    const QJsonObject persisted = room.toJson();
+    ASSERT_LT(persisted.value(QStringLiteral("rngState")).toInteger(), 0);
+
+    AuthoritativeRoom restored(7);
+    ASSERT_TRUE(restored.setTemplateCatalog(AuthoritativeRoom::defaultTemplateCatalog(), &error))
+        << error.toStdString();
+    ASSERT_TRUE(restored.restore(persisted, &error)) << error.toStdString();
+    EXPECT_EQ(restored.rngState(), room.rngState());
+}
+
 TEST(AuthoritativeRoomTest, PreparingCommanderDisconnectDoesNotForfeitMatch) {
     auto room = configuredRoom();
     claimCommanders(room);

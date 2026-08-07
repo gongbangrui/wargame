@@ -887,12 +887,15 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
     if (error) error->clear();
     const qint64 revision = object.value(QStringLiteral("revision")).toInteger();
     const qint64 nextUnit = object.value(QStringLiteral("nextUnitSequence")).toInteger();
-    const qint64 rng = object.value(QStringLiteral("rngState")).toInteger();
+    // rngState is an unsigned xorshift state serialized through QJson's signed
+    // integer representation. Preserve the bit pattern when its high bit is set.
+    const quint64 rng = static_cast<quint64>(
+        object.value(QStringLiteral("rngState")).toInteger());
     const QString phase = object.value(QStringLiteral("phase")).toString();
     const QString mode = object.contains(QStringLiteral("mode"))
         ? object.value(QStringLiteral("mode")).toString() : QStringLiteral("pvp");
     if (object.value(QStringLiteral("schemaVersion")).toInt() != 1 || revision <= 0
-        || nextUnit <= 0 || rng <= 0
+        || nextUnit <= 0 || rng == 0
         || (mode != QLatin1String("pvp") && mode != QLatin1String("pve"))
         || (phase != QLatin1String("preparing") && phase != QLatin1String("running")
             && phase != QLatin1String("paused") && phase != QLatin1String("finished"))) {
