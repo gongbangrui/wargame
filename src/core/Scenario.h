@@ -30,7 +30,10 @@ struct ScenarioUnit {
     double detectRange = 5000;
     double attackRange = 1500;
     double commRange = 20000;
-    double speed = 50;
+    // A zero default is safe for an incompletely filled editor fixture. The
+    // scenario loader supplies the type-specific cruise default when speed is
+    // omitted from JSON.
+    double speed = 0.0;
     double maxHp = 100;
     /// Fraction of incoming hull damage absorbed, in [0, 0.9].
     double armor = 0.0;

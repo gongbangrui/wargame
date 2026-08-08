@@ -173,7 +173,7 @@ Item {
                         range: Number(ability.range || 0),
                         side: unit.side || "",
                         started: now,
-                        duration: abilityName === "scan" ? 850 : 520
+                        duration: abilityName === "scan" ? 1200 : 980
                     })
                 }
             }
@@ -805,30 +805,114 @@ Item {
                     (Date.now() - effect.started) / Math.max(1, effect.duration)))
                 var effectPixel = root.toPixel(effect.x, effect.y)
                 var effectColor = effect.side === "red" ? "#ffc15a" : "#effcff"
+                var secondaryColor = effect.side === "red" ? "#ff765e" : "#35c8ff"
+                var easedProgress = 1 - Math.pow(1 - effectProgress, 2.2)
+                var fade = 1 - effectProgress
+                var pulse = Math.sin(effectProgress * Math.PI)
+                var rangeRadius = Math.max(18,
+                    Math.min(280, Number(effect.range || 0) * root.zoom))
                 ctx.save()
-                ctx.globalAlpha = 1 - effectProgress
-                ctx.strokeStyle = effectColor
-                ctx.lineWidth = 2
+                ctx.translate(effectPixel.x, effectPixel.y)
+                ctx.globalCompositeOperation = "lighter"
                 if (effect.kind === "scan") {
-                    ctx.beginPath()
-                    ctx.arc(effectPixel.x, effectPixel.y,
-                            Math.max(6, effect.range * root.zoom * effectProgress),
-                            0, Math.PI * 2)
-                    ctx.stroke()
-                } else {
-                    var fragmentRadius = Math.max(12,
-                        Math.min(130, effect.range * root.zoom)
-                        * (0.25 + effectProgress * 0.75))
-                    for (var fragment = 0; fragment < 14; fragment++) {
-                        var fragmentAngle = fragment / 14 * Math.PI * 2
-                            + effectProgress * 0.7
-                        var innerRadius = fragmentRadius * 0.72
+                    // Recon scan: a broad sweep with staggered rings and a rotating
+                    // sector, so an empty scan still reads as a completed action.
+                    for (var scanRing = 0; scanRing < 3; scanRing++) {
+                        var scanPhase = Math.max(0, Math.min(1,
+                            effectProgress * 1.28 - scanRing * 0.17))
+                        if (scanPhase <= 0) continue
+                        ctx.globalAlpha = fade * (0.72 - scanRing * 0.15)
+                        ctx.strokeStyle = scanRing === 0 ? effectColor : secondaryColor
+                        ctx.lineWidth = scanRing === 0 ? 2.4 : 1.1
+                        ctx.setLineDash(scanRing === 0 ? [] : [8, 7])
                         ctx.beginPath()
-                        ctx.moveTo(effectPixel.x + Math.cos(fragmentAngle) * innerRadius,
-                                   effectPixel.y + Math.sin(fragmentAngle) * innerRadius)
-                        ctx.lineTo(effectPixel.x + Math.cos(fragmentAngle) * fragmentRadius,
-                                   effectPixel.y + Math.sin(fragmentAngle) * fragmentRadius)
+                        ctx.arc(0, 0, Math.max(8, rangeRadius * scanPhase), 0, Math.PI * 2)
                         ctx.stroke()
+                    }
+                    ctx.setLineDash([])
+                    ctx.globalAlpha = fade * 0.55
+                    ctx.strokeStyle = secondaryColor
+                    ctx.lineWidth = 1.2
+                    var sweepAngle = -Math.PI / 2 + effectProgress * Math.PI * 2.4
+                    ctx.beginPath()
+                    ctx.moveTo(0, 0)
+                    ctx.lineTo(Math.cos(sweepAngle) * rangeRadius,
+                               Math.sin(sweepAngle) * rangeRadius)
+                    ctx.stroke()
+                    ctx.globalAlpha = fade * 0.28
+                    ctx.beginPath()
+                    ctx.moveTo(0, 0)
+                    ctx.lineTo(Math.cos(sweepAngle - 0.22) * rangeRadius,
+                               Math.sin(sweepAngle - 0.22) * rangeRadius)
+                    ctx.lineTo(Math.cos(sweepAngle + 0.22) * rangeRadius,
+                               Math.sin(sweepAngle + 0.22) * rangeRadius)
+                    ctx.closePath()
+                    ctx.fillStyle = secondaryColor
+                    ctx.fill()
+                } else {
+                    // Countermeasure burst: expanding shock rings, a bright core,
+                    // and rotating interference fragments around the authoritative
+                    // activation point.
+                    for (var burstRing = 0; burstRing < 3; burstRing++) {
+                        var burstPhase = Math.max(0, Math.min(1,
+                            effectProgress * 1.32 - burstRing * 0.18))
+                        if (burstPhase <= 0) continue
+                        ctx.globalAlpha = fade * (0.78 - burstRing * 0.18)
+                        ctx.strokeStyle = burstRing === 0 ? effectColor : secondaryColor
+                        ctx.lineWidth = burstRing === 0 ? 2.8 : 1.3
+                        ctx.setLineDash(burstRing === 0 ? [] : [5, 4])
+                        ctx.beginPath()
+                        ctx.arc(0, 0, Math.max(7, rangeRadius * burstPhase), 0, Math.PI * 2)
+                        ctx.stroke()
+                    }
+                    ctx.setLineDash([])
+                    ctx.globalAlpha = fade * (0.22 + pulse * 0.48)
+                    ctx.fillStyle = effectColor
+                    ctx.beginPath()
+                    ctx.arc(0, 0, Math.max(5, rangeRadius * 0.12 * (1 + pulse)), 0, Math.PI * 2)
+                    ctx.fill()
+
+                    ctx.globalAlpha = fade * 0.9
+                    ctx.strokeStyle = effectColor
+                    ctx.lineWidth = 1.5
+                    for (var ray = 0; ray < 20; ray++) {
+                        var rayAngle = ray / 20 * Math.PI * 2 + effectProgress * 1.8
+                        var rayInner = rangeRadius * (0.30 + (ray % 3) * 0.035)
+                        var rayOuter = rangeRadius * (0.64 + (ray % 4) * 0.065)
+                        ctx.beginPath()
+                        ctx.moveTo(Math.cos(rayAngle) * rayInner,
+                                   Math.sin(rayAngle) * rayInner)
+                        ctx.lineTo(Math.cos(rayAngle) * rayOuter,
+                                   Math.sin(rayAngle) * rayOuter)
+                        ctx.stroke()
+                    }
+
+                    ctx.globalAlpha = fade * 0.72
+                    ctx.strokeStyle = secondaryColor
+                    ctx.lineWidth = 1.2
+                    for (var arc = 0; arc < 5; arc++) {
+                        var arcStart = arc / 5 * Math.PI * 2 + effectProgress * 1.4
+                        ctx.beginPath()
+                        ctx.arc(0, 0, rangeRadius * (0.50 + arc % 2 * 0.12),
+                                arcStart, arcStart + 0.42 + pulse * 0.22)
+                        ctx.stroke()
+                    }
+
+                    ctx.globalAlpha = fade * 0.9
+                    ctx.fillStyle = effectColor
+                    for (var fragment = 0; fragment < 24; fragment++) {
+                        var fragmentAngle = fragment / 24 * Math.PI * 2
+                            - effectProgress * 2.1
+                        var fragmentDistance = rangeRadius
+                            * (0.18 + easedProgress * (0.55 + (fragment % 5) * 0.055))
+                        var fragmentSize = 1.2 + (fragment % 3) * 0.65
+                        ctx.save()
+                        ctx.translate(Math.cos(fragmentAngle) * fragmentDistance,
+                                      Math.sin(fragmentAngle) * fragmentDistance)
+                        ctx.rotate(fragmentAngle + Math.PI / 4)
+                        ctx.fillRect(-fragmentSize, -fragmentSize * 0.45,
+                                     fragmentSize * 2.0, fragmentSize * 0.9)
+                        ctx.restore()
                     }
                 }
                 ctx.restore()
@@ -878,29 +962,42 @@ Item {
                     var redProjectile = projectile.side === "red"
                     var bodyColor = redProjectile ? "#ff5b3f" : "#35c8ff"
                     var edgeColor = redProjectile ? "#ffc15a" : "#effcff"
-                    var tailLength = Math.max(8, Math.min(24,
-                        Number(projectile.speed || 360) * root.zoom * 0.12))
+                    // Simulation headings use a mathematical Y-up axis while
+                    // the Canvas uses screen Y-down coordinates.
+                    var screenHeading = -heading
+                    var modelScale = 0.72
+                    var tailLength = Math.max(5, Math.min(17,
+                        Number(projectile.speed || 500) * root.zoom * 0.08))
+                    var noseLength = (redProjectile ? 9 : 8) * modelScale
+                    var rearLength = (redProjectile ? 6 : 7) * modelScale
+                    var halfWidth = (redProjectile ? 4.5 : 4.5) * modelScale
                     ctx.save()
                     ctx.globalAlpha = 0.92
                     ctx.strokeStyle = bodyColor
-                    ctx.lineWidth = 2.5
+                    ctx.lineWidth = 1.9
+                    ctx.shadowColor = bodyColor
+                    ctx.shadowBlur = 7
                     ctx.beginPath()
-                    ctx.moveTo(projectilePixel.x - Math.cos(heading) * tailLength,
-                               projectilePixel.y - Math.sin(heading) * tailLength)
+                    ctx.moveTo(projectilePixel.x - Math.cos(screenHeading) * tailLength,
+                               projectilePixel.y - Math.sin(screenHeading) * tailLength)
                     ctx.lineTo(projectilePixel.x, projectilePixel.y)
                     ctx.stroke()
                     ctx.translate(projectilePixel.x, projectilePixel.y)
-                    ctx.rotate(heading)
+                    ctx.rotate(screenHeading)
                     ctx.fillStyle = bodyColor
                     ctx.strokeStyle = edgeColor
-                    ctx.lineWidth = 1.5
+                    ctx.lineWidth = 1.2
                     ctx.beginPath()
                     if (redProjectile) {
-                        ctx.moveTo(9, 0); ctx.lineTo(-6, -4.5)
-                        ctx.lineTo(-3, 0); ctx.lineTo(-6, 4.5)
+                        ctx.moveTo(noseLength, 0)
+                        ctx.lineTo(-rearLength, -halfWidth)
+                        ctx.lineTo(-rearLength * 0.55, 0)
+                        ctx.lineTo(-rearLength, halfWidth)
                     } else {
-                        ctx.moveTo(8, 0); ctx.lineTo(0, -4.5)
-                        ctx.lineTo(-7, 0); ctx.lineTo(0, 4.5)
+                        ctx.moveTo(noseLength * 0.9, 0)
+                        ctx.lineTo(0, -halfWidth)
+                        ctx.lineTo(-rearLength, 0)
+                        ctx.lineTo(0, halfWidth)
                     }
                     ctx.closePath(); ctx.fill(); ctx.stroke()
                     ctx.restore()

@@ -874,15 +874,15 @@ QVariantList SimulationController::unitTemplates() const {
         unit.pos.alt = altitude;
         if (kind == QLatin1String("attackuav")) {
             unit.detectRange = 4000; unit.attackRange = 2500; unit.commRange = 15000;
-            unit.speed = 100; unit.maxHp = 120; unit.optimalRange = 1800;
+            unit.speed = 200; unit.maxHp = 120; unit.optimalRange = 1800;
             unit.damageMin = 80; unit.damageMax = 120; unit.attackPower = 100;
         } else if (kind == QLatin1String("reconuav")) {
-            unit.detectRange = 8000; unit.attackRange = 0; unit.speed = 80;
+            unit.detectRange = 8000; unit.attackRange = 0; unit.speed = 150;
         } else if (kind == QLatin1String("jammeruav")) {
-            unit.detectRange = 6000; unit.attackRange = 0; unit.speed = 60; unit.maxHp = 80;
+            unit.detectRange = 6000; unit.attackRange = 0; unit.speed = 120; unit.maxHp = 80;
         } else {
             unit.detectRange = 3000; unit.attackRange = 0; unit.commRange = 10000;
-            unit.speed = 6; unit.maxHp = 80;
+            unit.speed = 18; unit.maxHp = 80;
         }
         QVariantMap result = scenarioUnitJson(unit).toVariantMap();
         result[QStringLiteral("templateName")] = name;

@@ -48,6 +48,16 @@ Rectangle {
         return abilities[name] || ({})
     }
 
+    function speedLimit() {
+        var reported = Number(root.snap.maxCommandedSpeed)
+        if (isFinite(reported) && reported > 0) return reported
+        if (root.snap.kind === "attackuav") return 360
+        if (root.snap.kind === "reconuav") return 300
+        if (root.snap.kind === "jammeruav") return 260
+        if (root.snap.kind === "groundscout") return 36
+        return 0
+    }
+
     QtObject {
         id: t
         property color text: AppContext.text
@@ -106,6 +116,7 @@ Rectangle {
             GhostButton {
                 text: ""
                 iconName: "table"
+                iconSize: 18
                 implicitWidth: 34
                 implicitHeight: 30
                 onClicked: unitDetailsDialog.open()
@@ -120,54 +131,61 @@ Rectangle {
             spacing: 6
             visible: root.snap.alive && root.interactionEnabled
 
-            GhostButton {
-                text: ""; iconName: "return"; implicitWidth: 34; implicitHeight: 30
-                visible: root.actionVisible("withdraw", root.snap.movable === true)
-                enabled: root.actionAllowed("withdraw", root.snap.movable === true)
+            AbilityActionButton {
+                Layout.preferredWidth: 48
+                Layout.preferredHeight: 42
+                iconName: "return"
+                actionLabel: "撤离"
+                abilityData: ({})
+                actionVisible: root.actionVisible("withdraw", root.snap.movable === true)
+                actionAllowed: root.actionAllowed("withdraw", root.snap.movable === true)
                 onClicked: root.controller.command("withdraw", { unitId: root.snap.id })
-                ToolTip.visible: hovered; ToolTip.text: "撤离"
-                Accessible.name: ToolTip.text
             }
-            GhostButton {
-                text: ""; iconName: "countermeasure"; implicitWidth: 34; implicitHeight: 30
-                visible: root.actionVisible("activateCountermeasure",
-                                            root.ability("countermeasure").range > 0)
-                enabled: root.actionAllowed("activateCountermeasure",
-                                            root.ability("countermeasure").available === true)
+            AbilityActionButton {
+                Layout.preferredWidth: 48
+                Layout.preferredHeight: 42
+                iconName: "countermeasure"
+                actionLabel: "释放干扰弹"
+                abilityData: root.ability("countermeasure")
+                actionVisible: root.actionVisible("activateCountermeasure",
+                                                   root.ability("countermeasure").range > 0)
+                actionAllowed: root.actionAllowed("activateCountermeasure",
+                                                  root.ability("countermeasure").available === true)
                 onClicked: root.controller.command("activateCountermeasure", { unitId: root.snap.id })
-                ToolTip.visible: hovered
-                ToolTip.text: enabled ? "释放干扰弹" : "干扰弹冷却中或次数已用尽"
-                Accessible.name: ToolTip.text
             }
-            GhostButton {
-                text: ""; iconName: "scan"; implicitWidth: 34; implicitHeight: 30
-                visible: root.actionVisible("activateScan", root.snap.kind === "reconuav")
-                enabled: root.actionAllowed("activateScan",
-                                            root.snap.kind === "reconuav"
-                                            && root.ability("scan").available === true)
+            AbilityActionButton {
+                Layout.preferredWidth: 48
+                Layout.preferredHeight: 42
+                iconName: "scan"
+                actionLabel: "超视距扫描"
+                abilityData: root.ability("scan")
+                actionVisible: root.actionVisible("activateScan", root.snap.kind === "reconuav")
+                actionAllowed: root.actionAllowed("activateScan",
+                                                  root.snap.kind === "reconuav"
+                                                  && root.ability("scan").available === true)
                 onClicked: root.controller.command("activateScan", { unitId: root.snap.id })
-                ToolTip.visible: hovered
-                ToolTip.text: enabled ? "主动扫描" : "扫描冷却中"
-                Accessible.name: ToolTip.text
             }
-            GhostButton {
-                text: ""; iconName: "repair"; implicitWidth: 34; implicitHeight: 30
-                visible: root.actionVisible("attemptFieldRepair", true)
-                enabled: root.actionAllowed("attemptFieldRepair",
-                                            root.ability("fieldRepair").available === true)
+            AbilityActionButton {
+                Layout.preferredWidth: 48
+                Layout.preferredHeight: 42
+                iconName: "repair"
+                actionLabel: "战场修理"
+                abilityData: root.ability("fieldRepair")
+                actionVisible: root.actionVisible("attemptFieldRepair", true)
+                actionAllowed: root.actionAllowed("attemptFieldRepair",
+                                                  root.ability("fieldRepair").available === true)
                 onClicked: root.controller.command("attemptFieldRepair", { unitId: root.snap.id })
-                ToolTip.visible: hovered
-                ToolTip.text: enabled ? "战场修理" : "战场修理冷却中"
-                Accessible.name: ToolTip.text
             }
-            GhostButton {
-                text: ""; iconName: "service"; implicitWidth: 34; implicitHeight: 30
-                visible: !root.snap.serviceRequested
-                         && root.actionVisible("service", root.snap.serviceEligible === true)
-                enabled: root.actionAllowed("service", root.snap.serviceEligible === true)
+            AbilityActionButton {
+                Layout.preferredWidth: 48
+                Layout.preferredHeight: 42
+                iconName: "service"
+                actionLabel: "开始补充"
+                abilityData: ({})
+                actionVisible: !root.snap.serviceRequested
+                               && root.actionVisible("service", root.snap.serviceEligible === true)
+                actionAllowed: root.actionAllowed("service", root.snap.serviceEligible === true)
                 onClicked: root.controller.command("service", { unitId: root.snap.id })
-                ToolTip.visible: hovered; ToolTip.text: "开始补充"
-                Accessible.name: ToolTip.text
             }
             Item { Layout.fillWidth: true }
         }
@@ -177,7 +195,7 @@ Rectangle {
             Layout.preferredHeight: root.snap.serviceRequested ? 30 : 0
             visible: Boolean(root.snap.serviceRequested)
             spacing: 8
-            Icon { name: "service"; iconColor: t.warning; iconSize: 15 }
+            Icon { name: "service"; iconColor: t.warning; iconSize: 19 }
             ProgressBar {
                 id: serviceProgress
                 Layout.fillWidth: true
@@ -334,7 +352,7 @@ Rectangle {
                         implicitWidth: 26; implicitHeight: 26
                         onClicked: {
                             var v = Math.round(root.snap.speed || 0) - 5
-                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, Math.min(240, v)) })
+                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, Math.min(root.speedLimit(), v)) })
                         }
                     }
                     TextInput {
@@ -346,7 +364,7 @@ Rectangle {
                         text: Math.round(root.snap.speed || 0)
                         onEditingFinished: {
                             var v = parseInt(text) || 1
-                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, Math.min(240, v)) })
+                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.max(1, Math.min(root.speedLimit(), v)) })
                         }
                     }
                     Text {
@@ -363,7 +381,7 @@ Rectangle {
                         implicitWidth: 26; implicitHeight: 26
                         onClicked: {
                             var v = Math.round(root.snap.speed || 0) + 5
-                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.min(240, v) })
+                            root.controller.command("setSpeed", { unitId: root.snap.id, speed: Math.min(root.speedLimit(), v) })
                         }
                     }
                 }

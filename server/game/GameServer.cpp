@@ -304,6 +304,11 @@ QString validateNetworkScenario(const Scenario& scenario) {
             || unit.subsystemRepairRate < 0.0) {
             return QStringLiteral("单元参数无效: %1").arg(unit.id);
         }
+        const double maximumSpeed = UnitBase::commandedSpeedLimitMps(kindFromName(unit.kind));
+        if (unit.speed > maximumSpeed) {
+            return QStringLiteral("单元速度超过 %1 的类型上限: %2")
+                .arg(maximumSpeed, 0, 'f', 0).arg(unit.id);
+        }
         if (unit.kind == QLatin1String("attackuav")) {
             const bool validWeapon = unit.ammoCapacity >= 0 && unit.ammoCapacity <= 100000
                 && unit.initialAmmo >= 0 && unit.initialAmmo <= unit.ammoCapacity
@@ -3112,7 +3117,7 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
             || unit->pos().distanceTo2D(commandPost->pos())
                 > SimulationEngine::kServiceRadiusMeters) {
             return reject(QStringLiteral("INVALID_ARGUMENT"),
-                          QStringLiteral("单元必须在活指挥所 500 米内才能开始补充"));
+                          QStringLiteral("单元必须在活指挥所 750 米内才能开始补充"));
         }
     }
     if (action == QLatin1String("cancelService") && !unit->serviceRequested()) {
@@ -3194,11 +3199,12 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
     if (action == QLatin1String("setSpeed")) {
         bool ok = false;
         const double speed = args.value(QStringLiteral("speed")).toDouble(&ok);
+        const double maximum = unit->maxCommandedSpeed();
         if (!ok || !std::isfinite(speed) || speed <= 0.0
-            || speed > SimulationEngine::kMaximumCommandedUnitSpeedMps) {
+            || maximum <= 0.0 || speed > maximum) {
             return reject(QStringLiteral("INVALID_ARGUMENT"),
                           QStringLiteral("速度必须大于 0 且不超过 %1")
-                              .arg(SimulationEngine::kMaximumCommandedUnitSpeedMps,
+                              .arg(maximum,
                                    0, 'f', 0));
         }
     }
@@ -4511,6 +4517,7 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
         state.speed = unit->speed();
         state.commandedSpeed = unit->baseSpeed();
         state.cruiseSpeed = cruiseSpeeds.value(seat.unitId, state.commandedSpeed);
+        state.maxCommandedSpeed = unit->maxCommandedSpeed();
         state.hpRatio = unit->maxHp() > 0.0
             ? std::clamp(unit->hp() / unit->maxHp(), 0.0, 1.0) : 0.0;
         state.sensorHealth = std::clamp(unit->sensorHealth(), 0.0, 1.0);
@@ -4603,14 +4610,10 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
             if (!target || !target->alive() || target->sideStr() == QLatin1String("blue")) continue;
             targets.append(targetId);
         }
-        std::sort(targets.begin(), targets.end());
         std::sort(targets.begin(), targets.end(), [&unit, this](const QString& left,
                                                                  const QString& right) {
             const UnitBase* leftUnit = m_engine.unit(left);
             const UnitBase* rightUnit = m_engine.unit(right);
-            const bool leftCommandPost = isRedCommandPost(leftUnit);
-            const bool rightCommandPost = isRedCommandPost(rightUnit);
-            if (leftCommandPost != rightCommandPost) return leftCommandPost;
             const double leftDistance = leftUnit ? unit->pos().distanceTo2D(leftUnit->pos())
                                                   : std::numeric_limits<double>::max();
             const double rightDistance = rightUnit ? unit->pos().distanceTo2D(rightUnit->pos())
@@ -4760,8 +4763,12 @@ AiKnowledgeState GameServer::buildAiKnowledge(const QList<AiSeatState>& states, 
             knowledge.contacts.append(contact);
         }
     }
-    if (commandPost) {
+    if (commandPost && commandPost->alive()) {
         for (const AiObservedTarget& contact : knowledge.contacts) {
+            if (contact.targetId == commandPost->id() || contact.commandPost
+                || contact.targetKind == QLatin1String("commandpost")) {
+                continue;
+            }
             if (planarDistance2(commandPost->pos().x, commandPost->pos().y,
                                 contact.x, contact.y) < 4000.0 * 4000.0) {
                 knowledge.commandPostThreat = true;

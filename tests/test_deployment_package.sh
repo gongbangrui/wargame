@@ -68,6 +68,23 @@ if [[ -f "$archive" ]]; then
     fi
 fi
 
+deterministic_first="$work_dir/deterministic-first"
+deterministic_second="$work_dir/deterministic-second"
+mkdir -p "$deterministic_first" "$deterministic_second"
+WARGAME_VERSION=deterministic DIST_DIR="$deterministic_first" \
+    "$clean_fixture/deploy/package-one-click.sh" >/dev/null
+touch -d '2001-02-03 04:05:06 UTC' "$clean_fixture/src/core/SimulationEngine.cpp"
+WARGAME_VERSION=deterministic DIST_DIR="$deterministic_second" \
+    "$clean_fixture/deploy/package-one-click.sh" >/dev/null
+cmp -s \
+    "$deterministic_first/wargame-server-deterministic.tar.gz" \
+    "$deterministic_second/wargame-server-deterministic.tar.gz" \
+    || fail "package archive is not deterministic"
+cmp -s \
+    "$deterministic_first/wargame-server-deterministic.tar.gz.sha256" \
+    "$deterministic_second/wargame-server-deterministic.tar.gz.sha256" \
+    || fail "package checksum is not deterministic"
+
 rejected_fixture="$work_dir/rejected"
 make_fixture "$rejected_fixture"
 touch "$rejected_fixture/server/account/runtime.db"

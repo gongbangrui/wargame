@@ -9,7 +9,13 @@ Dialog {
     property var controller: null
     property var snap: ({})
     property bool interactionEnabled: true
-    readonly property bool narrow: parent ? parent.width < 720 : false
+    readonly property bool narrow: dlg.width < 620
+    readonly property color sideAccent: dlg.snap.side === "red" ? AppContext.red
+        : dlg.snap.side === "blue" ? AppContext.blue : AppContext.signal
+    readonly property color healthAccent: dlg.healthRatio > 0.55 ? AppContext.success
+        : dlg.healthRatio > 0.25 ? AppContext.warning : AppContext.danger
+    readonly property real healthRatio: Math.max(0, Math.min(1,
+        Number(dlg.snap.hp || 0) / Math.max(1, Number(dlg.snap.maxHp || 1))))
 
     function actionEntry(action) {
         var actions = dlg.snap.actions || dlg.snap.actionCapabilities || ({})
@@ -57,6 +63,31 @@ Dialog {
         return labels[kind] || kind || "未知单元"
     }
 
+    function kindIcon(kind) {
+        var icons = {
+            commandpost: "command",
+            attackuav: "missile",
+            reconuav: "scan",
+            jammeruav: "countermeasure",
+            groundscout: "unit"
+        }
+        return icons[kind] || "unit"
+    }
+
+    function statusLabel() {
+        if (!dlg.snap.alive) return "已摧毁"
+        if (dlg.snap.serviceRequested) return "指挥所补给中"
+        if (dlg.snap.disabled) return "系统失效"
+        return dlg.snap.status || "在线"
+    }
+
+    function cooldownRatio(data) {
+        var total = Number(data.cooldownSec || 0)
+        if (total <= 0) return 1
+        return Math.max(0, Math.min(1,
+            1 - Number(data.cooldownRemaining || 0) / total))
+    }
+
     function abilityRows() {
         var rows = []
         var countermeasure = dlg.ability("countermeasure")
@@ -86,50 +117,141 @@ Dialog {
     modal: true
     closePolicy: Popup.CloseOnEscape
     standardButtons: Dialog.NoButton
-    width: Math.max(300, Math.min(680, (parent ? parent.width : 704) - 24))
-    height: Math.max(420, Math.min(620, (parent ? parent.height : 644) - 24))
+    width: Math.max(320, Math.min(760, (parent ? parent.width : 784) - 24))
+    height: Math.max(460, Math.min(680, (parent ? parent.height : 704) - 24))
     anchors.centerIn: parent
     padding: 0
+
+    enter: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppContext.stateMotion; easing.type: Easing.OutCubic }
+            NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: AppContext.stateMotion; easing.type: Easing.OutBack }
+        }
+    }
+    exit: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 1; to: 0; duration: AppContext.fastMotion; easing.type: Easing.InCubic }
+            NumberAnimation { property: "scale"; from: 1; to: 0.98; duration: AppContext.fastMotion; easing.type: Easing.InCubic }
+        }
+    }
+    Overlay.modal: Rectangle { color: "#05080dcc" }
 
     background: Rectangle {
         color: AppContext.panel
         border.color: AppContext.line
         radius: dlg.narrow ? 0 : AppContext.radius
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 1
+            color: "transparent"
+            border.color: Qt.rgba(dlg.sideAccent.r, dlg.sideAccent.g, dlg.sideAccent.b, 0.28)
+            radius: Math.max(0, (dlg.narrow ? 0 : AppContext.radius) - 1)
+        }
     }
 
     header: Rectangle {
-        implicitHeight: 54
+        implicitHeight: 78
         color: AppContext.raised
         border.color: AppContext.line
 
+        Rectangle {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 4
+            color: dlg.sideAccent
+            opacity: dlg.snap.alive ? 1 : 0.45
+        }
+
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 16
-            anchors.rightMargin: 10
-            spacing: 10
+            anchors.leftMargin: 18
+            anchors.rightMargin: 12
+            spacing: 12
+
+            Rectangle {
+                Layout.preferredWidth: 46
+                Layout.preferredHeight: 46
+                radius: 8
+                color: Qt.rgba(dlg.sideAccent.r, dlg.sideAccent.g, dlg.sideAccent.b, 0.13)
+                border.color: Qt.rgba(dlg.sideAccent.r, dlg.sideAccent.g, dlg.sideAccent.b, 0.65)
+                Icon {
+                    anchors.centerIn: parent
+                    name: dlg.kindIcon(dlg.snap.kind)
+                    iconColor: dlg.sideAccent
+                    iconSize: 25
+                }
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    width: 10
+                    height: 10
+                    radius: 5
+                    color: dlg.snap.alive ? AppContext.success : AppContext.danger
+                    border.color: AppContext.raised
+                    border.width: 2
+                }
+            }
 
             ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 1
+                spacing: 3
                 Text {
                     Layout.fillWidth: true
                     text: dlg.snap.callsign || dlg.snap.id || "单位详情"
                     color: AppContext.textStrong
-                    font.pixelSize: 15
+                    font.pixelSize: 17
                     font.bold: true
                     elide: Text.ElideRight
                 }
-                Text {
-                    text: dlg.kindLabel(dlg.snap.kind)
-                    color: AppContext.muted
-                    font.pixelSize: 10
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Text {
+                        text: dlg.kindLabel(dlg.snap.kind) + "  ·  "
+                              + (dlg.snap.side === "red" ? "红方" : dlg.snap.side === "blue" ? "蓝方" : "中立")
+                        color: AppContext.textDim
+                        font.pixelSize: 10
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                    }
+                    Rectangle {
+                        Layout.preferredWidth: headerStatusText.implicitWidth + 18
+                        Layout.preferredHeight: 22
+                        radius: 11
+                        color: Qt.rgba(dlg.healthAccent.r, dlg.healthAccent.g, dlg.healthAccent.b, 0.14)
+                        border.color: Qt.rgba(dlg.healthAccent.r, dlg.healthAccent.g, dlg.healthAccent.b, 0.62)
+                        Text {
+                            id: headerStatusText
+                            anchors.centerIn: parent
+                            text: dlg.statusLabel()
+                            color: dlg.healthAccent
+                            font.pixelSize: 10
+                            font.bold: true
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 3
+                    radius: 2
+                    color: AppContext.page
+                    Rectangle {
+                        width: parent.width * dlg.healthRatio
+                        height: parent.height
+                        radius: 2
+                        color: dlg.healthAccent
+                        Behavior on width { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                    }
                 }
             }
             GhostButton {
                 text: ""
                 iconName: "close"
-                implicitWidth: 34
-                implicitHeight: 32
+                iconSize: 19
+                implicitWidth: 40
+                implicitHeight: 38
                 onClicked: dlg.close()
                 ToolTip.visible: hovered
                 ToolTip.text: "关闭"
@@ -141,35 +263,185 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 0
 
-        TabBar {
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: dlg.narrow ? 92 : 68
+            color: AppContext.page
+            border.color: AppContext.line
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 14
+                anchors.rightMargin: 14
+                anchors.topMargin: dlg.narrow ? 12 : 14
+                anchors.bottomMargin: dlg.narrow ? 12 : 14
+                spacing: dlg.narrow ? 7 : 0
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: !dlg.narrow
+                    Layout.preferredHeight: dlg.narrow ? 34 : -1
+                    spacing: 14
+
+                    ColumnLayout {
+                        Layout.preferredWidth: 96
+                        spacing: 2
+                        Text { text: "生命状态"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text {
+                            text: Math.round(Number(dlg.snap.hp || 0)) + " / " + Math.round(Number(dlg.snap.maxHp || 0))
+                            color: dlg.healthAccent
+                            font.pixelSize: 16
+                            font.bold: true
+                            font.family: "Consolas"
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 12
+                        radius: 6
+                        color: AppContext.raised
+                        border.color: AppContext.line
+                        Rectangle {
+                            width: parent.width * dlg.healthRatio
+                            height: parent.height
+                            radius: 6
+                            color: dlg.healthAccent
+                            opacity: 0.9
+                            Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                        }
+                    }
+                    ColumnLayout {
+                        visible: !dlg.narrow
+                        Layout.preferredWidth: 82
+                        spacing: 2
+                        Text { text: "当前速度"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text {
+                            text: dlg.snap.speed !== undefined ? Math.round(Number(dlg.snap.speed)) + " m/s" : "-"
+                            color: AppContext.textStrong
+                            font.pixelSize: 13
+                            font.bold: true
+                            font.family: "Consolas"
+                        }
+                    }
+                    ColumnLayout {
+                        visible: !dlg.narrow
+                        Layout.preferredWidth: 76
+                        spacing: 2
+                        Text { text: "数据 revision"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text {
+                            text: dlg.controller && dlg.controller.networked ? String(dlg.controller.unitStateRevision) : "LOCAL"
+                            color: AppContext.signal
+                            font.pixelSize: 11
+                            font.bold: true
+                            font.family: "Consolas"
+                        }
+                    }
+                }
+
+                RowLayout {
+                    visible: dlg.narrow
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 27
+                    spacing: 14
+
+                    Item { Layout.fillWidth: true }
+                    ColumnLayout {
+                        Layout.preferredWidth: 82
+                        spacing: 1
+                        Text { text: "当前速度"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text {
+                            text: dlg.snap.speed !== undefined ? Math.round(Number(dlg.snap.speed)) + " m/s" : "-"
+                            color: AppContext.textStrong
+                            font.pixelSize: 12
+                            font.bold: true
+                            font.family: "Consolas"
+                        }
+                    }
+                    ColumnLayout {
+                        Layout.preferredWidth: 76
+                        spacing: 1
+                        Text { text: "数据 revision"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text {
+                            text: dlg.controller && dlg.controller.networked ? String(dlg.controller.unitStateRevision) : "LOCAL"
+                            color: AppContext.signal
+                            font.pixelSize: 10
+                            font.bold: true
+                            font.family: "Consolas"
+                        }
+                    }
+                }
+            }
+        }
+
+        Item {
             id: detailTabs
             Layout.fillWidth: true
-            Layout.preferredHeight: 38
-            background: Rectangle { color: AppContext.page }
+            Layout.preferredHeight: 42
+            property int currentIndex: 0
+            clip: true
 
-            Repeater {
-                model: ["态势", "系统", "技能", "交战", "链路"]
-                delegate: TabButton {
-                    id: detailTab
-                    required property string modelData
-                    width: detailTabs.width / 5
-                    text: detailTab.modelData
-                    contentItem: Text {
-                        text: detailTab.text
-                        color: detailTab.checked ? AppContext.signal : AppContext.muted
-                        font.pixelSize: 11
-                        font.bold: detailTab.checked
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Rectangle {
-                        color: detailTab.checked ? AppContext.raised : "transparent"
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            height: 2
-                            color: detailTab.checked ? AppContext.signal : "transparent"
+            Rectangle { anchors.fill: parent; color: AppContext.page }
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: 2
+                spacing: 2
+
+                Repeater {
+                    model: [
+                        { label: "态势", icon: "locate" },
+                        { label: "系统", icon: "settings" },
+                        { label: "技能", icon: "countermeasure" },
+                        { label: "交战", icon: "missile" },
+                        { label: "链路", icon: "network" }
+                    ]
+                    delegate: Button {
+                        id: detailTab
+                        required property var modelData
+                        required property int index
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.minimumWidth: 0
+                        padding: 0
+                        leftPadding: 0
+                        rightPadding: 0
+                        topPadding: 0
+                        bottomPadding: 0
+                        property bool active: detailTabs.currentIndex === detailTab.index
+                        Accessible.name: detailTab.modelData.label + "视图"
+                        onClicked: detailTabs.currentIndex = detailTab.index
+
+                        contentItem: Item {
+                            anchors.fill: parent
+                            Row {
+                                id: detailTabContent
+                                anchors.centerIn: parent
+                                spacing: 4
+                                Icon {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    name: detailTab.modelData.icon
+                                    iconSize: 14
+                                    iconColor: detailTab.active ? AppContext.signal : AppContext.muted
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: detailTab.modelData.label
+                                    color: detailTab.active ? AppContext.signal : AppContext.muted
+                                    font.pixelSize: 10
+                                    font.bold: detailTab.active
+                                }
+                            }
+                        }
+                        background: Rectangle {
+                            color: detailTab.active ? AppContext.raised
+                                                      : (detailTab.hovered ? AppContext.panel : "transparent")
+                            radius: 3
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: 2
+                                color: detailTab.active ? AppContext.signal : "transparent"
+                            }
                         }
                     }
                 }
@@ -188,9 +460,9 @@ Dialog {
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                 ColumnLayout {
-                    width: overviewPage.availableWidth
+                    x: 16
+                    width: Math.max(0, overviewPage.availableWidth - 32)
                     spacing: 12
-                    anchors.margins: 16
 
                     Text {
                         Layout.fillWidth: true
@@ -299,27 +571,73 @@ Dialog {
                             Layout.leftMargin: 14
                             Layout.rightMargin: 14
                             Layout.topMargin: abilityDelegate.index === 0 ? 14 : 0
-                            Layout.preferredHeight: 82
+                            Layout.preferredHeight: 106
+                            property real readyRatio: dlg.cooldownRatio(abilityDelegate.modelData.data)
+                            property color abilityColor: abilityDelegate.modelData.data.available === true
+                                ? AppContext.success : AppContext.warning
                             color: AppContext.page
-                            border.color: AppContext.line
-                            radius: 5
+                            border.color: abilityDelegate.modelData.data.available === true
+                                ? Qt.rgba(AppContext.success.r, AppContext.success.g, AppContext.success.b, 0.52)
+                                : AppContext.line
+                            radius: 6
+                            Behavior on border.color { ColorAnimation { duration: 180 } }
                             required property int index
 
                             RowLayout {
                                 anchors.fill: parent
-                                anchors.margins: 12
+                                anchors.margins: 11
                                 spacing: 12
-                                Icon { name: abilityDelegate.modelData.icon; iconColor: AppContext.signal; iconSize: 19 }
+                                Rectangle {
+                                    Layout.preferredWidth: 48
+                                    Layout.preferredHeight: 48
+                                    radius: 9
+                                    color: Qt.rgba(abilityDelegate.abilityColor.r,
+                                                   abilityDelegate.abilityColor.g,
+                                                   abilityDelegate.abilityColor.b, 0.12)
+                                    border.color: Qt.rgba(abilityDelegate.abilityColor.r,
+                                                         abilityDelegate.abilityColor.g,
+                                                         abilityDelegate.abilityColor.b, 0.5)
+                                    Icon {
+                                        anchors.centerIn: parent
+                                        name: abilityDelegate.modelData.icon
+                                        iconColor: abilityDelegate.abilityColor
+                                        iconSize: 25
+                                    }
+                                    Rectangle {
+                                        visible: abilityDelegate.modelData.data.available === true
+                                        anchors.right: parent.right
+                                        anchors.bottom: parent.bottom
+                                        width: 10
+                                        height: 10
+                                        radius: 5
+                                        color: AppContext.success
+                                        border.color: AppContext.page
+                                        border.width: 2
+                                    }
+                                }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    spacing: 3
-                                    Text { text: abilityDelegate.modelData.name; color: AppContext.textStrong; font.pixelSize: 12; font.bold: true }
+                                    spacing: 4
+                                    Text { text: abilityDelegate.modelData.name; color: AppContext.textStrong; font.pixelSize: 13; font.bold: true }
                                     Text {
                                         Layout.fillWidth: true
                                         text: (abilityDelegate.modelData.data.range !== undefined ? "范围 " + Math.round(abilityDelegate.modelData.data.range) + " m  ·  " : "")
                                               + "冷却 " + Number(abilityDelegate.modelData.data.cooldownRemaining || 0).toFixed(0)
                                               + " / " + Number(abilityDelegate.modelData.data.cooldownSec || 0).toFixed(0) + " s"
-                                        color: AppContext.muted; font.pixelSize: 10; elide: Text.ElideRight
+                                        color: AppContext.textDim; font.pixelSize: 10; elide: Text.ElideRight
+                                    }
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 5
+                                        radius: 3
+                                        color: AppContext.raised
+                                        Rectangle {
+                                            width: parent.width * abilityDelegate.readyRatio
+                                            height: parent.height
+                                            radius: 3
+                                            color: abilityDelegate.abilityColor
+                                            Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+                                        }
                                     }
                                     Text {
                                         visible: abilityDelegate.modelData.data.remaining !== undefined
@@ -327,18 +645,17 @@ Dialog {
                                         color: AppContext.text; font.pixelSize: 10
                                     }
                                 }
-                                GhostButton {
-                                    text: ""
+                                AbilityActionButton {
+                                    Layout.preferredWidth: 52
+                                    Layout.preferredHeight: 46
                                     iconName: abilityDelegate.modelData.icon
-                                    implicitWidth: 36
-                                    implicitHeight: 34
-                                    visible: dlg.actionVisible(abilityDelegate.modelData.action, true)
-                                    enabled: dlg.actionAllowed(abilityDelegate.modelData.action,
-                                                               abilityDelegate.modelData.data.available === true)
-                                    onClicked: dlg.controller.command(abilityDelegate.modelData.action, { unitId: dlg.snap.id })
-                                    ToolTip.visible: hovered
-                                    ToolTip.text: abilityDelegate.modelData.name
-                                    Accessible.name: ToolTip.text
+                                    actionLabel: abilityDelegate.modelData.name
+                                    abilityData: abilityDelegate.modelData.data
+                                    actionVisible: dlg.actionVisible(abilityDelegate.modelData.action, true)
+                                    actionAllowed: dlg.actionAllowed(abilityDelegate.modelData.action,
+                                                                      abilityDelegate.modelData.data.available === true)
+                                    onClicked: dlg.controller.command(abilityDelegate.modelData.action,
+                                                                      { unitId: dlg.snap.id })
                                 }
                             }
                         }

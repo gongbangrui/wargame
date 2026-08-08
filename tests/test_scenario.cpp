@@ -67,6 +67,35 @@ TEST(ScenarioTest, DefaultMapSize) {
     EXPECT_DOUBLE_EQ(s.map.heightMeters, 15000);
 }
 
+TEST(ScenarioTest, MissingSpeedUsesTheUnitKindDefault) {
+    const QJsonArray units{
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("red_cp")},
+                    {QStringLiteral("kind"), QStringLiteral("commandpost")},
+                    {QStringLiteral("side"), QStringLiteral("red")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("red_r1")},
+                    {QStringLiteral("kind"), QStringLiteral("reconuav")},
+                    {QStringLiteral("side"), QStringLiteral("red")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("red_a1")},
+                    {QStringLiteral("kind"), QStringLiteral("attackuav")},
+                    {QStringLiteral("side"), QStringLiteral("red")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("red_g1")},
+                    {QStringLiteral("kind"), QStringLiteral("groundscout")},
+                    {QStringLiteral("side"), QStringLiteral("red")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("red_j1")},
+                    {QStringLiteral("kind"), QStringLiteral("jammeruav")},
+                    {QStringLiteral("side"), QStringLiteral("red")}}};
+    QString error;
+    const Scenario parsed = ScenarioIo::fromJson(
+        QJsonObject{{QStringLiteral("units"), units}}, &error);
+    ASSERT_TRUE(error.isEmpty()) << error.toStdString();
+    ASSERT_EQ(parsed.units.size(), 5U);
+    EXPECT_DOUBLE_EQ(parsed.units.at(0).speed, 0.0);
+    EXPECT_DOUBLE_EQ(parsed.units.at(1).speed, 150.0);
+    EXPECT_DOUBLE_EQ(parsed.units.at(2).speed, 200.0);
+    EXPECT_DOUBLE_EQ(parsed.units.at(3).speed, 18.0);
+    EXPECT_DOUBLE_EQ(parsed.units.at(4).speed, 120.0);
+}
+
 TEST(ScenarioTest, FromJsonRejectsMissingOrEmptyRequiredUnitIdentifiersBeforeEngineRegistration) {
     const QJsonObject validUnit{{QStringLiteral("id"), QStringLiteral("red_a1")},
                                 {QStringLiteral("kind"), QStringLiteral("attackuav")},

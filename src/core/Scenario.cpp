@@ -1,5 +1,7 @@
 ﻿#include "Scenario.h"
 
+#include "UnitBase.h"
+
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -179,7 +181,9 @@ Scenario ScenarioIo::fromJson(const QJsonObject& o, QString* err) {
             || !readOptionalFiniteDouble(u, "detectRange", 5000.0, &su.detectRange, &parseError, context)
             || !readOptionalFiniteDouble(u, "attackRange", 1500.0, &su.attackRange, &parseError, context)
             || !readOptionalFiniteDouble(u, "commRange", 20000.0, &su.commRange, &parseError, context)
-            || !readOptionalFiniteDouble(u, "speed", 50.0, &su.speed, &parseError, context)
+            || !readOptionalFiniteDouble(u, "speed",
+                                         UnitBase::defaultSpeedMps(kindFromName(su.kind)),
+                                         &su.speed, &parseError, context)
             || !readOptionalFiniteDouble(u, "maxHp", 100.0, &su.maxHp, &parseError, context)
             || !readOptionalFiniteDouble(u, "armor", 0.0, &su.armor, &parseError, context)
             || !readOptionalFiniteDouble(u, "repairRate", 2.0, &su.repairRate, &parseError, context)
@@ -309,21 +313,21 @@ Scenario ScenarioIo::defaultScenario() {
     };
 
     add("red_cp", "红方指挥所", "commandpost", "red", 2000, 7500, 50,  5000, 0,    20000, 0,   200);
-    add("red_r1", "红方侦察1",  "reconuav",     "red", 4000, 4000,  3000, 8000, 0,    20000, 80,  100,
+    add("red_r1", "红方侦察1",  "reconuav",     "red", 4000, 4000,  3000, 8000, 0,    20000, 150, 100,
         {{0, 4000, 4000}, {40, 7000, 5000}, {80, 10000, 6000}});
-    add("red_a1", "红方攻击1",  "attackuav",    "red", 3000, 11000, 2000, 4000,  2500, 15000, 100, 120,
+    add("red_a1", "红方攻击1",  "attackuav",    "red", 3000, 11000, 2000, 4000,  2500, 15000, 200, 120,
         {{0, 3000, 11000}, {30, 6000, 10500}, {60, 9000, 9500}, {90, 12000, 9000}});
-    add("red_g1", "红方地面1",  "groundscout",  "red", 2000, 2000,  0,    3000, 0,    10000, 6,   80);
+    add("red_g1", "红方地面1",  "groundscout",  "red", 2000, 2000,  0,    3000, 0,    10000, 18,  80);
 
     add("blue_cp", "蓝方指挥所", "commandpost", "blue", 18000, 7500, 50,  5000, 0,    20000, 0,   200);
-    add("blue_r1", "蓝方侦察1",  "reconuav",     "blue", 16000, 11000, 3000, 8000, 0,    20000, 80,  100,
+    add("blue_r1", "蓝方侦察1",  "reconuav",     "blue", 16000, 11000, 3000, 8000, 0,    20000, 150, 100,
         {{0, 16000, 11000}, {40, 13000, 10500}, {80, 10000, 9500}});
-    add("blue_a1", "蓝方攻击1",  "attackuav",    "blue", 17000, 4000,  2000, 4000,  2500, 15000, 100, 120,
+    add("blue_a1", "蓝方攻击1",  "attackuav",    "blue", 17000, 4000,  2000, 4000,  2500, 15000, 200, 120,
         {{0, 17000, 4000}, {30, 14000, 4500}, {60, 11000, 5500}, {90, 8000, 6000}});
-    add("blue_g1", "蓝方地面1",  "groundscout",  "blue", 18000, 13000, 0,    3000, 0,    10000, 6,   80);
+    add("blue_g1", "蓝方地面1",  "groundscout",  "blue", 18000, 13000, 0,    3000, 0,    10000, 18,  80);
 
-    add("red_j1", "红方干扰1",  "jammeruav",    "red", 4000, 7500,   4000, 6000, 0,    20000, 60,  80);
-    add("blue_j1", "蓝方干扰1",  "jammeruav",    "blue", 16000, 7000, 4000, 6000, 0,    20000, 60,  80);
+    add("red_j1", "红方干扰1",  "jammeruav",    "red", 4000, 7500,   4000, 6000, 0,    20000, 120, 80);
+    add("blue_j1", "蓝方干扰1",  "jammeruav",    "blue", 16000, 7000, 4000, 6000, 0,    20000, 120, 80);
 
     s.notes = "默认推演场景。地图 20km x 15km，红西蓝东。";
     return s;

@@ -9,6 +9,10 @@ const accountUrl = (process.env.ACCOUNT_URL || "http://127.0.0.1:8080").replace(
 const adminUsername = process.env.ADMIN_USERNAME || "admin";
 const adminPassword = process.env.ADMIN_PASSWORD;
 if (!adminPassword) throw new Error("请设置 ADMIN_PASSWORD 后运行联网冒烟验证");
+const configuredRoomOperationWaitMs = Number.parseInt(
+  process.env.ROOM_OPERATION_WAIT_MS || "30000", 10);
+const roomOperationWaitMs = Number.isFinite(configuredRoomOperationWaitMs)
+  ? Math.min(120000, Math.max(10000, configuredRoomOperationWaitMs)) : 30000;
 
 async function request(path, options = {}, token = "") {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
@@ -31,7 +35,7 @@ function delay(ms) {
 }
 
 async function waitForRoomOperation(token, operationId, expectedStatus) {
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + roomOperationWaitMs;
   while (Date.now() < deadline) {
     const response = await request("/api/admin/rooms", {}, token);
     const room = response.rooms.find(item => item.roomId === "main");
@@ -87,8 +91,8 @@ class GameSession {
 
   sendWithId(messageId, type, payload) {
     this.socket.send(JSON.stringify({
-      protocolVersion: 3,
-      schemaVersion: 3,
+      protocolVersion: 4,
+      schemaVersion: 4,
       type,
       messageId,
       payload,

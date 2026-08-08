@@ -33,18 +33,26 @@ Dialog {
     readonly property bool isJammer:    currentKind === "jammeruav"
     readonly property var _kindDefaults: ({
         "commandpost": { detectRange: 5000, attackRange: 0,    commRange: 20000, speed: 0,    maxHp: 200, attackPower: 0,   alt: 50, armor: 0.2, repairRate: 3, subsystemRepairRate: 0.03 },
-        "reconuav":    { detectRange: 8000, attackRange: 0,    commRange: 20000, speed: 80,   maxHp: 100, attackPower: 0,   alt: 3000, armor: 0.05, repairRate: 2, subsystemRepairRate: 0.02 },
-        "attackuav":   { detectRange: 4000, attackRange: 2500, commRange: 15000, speed: 100,  maxHp: 120, attackPower: 100, alt: 2000,
+        "reconuav":    { detectRange: 8000, attackRange: 0,    commRange: 20000, speed: 150,  maxHp: 100, attackPower: 0,   alt: 3000, armor: 0.05, repairRate: 2, subsystemRepairRate: 0.02 },
+        "attackuav":   { detectRange: 4000, attackRange: 2500, commRange: 15000, speed: 200,  maxHp: 120, attackPower: 100, alt: 2000,
                           ammoCapacity: 4, initialAmmo: 4, hitProbability: 0.72, optimalRange: 1500,
                           minAttackRange: 300, cooldownSec: 5, damageMin: 80, damageMax: 110, rangeFalloff: 0.25,
                           armor: 0.1, repairRate: 2, subsystemRepairRate: 0.02,
                           fuelCapacitySec: 1800, initialFuelSec: 1800, rearmDurationSec: 8 },
-        "groundscout": { detectRange: 3000, attackRange: 0,    commRange: 10000, speed: 6,    maxHp: 80,  attackPower: 0,   alt: 0, armor: 0.15, repairRate: 2, subsystemRepairRate: 0.02 },
-        "jammeruav":   { detectRange: 6000, attackRange: 0,    commRange: 20000, speed: 60,   maxHp: 80,  attackPower: 0,   alt: 4000, armor: 0.05, repairRate: 2, subsystemRepairRate: 0.02 }
+        "groundscout": { detectRange: 3000, attackRange: 0,    commRange: 10000, speed: 18,   maxHp: 80,  attackPower: 0,   alt: 0, armor: 0.15, repairRate: 2, subsystemRepairRate: 0.02 },
+        "jammeruav":   { detectRange: 6000, attackRange: 0,    commRange: 20000, speed: 120,  maxHp: 80,  attackPower: 0,   alt: 4000, armor: 0.05, repairRate: 2, subsystemRepairRate: 0.02 }
     })
 
     function valueOrDefault(value, fallback) {
         return value === undefined || value === null ? fallback : value
+    }
+
+    function speedLimit(kind) {
+        if (kind === "attackuav") return 360
+        if (kind === "reconuav") return 300
+        if (kind === "jammeruav") return 260
+        if (kind === "groundscout") return 36
+        return 0
     }
 
     function _applyKindDefaults(kind) {
@@ -290,7 +298,7 @@ Dialog {
                 Text { text: "海拔 (m)"; color: "#aebed1"; font.pixelSize: 11 }
                 SpinBox { id: altSpin; Layout.fillWidth: true; implicitHeight: 34; from: 0; to: 20000; stepSize: 50; editable: true }
                 Text { text: "速度 (m/s)"; color: dlg.isCp ? "#6f7f94" : "#aebed1"; font.pixelSize: 11 }
-                SpinBox { id: speedSpin; Layout.fillWidth: true; implicitHeight: 34; from: 0; to: 240; editable: true; enabled: !dlg.isCp }
+                SpinBox { id: speedSpin; Layout.fillWidth: true; implicitHeight: 34; from: 0; to: dlg.speedLimit(dlg.currentKind); editable: true; enabled: !dlg.isCp }
                 Text { text: "探测半径 (m)"; color: "#aebed1"; font.pixelSize: 11 }
                 SpinBox { id: detectSpin; Layout.fillWidth: true; implicitHeight: 34; from: 0; to: 100000; stepSize: 100; editable: true }
                 Text { text: "通信半径 (m)"; color: "#aebed1"; font.pixelSize: 11 }

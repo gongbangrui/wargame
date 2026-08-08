@@ -278,7 +278,7 @@ TEST(RulesAiTest, VisibleRedCommandPostTakesAttackPriority) {
     EXPECT_GT(plan.objectives.first().priority, plan.objectives.last().priority);
 }
 
-TEST(RulesAiTest, LatestVisibleCommandPostPreemptsStaleProviderObjective) {
+TEST(RulesAiTest, ProviderDefendObjectiveIsNotOverriddenByVisibleCommandPost) {
     AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
                                 QStringLiteral("attackuav"), 100.0, 100.0);
     attacker.targetVisible = true;
@@ -290,12 +290,12 @@ TEST(RulesAiTest, LatestVisibleCommandPostPreemptsStaleProviderObjective) {
                                                   attacker.seatId, {}, {}, 10.0});
     const QList<AiCommand> commands = RulesAi::commandsForPlan(providerPlan, {attacker}, 0.0);
     ASSERT_EQ(commands.size(), 1);
-    EXPECT_EQ(commands.first().action, QStringLiteral("engageTarget"));
-    EXPECT_EQ(commands.first().args.value(QStringLiteral("targetId")).toString(),
-              QStringLiteral("red_cp"));
+    EXPECT_EQ(commands.first().action, QStringLiteral("halt"));
+    EXPECT_EQ(commands.first().args.value(QStringLiteral("unitId")).toString(),
+              QStringLiteral("blue_a1"));
 }
 
-TEST(RulesAiTest, MovementRetargetsUsingLatestPositionAndControlsSpeed) {
+TEST(RulesAiTest, MovementKeepsStrategicRegionWhenContactMoves) {
     AiSeatState initial = seat(QStringLiteral("blue_recon_1"), QStringLiteral("blue_r1"),
                                QStringLiteral("reconuav"), 100.0, 100.0);
     initial.targetVisible = true;
@@ -320,10 +320,10 @@ TEST(RulesAiTest, MovementRetargetsUsingLatestPositionAndControlsSpeed) {
     ASSERT_EQ(first.size(), 2);
     ASSERT_EQ(second.size(), first.size());
     EXPECT_EQ(first.at(0).action, QStringLiteral("setSpeed"));
-    EXPECT_DOUBLE_EQ(first.at(0).args.value(QStringLiteral("speed")).toDouble(), 15.0);
+    EXPECT_DOUBLE_EQ(first.at(0).args.value(QStringLiteral("speed")).toDouble(), 37.5);
     EXPECT_EQ(first.at(1).action, QStringLiteral("moveTo"));
     const QVariantMap position = first.at(1).args.value(QStringLiteral("pos")).toMap();
-    EXPECT_DOUBLE_EQ(position.value(QStringLiteral("x")).toDouble(), 220.0);
+    EXPECT_DOUBLE_EQ(position.value(QStringLiteral("x")).toDouble(), 400.0);
     EXPECT_DOUBLE_EQ(position.value(QStringLiteral("y")).toDouble(), 100.0);
     EXPECT_EQ(second.at(0).args, first.at(0).args);
     EXPECT_EQ(second.at(1).args, first.at(1).args);
@@ -350,7 +350,7 @@ TEST(RulesAiTest, SpeedCommandsRespectTheAuthoritativeMaximum) {
     ASSERT_EQ(commands.size(), 2);
     EXPECT_EQ(commands.first().action, QStringLiteral("setSpeed"));
     EXPECT_DOUBLE_EQ(commands.first().args.value(QStringLiteral("speed")).toDouble(),
-                     SimulationEngine::kMaximumCommandedUnitSpeedMps);
+                     UnitBase::commandedSpeedLimitMps(UnitKind::ReconUAV));
     EXPECT_EQ(commands.last().action, QStringLiteral("moveTo"));
 }
 
@@ -412,6 +412,7 @@ TEST(RulesAiTest, StrategicPlannerScoresCommandPostAndUsesOnlyVisibleFireTargets
     knowledge.now = 10.0;
     knowledge.mapWidth = 1000.0;
     knowledge.mapHeight = 800.0;
+    knowledge.commandPostThreat = true;
     AiDifficultyParameters parameters = RulesAi::parameters(QStringLiteral("hard"));
     parameters.suboptimalRate = 0.0;
     const AiPlanV1 plan = RulesAi::makeStrategicPlan(
@@ -425,6 +426,68 @@ TEST(RulesAiTest, StrategicPlannerScoresCommandPostAndUsesOnlyVisibleFireTargets
     EXPECT_EQ(commands.first().action, QStringLiteral("engageTarget"));
     EXPECT_EQ(commands.first().args.value(QStringLiteral("targetId")).toString(),
               QStringLiteral("red_cp"));
+}
+
+TEST(RulesAiTest, StrategicPlannerPrefersOrdinaryTargetBeforeUnthreatenedCommandPost) {
+    const AiObservedTarget commandPost{
+        QStringLiteral("red_cp"), QStringLiteral("commandpost"),
+        400.0, 100.0, 0.0, 0.0, 1.0, 10.0, true, false, true};
+    const AiObservedTarget ordinaryTarget{
+        QStringLiteral("red_attack_1"), QStringLiteral("attackuav"),
+        250.0, 100.0, 0.0, 0.0, 1.0, 10.0, true, false, false};
+    AiSeatState first = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
+                              QStringLiteral("attackuav"), 100.0, 100.0);
+    first.visibleTargets = {commandPost, ordinaryTarget};
+    AiSeatState second = seat(QStringLiteral("blue_attack_2"), QStringLiteral("blue_a2"),
+                               QStringLiteral("attackuav"), 120.0, 200.0);
+    second.visibleTargets = {commandPost, ordinaryTarget};
+    AiKnowledgeState knowledge = knowledgeFor({first, second}, 10.0);
+    knowledge.contacts = {commandPost, ordinaryTarget};
+    AiDifficultyParameters parameters = RulesAi::parameters(QStringLiteral("hard"));
+    parameters.suboptimalRate = 0.0;
+
+    const AiPlanV1 plan = RulesAi::makeStrategicPlan(
+        knowledge, QStringLiteral("distributed-strike"), 1, 2, 20.0, nullptr,
+        parameters, 1);
+    ASSERT_EQ(plan.objectives.size(), 2);
+    EXPECT_EQ(plan.objectives.at(0).targetId, QStringLiteral("red_attack_1"));
+    EXPECT_EQ(plan.objectives.at(1).targetId, QStringLiteral("red_cp"));
+}
+
+TEST(RulesAiTest, ProviderCommandPostObjectiveRetargetsVisibleOrdinaryContact) {
+    AiSeatState attacker = seat(QStringLiteral("blue_attack_1"), QStringLiteral("blue_a1"),
+                                QStringLiteral("attackuav"), 100.0, 100.0);
+    AiObservedTarget commandPost;
+    commandPost.targetId = QStringLiteral("red_cp");
+    commandPost.targetKind = QStringLiteral("commandpost");
+    commandPost.x = 400.0;
+    commandPost.y = 100.0;
+    commandPost.confidence = 1.0;
+    commandPost.lastSeenAt = 10.0;
+    commandPost.visible = true;
+    commandPost.commandPost = true;
+    AiObservedTarget ordinary;
+    ordinary.targetId = QStringLiteral("red_attack_1");
+    ordinary.targetKind = QStringLiteral("attackuav");
+    ordinary.x = 250.0;
+    ordinary.y = 100.0;
+    ordinary.confidence = 1.0;
+    ordinary.lastSeenAt = 10.0;
+    ordinary.visible = true;
+    attacker.visibleTargets = {commandPost, ordinary};
+
+    AiKnowledgeState knowledge = knowledgeFor({attacker}, 10.0);
+    knowledge.contacts = attacker.visibleTargets;
+    const AiPlanV1 providerPlan{
+        1, QStringLiteral("provider-cp"), 1, 2, 1,
+        {AiObjectiveV1{QStringLiteral("attack"), 20, attacker.seatId,
+                       QStringLiteral("red_cp"), {}, 30.0}}};
+    const QList<AiCommand> commands = RulesAi::commandsForPlan(
+        providerPlan, {attacker}, 10.0, 1000.0, 800.0, &knowledge);
+    ASSERT_EQ(commands.size(), 1);
+    EXPECT_EQ(commands.first().action, QStringLiteral("engageTarget"));
+    EXPECT_EQ(commands.first().args.value(QStringLiteral("targetId")).toString(),
+              QStringLiteral("red_attack_1"));
 }
 
 TEST(RulesAiTest, AttackUsesOptimalRangeAsFiringPosition) {

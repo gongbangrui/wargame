@@ -143,6 +143,7 @@ qt_add_qml_module(appindex
         qml/components/MessageLog.qml
         qml/components/EventDialog.qml
         qml/components/UnitPanel.qml
+        qml/components/AbilityActionButton.qml
         qml/components/UnitDetailsDialog.qml
         qml/components/SectionTitle.qml
         qml/components/TonalButton.qml

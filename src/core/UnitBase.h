@@ -84,6 +84,7 @@ class UnitBase : public QObject {
     Q_PROPERTY(double attackRange READ attackRange WRITE setAttackRange NOTIFY paramsChanged)
     Q_PROPERTY(double commRange READ commRange WRITE setCommRange NOTIFY paramsChanged)
     Q_PROPERTY(double speed READ speed WRITE setSpeed NOTIFY paramsChanged)
+    Q_PROPERTY(double maxCommandedSpeed READ maxCommandedSpeed CONSTANT)
     Q_PROPERTY(double maxHp READ maxHp WRITE setMaxHp NOTIFY paramsChanged)
     Q_PROPERTY(double attackPower READ attackPower WRITE setAttackPower NOTIFY paramsChanged)
     Q_PROPERTY(double armor READ armor NOTIFY damageStateChanged)
@@ -160,6 +161,31 @@ public:
     UnitKind kind() const { return m_kind; }
     Side side() const { return m_side; }
     bool movable() const { return m_kind != UnitKind::CommandPost; }
+
+    /// @brief Maximum speed accepted by an authoritative movement command.
+    /// @details Direct setters remain available for snapshot/replay fixtures;
+    /// command and scenario validation use this rule as the security boundary.
+    static constexpr double commandedSpeedLimitMps(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 0.0;
+        case UnitKind::ReconUAV: return 300.0;
+        case UnitKind::AttackUAV: return 360.0;
+        case UnitKind::GroundScout: return 36.0;
+        case UnitKind::JammerUAV: return 260.0;
+        }
+        return 0.0;
+    }
+    static constexpr double defaultSpeedMps(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 0.0;
+        case UnitKind::ReconUAV: return 150.0;
+        case UnitKind::AttackUAV: return 200.0;
+        case UnitKind::GroundScout: return 18.0;
+        case UnitKind::JammerUAV: return 120.0;
+        }
+        return 0.0;
+    }
+    double maxCommandedSpeed() const { return commandedSpeedLimitMps(m_kind); }
 
     QVariantList position() const;
     QJsonObject perceptionJson() const;

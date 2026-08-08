@@ -571,6 +571,7 @@ bool validObserverRuntimeUnit(const QJsonValue& value) {
         QStringLiteral("side"), QStringLiteral("movable"), QStringLiteral("position"),
         QStringLiteral("detectRange"), QStringLiteral("attackRange"),
         QStringLiteral("commRange"), QStringLiteral("speed"), QStringLiteral("baseSpeed"),
+        QStringLiteral("maxCommandedSpeed"),
         QStringLiteral("maxHp"), QStringLiteral("attackPower"), QStringLiteral("armor"),
         QStringLiteral("hp"), QStringLiteral("alive"), QStringLiteral("subsystems"),
         QStringLiteral("serviceRequested"), QStringLiteral("serviceProgress"),
@@ -596,6 +597,7 @@ bool validObserverRuntimeUnit(const QJsonValue& value) {
     for (const QString& field : {QStringLiteral("detectRange"),
                                  QStringLiteral("attackRange"), QStringLiteral("commRange"),
                                  QStringLiteral("speed"), QStringLiteral("baseSpeed"),
+                                 QStringLiteral("maxCommandedSpeed"),
                                  QStringLiteral("maxHp"), QStringLiteral("hp"),
                                  QStringLiteral("attackPower")}) {
         if (!validFiniteNumber(unit.value(field), 0.0)) return false;

@@ -48,6 +48,7 @@ QJsonObject observerUnit(const QString& id, const QString& side, double hp) {
             {QStringLiteral("commRange"), 15000.0},
             {QStringLiteral("speed"), 10.0},
             {QStringLiteral("baseSpeed"), 10.0},
+            {QStringLiteral("maxCommandedSpeed"), 36.0},
             {QStringLiteral("maxHp"), 100.0},
             {QStringLiteral("attackPower"), 0.0},
             {QStringLiteral("hp"), hp},

@@ -99,14 +99,28 @@ QPair<double, double> advanceTowardLiveTarget(const gbr::AiSeatState& seat,
             clampCoordinate(seat.y + (seat.targetY - seat.y) * 0.60, mapHeight)};
 }
 
+double commandedSpeedLimitFor(const gbr::AiSeatState& seat) {
+    const double intrinsic = gbr::UnitBase::commandedSpeedLimitMps(
+        gbr::kindFromName(seat.kind));
+    if (!std::isfinite(seat.maxCommandedSpeed) || seat.maxCommandedSpeed <= 0.0) {
+        return intrinsic;
+    }
+    return std::min(intrinsic, seat.maxCommandedSpeed);
+}
+
+double commandedCruiseSpeedFor(const gbr::AiSeatState& seat, double limit) {
+    const double requested = std::isfinite(seat.cruiseSpeed) && seat.cruiseSpeed > 0.0
+        ? seat.cruiseSpeed
+        : (std::isfinite(seat.commandedSpeed) && seat.commandedSpeed > 0.0
+               ? seat.commandedSpeed : seat.speed);
+    return std::clamp(std::isfinite(requested) ? requested : 0.0, 0.0,
+                      std::max(0.0, limit));
+}
+
 double preferredSpeed(const gbr::AiSeatState& seat, double destinationX,
                       double destinationY) {
-    const double cruise = std::clamp(
-        std::isfinite(seat.cruiseSpeed) && seat.cruiseSpeed > 0.0
-            ? seat.cruiseSpeed
-            : (std::isfinite(seat.commandedSpeed) && seat.commandedSpeed > 0.0
-                   ? seat.commandedSpeed : seat.speed),
-        0.0, gbr::SimulationEngine::kMaximumCommandedUnitSpeedMps);
+    const double maximum = commandedSpeedLimitFor(seat);
+    const double cruise = commandedCruiseSpeedFor(seat, maximum);
     if (cruise <= 0.0) return 0.0;
     const double distance = std::sqrt(distance2(destinationX, destinationY, seat.x, seat.y));
     const double minimum = std::min(cruise, std::max(1.0, cruise * 0.10));
@@ -135,6 +149,28 @@ double targetValue(const gbr::AiObservedTarget& target) {
     if (target.targetKind == QLatin1String("reconuav")) return 95.0;
     if (target.targetKind == QLatin1String("groundscout")) return 82.0;
     return 70.0;
+}
+
+bool isCommandPost(const gbr::AiObservedTarget& target) {
+    return target.commandPost || target.targetKind == QLatin1String("commandpost");
+}
+
+const gbr::AiObservedTarget* bestVisibleNonCommandPostTarget(
+    const gbr::AiSeatState& seat) {
+    const gbr::AiObservedTarget* selected = nullptr;
+    double selectedScore = -std::numeric_limits<double>::infinity();
+    for (const gbr::AiObservedTarget& target : seat.visibleTargets) {
+        if (!target.visible || isCommandPost(target)) continue;
+        const double score = targetValue(target) * std::clamp(target.confidence, 0.05, 1.0)
+            - distance(seat.x, seat.y, target.x, target.y) / 1000.0;
+        if (score > selectedScore + 1e-9
+            || (std::abs(score - selectedScore) <= 1e-9
+                && (!selected || target.targetId < selected->targetId))) {
+            selected = &target;
+            selectedScore = score;
+        }
+    }
+    return selected;
 }
 
 int seatRoleRank(const gbr::AiSeatState& seat) {
@@ -252,8 +288,10 @@ double fuelRequiredToCommandPost(const gbr::AiSeatState& seat) {
     if (!seat.commandPostAlive || seat.fuelCapacity <= 0.0 || seat.fuelRemaining < 0.0) {
         return 0.0;
     }
-    const double cruise = std::max(1.0, std::isfinite(seat.cruiseSpeed)
-        && seat.cruiseSpeed > 0.0 ? seat.cruiseSpeed : seat.speed);
+    const double speedLimit = commandedSpeedLimitFor(seat);
+    const double cruise = std::clamp(
+        std::max(1.0, commandedCruiseSpeedFor(seat, speedLimit)),
+        1.0, std::max(1.0, speedLimit));
     const double burnRate = std::max(
         std::max(0.0, seat.fuelBurnRate), nominalCruiseFuelBurn(seat));
     const double travelSeconds = distance(seat.x, seat.y,
@@ -316,8 +354,12 @@ ThreatEstimate nearestIncomingThreat(const gbr::AiSeatState& seat) {
 QPair<double, double> evasionDestination(const gbr::AiSeatState& seat,
                                          const gbr::AiObservedProjectile& projectile,
                                          double mapWidth, double mapHeight) {
+    const double speedLimit = commandedSpeedLimitFor(seat);
+    const double cruiseSpeed = std::clamp(
+        std::max(1.0, commandedCruiseSpeedFor(seat, speedLimit)),
+        1.0, std::max(1.0, speedLimit));
     const double evadeDistance = std::clamp(
-        std::max(1.0, seat.cruiseSpeed) * kImmediateThreatSeconds, 600.0, 1800.0);
+        cruiseSpeed * kImmediateThreatSeconds, 600.0, 1800.0);
     const double perpendicularX = -std::sin(projectile.headingRad);
     const double perpendicularY = std::cos(projectile.headingRad);
     const QPair<double, double> left = clampPoint(
@@ -402,8 +444,8 @@ QList<gbr::AiCommand> tacticalCommands(const gbr::AiKnowledgeState& knowledge,
                 }
                 const auto destination = evasionDestination(
                     seat, *threat.projectile, mapWidth, mapHeight);
-                const double cruise = std::clamp(seat.cruiseSpeed, 0.0,
-                    gbr::SimulationEngine::kMaximumCommandedUnitSpeedMps);
+                const double cruise = commandedCruiseSpeedFor(
+                    seat, commandedSpeedLimitFor(seat));
                 if (cruise > 0.0
                     && std::abs(cruise - seat.commandedSpeed) >= kSpeedChangeThreshold) {
                     commands.append(gbr::AiCommand{
@@ -716,22 +758,56 @@ AiPlanV1 RulesAi::makeStrategicPlan(const AiKnowledgeState& knowledge,
     }), seats.end());
 
     QHash<QString, int> allocations;
-    const auto findContact = [&contacts, &allocations](const AiSeatState& seat,
-                                                        bool visibleOnly) {
+    const bool commandPostThreat = normalizedKnowledge.commandPostThreat;
+    const auto findContact = [&contacts, &allocations, commandPostThreat](
+                                 const AiSeatState& seat, bool visibleOnly) {
         int selected = -1;
         double selectedScore = -std::numeric_limits<double>::infinity();
+        const bool supportRole = seat.kind == QLatin1String("reconuav")
+            || seat.kind == QLatin1String("jammeruav")
+            || seat.kind == QLatin1String("groundscout");
+        const bool hasAlternativeContact = std::any_of(
+            contacts.cbegin(), contacts.cend(), [](const AiObservedTarget& contact) {
+                return !contact.commandPost
+                    && contact.targetKind != QLatin1String("commandpost");
+            });
+        const int commandPostLimit = commandPostThreat ? 2 : 1;
         for (int index = 0; index < contacts.size(); ++index) {
             const AiObservedTarget& contact = contacts.at(index);
             if (visibleOnly && visibleTarget(seat, contact.targetId) == nullptr) continue;
+            const bool commandPost = contact.commandPost
+                || contact.targetKind == QLatin1String("commandpost");
+            if (seat.kind == QLatin1String("attackuav") && commandPost
+                && hasAlternativeContact
+                && allocations.value(contact.targetId) >= commandPostLimit) {
+                // A command post is valuable, but a strike package must not
+                // collapse into an identical target assignment.
+                continue;
+            }
+            if (supportRole && commandPost && hasAlternativeContact
+                && !(commandPostThreat && seat.kind == QLatin1String("groundscout"))) {
+                // Recon, jamming and perimeter units should not abandon their
+                // search/escort sectors merely because the CP is remembered.
+                continue;
+            }
             const double range = distance(seat.x, seat.y, contact.x, contact.y);
-            double score = targetValue(contact) * std::clamp(contact.confidence, 0.05, 1.0)
+            const double strategicValue = commandPost
+                ? (commandPostThreat ? 150.0 : 72.0) : targetValue(contact);
+            double score = strategicValue * std::clamp(contact.confidence, 0.05, 1.0)
                 - range / 1000.0;
-            score -= static_cast<double>(allocations.value(contact.targetId)) * 24.0;
+            score -= static_cast<double>(allocations.value(contact.targetId)) * 48.0;
             if (contact.privileged) score -= 12.0;
-            if (seat.kind == QLatin1String("reconuav")
-                && contact.targetKind == QLatin1String("reconuav")) score += 12.0;
-            if (seat.kind == QLatin1String("jammeruav")
-                && contact.targetKind == QLatin1String("jammeruav")) score += 18.0;
+            if (seat.kind == QLatin1String("reconuav")) {
+                if (contact.targetKind == QLatin1String("reconuav")) score += 42.0;
+                else if (contact.targetKind == QLatin1String("groundscout")) score += 16.0;
+            } else if (seat.kind == QLatin1String("jammeruav")) {
+                if (contact.targetKind == QLatin1String("reconuav")) score += 40.0;
+                else if (contact.targetKind == QLatin1String("jammeruav")) score += 28.0;
+                else if (contact.targetKind == QLatin1String("attackuav")) score += 16.0;
+            } else if (seat.kind == QLatin1String("groundscout")) {
+                if (contact.targetKind == QLatin1String("groundscout")) score += 34.0;
+                else if (contact.targetKind == QLatin1String("reconuav")) score += 22.0;
+            }
             if (score > selectedScore + 1e-9
                 || (std::abs(score - selectedScore) <= 1e-9
                     && (selected < 0 || contact.targetId < contacts.at(selected).targetId))) {
@@ -782,6 +858,7 @@ AiPlanV1 RulesAi::makeStrategicPlan(const AiKnowledgeState& knowledge,
                                                    std::max(0, parameters.candidateRoutes - 1));
             objective.region = QJsonObject{{QStringLiteral("x"), point.first},
                                            {QStringLiteral("y"), point.second}};
+            if (memoryIndex >= 0) ++allocations[contacts.at(memoryIndex).targetId];
         } else if (seat.kind == QLatin1String("jammeruav")) {
             objective.action = QStringLiteral("jam");
             const int memoryIndex = findContact(seat, false);
@@ -790,15 +867,16 @@ AiPlanV1 RulesAi::makeStrategicPlan(const AiKnowledgeState& knowledge,
                                                    planningGeneration, 1);
             objective.region = QJsonObject{{QStringLiteral("x"), point.first},
                                            {QStringLiteral("y"), point.second}};
+            if (memoryIndex >= 0) ++allocations[contacts.at(memoryIndex).targetId];
         } else if (seat.kind == QLatin1String("groundscout")) {
-            objective.action = knowledge.commandPostThreat
-                ? QStringLiteral("guard") : QStringLiteral("guard");
+            objective.action = QStringLiteral("guard");
             const int memoryIndex = findContact(seat, false);
             const AiObservedTarget* contact = memoryIndex >= 0 ? &contacts.at(memoryIndex) : nullptr;
             const auto point = deterministicRegion(seat, contact, normalizedKnowledge, parameters,
                                                    planningGeneration, 0);
             objective.region = QJsonObject{{QStringLiteral("x"), point.first},
                                            {QStringLiteral("y"), point.second}};
+            if (memoryIndex >= 0) ++allocations[contacts.at(memoryIndex).targetId];
         } else {
             objective.action = QStringLiteral("patrol");
             const auto point = deterministicRegion(seat, nullptr, normalizedKnowledge, parameters,
@@ -867,12 +945,19 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
             commands.append(command);
             continue;
         }
-        const bool priorityAttack = it->kind == QLatin1String("attackuav")
-            && targetsRedCommandPost(*it);
-        if (priorityAttack || (objective.action == QLatin1String("attack")
-                               && !objective.targetId.isEmpty())) {
+        if (objective.action == QLatin1String("attack") && !objective.targetId.isEmpty()) {
             if (it->kind != QLatin1String("attackuav")) continue;
-            const QString targetId = priorityAttack ? it->targetId : objective.targetId;
+            QString targetId = objective.targetId;
+            if (knowledge && !knowledge->commandPostThreat) {
+                const AiObservedTarget* plannedTarget = visibleTarget(*it, targetId);
+                const AiObservedTarget* alternate = bestVisibleNonCommandPostTarget(*it);
+                if (plannedTarget && isCommandPost(*plannedTarget) && alternate) {
+                    // A CP is a strategic objective, not the only objective.
+                    // A live non-CP contact gets the strike when the CP is not
+                    // under immediate threat; this also bounds provider plans.
+                    targetId = alternate->targetId;
+                }
+            }
             if (targetId.isEmpty()) continue;
             const AiObservedTarget* liveTarget = visibleTarget(*it, targetId);
             const bool legacyVisible = hasVisibleTarget(*it) && it->targetId == targetId;
@@ -935,7 +1020,8 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
                     it->y + (liveTarget->y - it->y) * 0.60, mapHeight);
                 region = QJsonObject{{QStringLiteral("x"), destinationX},
                                      {QStringLiteral("y"), destinationY}};
-            } else if (objective.targetId.isEmpty() && hasVisibleTargetPosition(*it)) {
+            } else if (region.isEmpty() && objective.targetId.isEmpty()
+                       && hasVisibleTargetPosition(*it)) {
                 const QPair<double, double> destination = advanceTowardLiveTarget(
                     *it, mapWidth, mapHeight);
                 region = QJsonObject{{QStringLiteral("x"), destination.first},

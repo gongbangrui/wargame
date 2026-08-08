@@ -69,6 +69,26 @@ Item {
         return ({})
     }
 
+    function unitSpeedLimit(unit) {
+        var reported = Number((unit || ({})).maxCommandedSpeed)
+        if (isFinite(reported) && reported > 0) return reported
+        var kind = (unit || ({})).kind || ""
+        if (kind === "attackuav") return 360
+        if (kind === "reconuav") return 300
+        if (kind === "jammeruav") return 260
+        if (kind === "groundscout") return 36
+        return 0
+    }
+
+    function editableUnitSpeedLimit(unit) {
+        return Math.max(1, root.unitSpeedLimit(unit))
+    }
+
+    function ownSeatUnitSnapshot() {
+        var seat = root.seatById(root.controller.currentSeatId) || ({})
+        return root.controller.unitAt(seat.unitId) || ({})
+    }
+
     function resetRoundViewState() {
         root.selectedUnitId = ""
         root.attackTargetId = ""
@@ -122,9 +142,11 @@ Item {
                 || root.controller.matchPhase !== "running" || !root.selectedUnitId)
             return
         if (!root.selectedActionEnabled("setSpeed")) return
+        var limit = root.unitSpeedLimit(root.selectedUnitSnapshot)
+        if (limit <= 0) return
         var current = Number(root.selectedUnitSnapshot.speed)
         if (!isFinite(current)) current = Number(root.unitSpeedDraft || 1)
-        var next = Math.max(1, Math.min(240, Math.round((current + delta) / 5) * 5))
+        var next = Math.max(1, Math.min(limit, Math.round((current + delta) / 5) * 5))
         root.unitSpeedDraft = next
         root.unitSpeedDirty = true
         root.controller.command("setSpeed", { unitId: root.selectedUnitId, speed: next })
@@ -401,14 +423,14 @@ Item {
         if (root.unitSpeedDraftUnitId !== unitId) {
             root.unitSpeedDraftUnitId = unitId
             root.unitSpeedDirty = false
-            root.unitSpeedDraft = Math.max(1, Math.min(240, speed))
+            root.unitSpeedDraft = Math.max(1, Math.min(root.editableUnitSpeedLimit(unit), speed))
             return
         }
         if (root.unitSpeedDirty) {
             if (speed !== root.unitSpeedDraft) return
             root.unitSpeedDirty = false
         }
-        root.unitSpeedDraft = Math.max(1, Math.min(240, speed))
+        root.unitSpeedDraft = Math.max(1, Math.min(root.editableUnitSpeedLimit(unit), speed))
     }
     function dismissSelectedCommandMarker() {
         if (!root.selectedCommandMarkerId) return
@@ -828,7 +850,14 @@ Item {
             }
         }
         function onEventForward(title, body) {
-            if (title === "联网房间" && body) root.deploymentNotice = body
+            if (!title && !body) return
+            if (title === "联网房间" && body) {
+                root.deploymentNotice = body
+            } else if (title && body) {
+                root.deploymentNotice = title + " · " + body
+            } else {
+                root.deploymentNotice = title || body
+            }
         }
         function onTransferEventReceived(event) {
             if (!root.switchSeatSelection || !event
@@ -1299,45 +1328,80 @@ Item {
                                     background: Rectangle { color: exitRoomButton.hovered ? root.panelAlt : "transparent"; border.color: root.orange; radius: 4; Behavior on color { ColorAnimation { duration: 150 } } }
                                 }
                             }
-                            TabBar {
+                            Item {
                                 id: tacticalTabs
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 34
-                                currentIndex: root.tacticalViewIndex
-                                onCurrentIndexChanged: root.tacticalViewIndex = currentIndex
-                                background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
-                                TabButton {
-                                    id: unitsTacticalTab
-                                    text: "单位"
-                                    Accessible.name: "单位视图"
-                                    contentItem: Row {
-                                        anchors.centerIn: parent; spacing: 4
-                                        Icon { name: "unit"; iconSize: 13; iconColor: tacticalTabs.currentIndex === 0 ? root.cyan : root.dim }
-                                        Text { text: unitsTacticalTab.text; color: tacticalTabs.currentIndex === 0 ? root.cyan : root.dim; font.pixelSize: 10; font.bold: tacticalTabs.currentIndex === 0 }
-                                    }
-                                    background: Rectangle { color: tacticalTabs.currentIndex === 0 ? root.panelAlt : "transparent"; radius: 3 }
+                                Layout.preferredHeight: 40
+                                property int currentIndex: root.tacticalViewIndex
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    color: root.page
+                                    border.color: root.line
+                                    radius: 4
                                 }
-                                TabButton {
-                                    id: commandTacticalTab
-                                    text: "指挥"
-                                    Accessible.name: "指挥视图"
-                                    contentItem: Row {
-                                        anchors.centerIn: parent; spacing: 4
-                                        Icon { name: "command"; iconSize: 13; iconColor: tacticalTabs.currentIndex === 1 ? root.cyan : root.dim }
-                                        Text { text: commandTacticalTab.text; color: tacticalTabs.currentIndex === 1 ? root.cyan : root.dim; font.pixelSize: 10; font.bold: tacticalTabs.currentIndex === 1 }
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.margins: 2
+                                    spacing: 2
+
+                                    Repeater {
+                                        model: [
+                                            { label: "单位", icon: "unit", accessible: "单位视图" },
+                                            { label: "指挥", icon: "command", accessible: "指挥视图" },
+                                            { label: "情报", icon: "scan", accessible: "情报视图" }
+                                        ]
+                                        delegate: Button {
+                                            id: tacticalTabButton
+                                            required property var modelData
+                                            required property int index
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            Layout.minimumWidth: 0
+                                            padding: 0
+                                            leftPadding: 0
+                                            rightPadding: 0
+                                            topPadding: 0
+                                            bottomPadding: 0
+                                            property bool active: root.tacticalViewIndex === tacticalTabButton.index
+                                            Accessible.name: tacticalTabButton.modelData.accessible
+                                            onClicked: root.tacticalViewIndex = tacticalTabButton.index
+
+                                            contentItem: Item {
+                                                anchors.fill: parent
+                                                Row {
+                                                    id: tacticalTabContent
+                                                    anchors.centerIn: parent
+                                                    spacing: 6
+                                                    Icon {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        name: tacticalTabButton.modelData.icon
+                                                        iconSize: 16
+                                                        iconColor: tacticalTabButton.active ? root.cyan : root.dim
+                                                    }
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        text: tacticalTabButton.modelData.label
+                                                        color: tacticalTabButton.active ? root.cyan : root.dim
+                                                        font.pixelSize: 11
+                                                        font.bold: tacticalTabButton.active
+                                                    }
+                                                }
+                                            }
+                                            background: Rectangle {
+                                                color: tacticalTabButton.active ? root.panelAlt
+                                                                                  : (tacticalTabButton.hovered ? root.panel : "transparent")
+                                                radius: 3
+                                                Rectangle {
+                                                    anchors.left: parent.left
+                                                    anchors.right: parent.right
+                                                    anchors.bottom: parent.bottom
+                                                    height: 2
+                                                    color: tacticalTabButton.active ? root.cyan : "transparent"
+                                                }
+                                            }
+                                        }
                                     }
-                                    background: Rectangle { color: tacticalTabs.currentIndex === 1 ? root.panelAlt : "transparent"; radius: 3 }
-                                }
-                                TabButton {
-                                    id: intelligenceTacticalTab
-                                    text: "情报"
-                                    Accessible.name: "情报视图"
-                                    contentItem: Row {
-                                        anchors.centerIn: parent; spacing: 4
-                                        Icon { name: "scan"; iconSize: 13; iconColor: tacticalTabs.currentIndex === 2 ? root.cyan : root.dim }
-                                        Text { text: intelligenceTacticalTab.text; color: tacticalTabs.currentIndex === 2 ? root.cyan : root.dim; font.pixelSize: 10; font.bold: tacticalTabs.currentIndex === 2 }
-                                    }
-                                    background: Rectangle { color: tacticalTabs.currentIndex === 2 ? root.panelAlt : "transparent"; radius: 3 }
                                 }
                             }
                             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
@@ -1823,7 +1887,7 @@ Item {
                                     Slider {
                                         id: unitSpeedSlider
                                         Layout.fillWidth: true
-                                        from: 1; to: 240; stepSize: 5
+                                        from: 1; to: root.editableUnitSpeedLimit(root.ownSeatUnitSnapshot()); stepSize: 5
                                         value: root.unitSpeedDraft
                                         onMoved: {
                                             root.unitSpeedDraft = Math.round(value)
@@ -1836,6 +1900,7 @@ Item {
                                     id: applyUnitSpeedButton
                                     Layout.fillWidth: true
                                     enabled: ((root.seatById(root.controller.currentSeatId) || {}).unitId || "").length > 0
+                                        && root.unitSpeedLimit(root.ownSeatUnitSnapshot()) > 0
                                     text: "应用移动速度"
                                     onClicked: {
                                         var ownSeat = root.seatById(root.controller.currentSeatId) || ({})

@@ -83,11 +83,18 @@ mkdir -p "$DIST_DIR"
 TEMP_ARCHIVE="$(mktemp "$DIST_DIR/.${PACKAGE_ROOT}.XXXXXX.tar.gz")"
 TEMP_CHECKSUM="$(mktemp "$DIST_DIR/.${PACKAGE_ROOT}.XXXXXX.sha256")"
 
+# Keep the release bytes reproducible across hosts and source checkout mtimes.
 tar -C "$ROOT_DIR" \
     --exclude='deploy/.env.example' \
+    --sort=name \
+    --mtime='1970-01-01 00:00:00Z' \
+    --owner=0 \
+    --group=0 \
+    --numeric-owner \
     --transform="s,^,${PACKAGE_ROOT}/," \
-    -czf "$TEMP_ARCHIVE" \
-    "${PACKAGE_INPUTS[@]}"
+    -cf - \
+    "${PACKAGE_INPUTS[@]}" \
+    | gzip -n >"$TEMP_ARCHIVE"
 
 LISTING="$(tar -tzf "$TEMP_ARCHIVE")"
 for required in \

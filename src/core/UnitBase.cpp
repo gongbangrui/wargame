@@ -229,26 +229,28 @@ void UnitBase::configureAbilitiesAndFuelEconomy() {
     m_scan = {};
     switch (m_kind) {
     case UnitKind::CommandPost:
-        m_countermeasure = AbilityState{2000.0, 60.0, 0.0, -1, -1};
+        m_countermeasure = AbilityState{2000.0, 65.0, 0.0, -1, -1};
         break;
     case UnitKind::AttackUAV:
-        m_countermeasure = AbilityState{900.0, 35.0, 0.0, 3, 3};
+        m_countermeasure = AbilityState{900.0, 40.0, 0.0, 3, 3};
         m_fuelIdleRate = 0.50;
         m_fuelMoveCoefficient = 3.50;
         break;
     case UnitKind::ReconUAV:
-        m_countermeasure = AbilityState{1100.0, 45.0, 0.0, 2, 2};
-        m_scan = AbilityState{9000.0, 45.0, 0.0, -1, -1};
+        m_countermeasure = AbilityState{1100.0, 50.0, 0.0, 2, 2};
+        // Recon UAVs provide an area-wide sweep. Sensor damage and ECM still
+        // reduce the effective range at execution time.
+        m_scan = AbilityState{15000.0, 45.0, 0.0, -1, -1};
         m_fuelIdleRate = 0.40;
         m_fuelMoveCoefficient = 3.10;
         break;
     case UnitKind::JammerUAV:
-        m_countermeasure = AbilityState{1800.0, 30.0, 0.0, 4, 4};
+        m_countermeasure = AbilityState{1800.0, 35.0, 0.0, 4, 4};
         m_fuelIdleRate = 0.80;
         m_fuelMoveCoefficient = 3.70;
         break;
     case UnitKind::GroundScout:
-        m_countermeasure = AbilityState{650.0, 50.0, 0.0, 2, 2};
+        m_countermeasure = AbilityState{650.0, 55.0, 0.0, 2, 2};
         m_fuelIdleRate = 0.0;
         m_fuelMoveCoefficient = 3.0;
         break;
@@ -382,9 +384,12 @@ bool UnitBase::beginService(const QString& serviceCpId) {
     const double countermeasureLoss = m_countermeasure.capacity > 0
         ? 1.0 - static_cast<double>(m_countermeasure.remaining)
                     / m_countermeasure.capacity : 0.0;
-    m_serviceDuration = std::clamp(3.0 + 15.0 * hullLoss
+    // A CP turnaround should be meaningful without making a damaged unit
+    // disappear from the battle for most of a short online engagement.
+    const double baselineDuration = 3.0 + 15.0 * hullLoss
         + 10.0 * subsystemLoss + rearmDurationContribution()
-        + 8.0 * fuelLoss + 6.0 * countermeasureLoss, 3.0, 45.0);
+        + 8.0 * fuelLoss + 6.0 * countermeasureLoss;
+    m_serviceDuration = std::clamp(baselineDuration * 0.75, 3.0, 36.0);
     m_serviceElapsed = 0.0;
     m_serviceCpId = serviceCpId;
     m_serviceRequested = true;

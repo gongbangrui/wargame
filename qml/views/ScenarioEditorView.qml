@@ -441,7 +441,7 @@ Item {
             ComboBox { id: batchSide; model: [{text: "红方", value: "red"}, {text: "蓝方", value: "blue"}]; textRole: "text"; valueRole: "value"; Layout.columnSpan: 2; Layout.fillWidth: true }
 
             CheckBox { id: speedCheck; text: "速度 (m/s)" }
-            SpinBox { id: batchSpeed; from: 0; to: 240; value: 60; editable: true; Layout.columnSpan: 2; Layout.fillWidth: true }
+            SpinBox { id: batchSpeed; from: 0; to: 360; value: 120; editable: true; Layout.columnSpan: 2; Layout.fillWidth: true }
 
             CheckBox { id: armorCheck; text: "装甲 (%)" }
             SpinBox { id: batchArmor; from: 0; to: 90; value: 10; editable: true; Layout.columnSpan: 2; Layout.fillWidth: true }

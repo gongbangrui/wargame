@@ -651,6 +651,7 @@ QJsonObject observerProtocolRuntimeUnit() {
             {QStringLiteral("commRange"), 15000.0},
             {QStringLiteral("speed"), 100.0},
             {QStringLiteral("baseSpeed"), 100.0},
+            {QStringLiteral("maxCommandedSpeed"), 360.0},
             {QStringLiteral("maxHp"), 120.0},
             {QStringLiteral("attackPower"), 100.0},
             {QStringLiteral("armor"), 0.1},

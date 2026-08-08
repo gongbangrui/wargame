@@ -167,7 +167,7 @@ Item {
                         spacing: 8
                         Icon {
                             name: commandTypeButton.modelData.icon
-                            iconSize: 15
+                            iconSize: 19
                             iconColor: commandTypeButton.enabled
                                 ? root.kindColor(commandTypeButton.modelData.kind) : root.dim
                         }

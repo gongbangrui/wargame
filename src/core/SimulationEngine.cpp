@@ -55,12 +55,19 @@ QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map) {
         && std::isfinite(u.attackRange) && u.attackRange >= 0.0
         && std::isfinite(u.commRange) && u.commRange >= 0.0
         && std::isfinite(u.speed) && u.speed >= 0.0
+        && u.speed <= UnitBase::commandedSpeedLimitMps(kindFromName(u.kind))
         && std::isfinite(u.maxHp) && u.maxHp > 0.0
         && std::isfinite(u.attackPower) && u.attackPower >= 0.0
         && std::isfinite(u.armor) && u.armor >= 0.0 && u.armor <= 0.9
         && std::isfinite(u.repairRate) && u.repairRate >= 0.0
         && std::isfinite(u.subsystemRepairRate) && u.subsystemRepairRate >= 0.0;
     if (!validPosition || !validParams) {
+        if (!std::isfinite(u.speed) || u.speed < 0.0
+            || u.speed > UnitBase::commandedSpeedLimitMps(kindFromName(u.kind))) {
+            return QStringLiteral("单元速度超过 %1 的类型上限: %2")
+                .arg(UnitBase::commandedSpeedLimitMps(kindFromName(u.kind)), 0, 'f', 0)
+                .arg(u.id);
+        }
         return QStringLiteral("单元参数无效: %1").arg(u.id);
     }
     if (u.kind != QLatin1String("commandpost")
@@ -1058,6 +1065,7 @@ QJsonObject SimulationEngine::unitSnapshot(const QString& id) const {
     o["commRange"] = u->commRange();
     o["speed"] = u->speed();
     o["baseSpeed"] = u->baseSpeed();
+    o["maxCommandedSpeed"] = u->maxCommandedSpeed();
     o["maxHp"] = u->maxHp();
     o["attackPower"] = u->attackPower();
     o["armor"] = u->armor();
@@ -1385,11 +1393,13 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
     if (action == QLatin1String("setSpeed")) {
         bool ok = false;
         const double speed = args.value(QStringLiteral("speed")).toDouble(&ok);
+        const double maximum = controlled->maxCommandedSpeed();
         if (!ok || !std::isfinite(speed) || speed <= 0.0
-            || speed > kMaximumCommandedUnitSpeedMps) {
-            return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
-                                         QStringLiteral("单元速度必须大于 0 且不超过 %1")
-                                             .arg(kMaximumCommandedUnitSpeedMps, 0, 'f', 0));
+            || maximum <= 0.0 || speed > maximum) {
+            return CommandResult::reject(
+                QString::fromLatin1(CommandCode::InvalidArgument),
+                QStringLiteral("单元速度必须大于 0 且不超过 %1")
+                    .arg(maximum, 0, 'f', 0));
         }
     }
     if (action == QLatin1String("setSchedule")) {
@@ -1454,7 +1464,7 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
         if (!cp || !cp->alive()
             || controlled->pos().distanceTo2D(cp->pos()) > kServiceRadiusMeters) {
             return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
-                                         QStringLiteral("单元必须在活指挥所 500 米内才能开始补充"));
+                                         QStringLiteral("单元必须在活指挥所 750 米内才能开始补充"));
         }
     }
     if (action == QLatin1String("cancelService") && !controlled->serviceRequested()) {
@@ -1651,7 +1661,7 @@ void SimulationEngine::cmdSetSpeed(const QVariantMap& args) {
     if (!u) return;
     if (!u->movable() || !u->alive()) return;
     if (!std::isfinite(v) || v <= 0.0) return;
-    u->setSpeed(std::min(v, kMaximumCommandedUnitSpeedMps));
+    u->setSpeed(std::min(v, u->maxCommandedSpeed()));
 }
 
 void SimulationEngine::cmdPursue(const QVariantMap& args) {
@@ -1839,11 +1849,20 @@ void SimulationEngine::cmdActivateScan(const QVariantMap& args) {
                                              simTime() + 18.0});
         ++count;
     }
-    scanner->setStatus(QStringLiteral("扫描完成，锁定 %1 个目标").arg(count));
+    const bool foundTarget = count > 0;
+    scanner->setStatus(foundTarget
+                           ? QStringLiteral("超视距扫描完成，锁定 %1 个目标").arg(count)
+                           : QStringLiteral("超视距扫描完成，扫描范围内未发现敌方目标"));
     appendTimeline(QStringLiteral("ability"), QStringLiteral("侦察扫描"),
                    QJsonObject{{QStringLiteral("unitId"), scanner->id()},
                                {QStringLiteral("contactCount"), count},
                                {QStringLiteral("expiresAt"), simTime() + 18.0}});
+    emit eventPosted(QStringLiteral("超视距扫描"),
+                     foundTarget
+                         ? QStringLiteral("%1 锁定 %2 个敌方目标").arg(scanner->id()).arg(count)
+                         : QStringLiteral("%1 扫描范围内未发现敌方目标").arg(scanner->id()),
+                     foundTarget ? QStringLiteral("success") : QStringLiteral("warn"),
+                     scanner->id());
     emit scanContactsChanged();
 }
 
@@ -2333,10 +2352,15 @@ bool SimulationEngine::restoreGlobalCheckpointState(const QJsonObject& state,
             && std::isfinite(profile.damageMin) && std::isfinite(profile.damageMax)
             && std::isfinite(profile.rangeFalloff) && profile.damageMin >= 0.0
             && profile.damageMax >= profile.damageMin;
+        // Schema-4 checkpoints written before the speed rebalance may still
+        // contain 420 m/s projectiles. They remain valid and continue at the
+        // serialized speed after restore; newly launched projectiles use the
+        // current 500 m/s profile.
         const bool validKinematics = schema == 3
             ? std::abs(projectile.speed - 360.0) <= 1e-9
                 && std::abs(projectile.lifetime - 18.0) <= 1e-9
-            : std::abs(projectile.speed - kProjectileSpeedMps) <= 1e-9
+            : (std::abs(projectile.speed - kProjectileSpeedMps) <= 1e-9
+                || std::abs(projectile.speed - 420.0) <= 1e-9)
                 && std::abs(projectile.lifetime - kProjectileLifetimeSec) <= 1e-9;
         if (!validPosition || !std::isfinite(projectile.headingRad)
             || !validKinematics
@@ -2457,6 +2481,9 @@ QVariantList SimulationEngine::unitsForView() const {
         m["detectRange"] = u->detectRange();
         m["attackRange"] = u->attackRange();
         m["commRange"] = u->commRange();
+        m["speed"] = u->speed();
+        m["baseSpeed"] = u->baseSpeed();
+        m["maxCommandedSpeed"] = u->maxCommandedSpeed();
         m["fuelRemaining"] = u->fuelRemaining();
         m["fuelCapacity"] = u->fuelCapacity();
         m["fuelBurnRate"] = u->fuelBurnRate();

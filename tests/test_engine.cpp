@@ -259,6 +259,7 @@ TEST_F(EngineTest, UpdatingKindOrSideRecreatesRuntimeUnit) {
     ScenarioUnit changed = *scenarioIt;
     changed.kind = "groundscout";
     changed.side = "blue";
+    changed.speed = UnitBase::defaultSpeedMps(UnitKind::GroundScout);
 
     engine.addOrUpdateUnit(changed);
 
@@ -863,21 +864,21 @@ TEST(ProjectileDomainTest, MovesAtConstantSpeedAndObeysTurnRadius) {
     ASSERT_EQ(projectiles.size(), 1);
     QJsonObject first = projectiles.first().toObject();
     EXPECT_TRUE(first.value(QStringLiteral("active")).toBool());
-    EXPECT_DOUBLE_EQ(first.value(QStringLiteral("speed")).toDouble(), 420.0);
+    EXPECT_DOUBLE_EQ(first.value(QStringLiteral("speed")).toDouble(), 500.0);
     EXPECT_NEAR(first.value(QStringLiteral("position")).toArray().at(0).toDouble(),
-                5042.0, 1e-6);
+                5050.0, 1e-6);
 
     engine.unit(QStringLiteral("blue_r1"))->setPosition(GeoPos{6500.0, 6000.0, 2000.0});
     engine.stepOnce(0.1);
     projectiles = engine.projectilesSnapshot();
     ASSERT_EQ(projectiles.size(), 1);
     const QJsonObject second = projectiles.first().toObject();
-    EXPECT_NEAR(second.value(QStringLiteral("headingRad")).toDouble(), 0.06, 1e-6);
+    EXPECT_NEAR(second.value(QStringLiteral("headingRad")).toDouble(), 0.0714285714285714, 1e-6);
     const QJsonArray p0 = first.value(QStringLiteral("position")).toArray();
     const QJsonArray p1 = second.value(QStringLiteral("position")).toArray();
     EXPECT_NEAR(std::hypot(p1.at(0).toDouble() - p0.at(0).toDouble(),
                            p1.at(1).toDouble() - p0.at(1).toDouble()),
-                42.0, 1e-6);
+                50.0, 1e-6);
 }
 
 TEST(ProjectileDomainTest, ExpiresWhenTargetCannotBeReachedWithinLifetime) {

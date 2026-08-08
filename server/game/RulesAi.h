@@ -72,6 +72,7 @@ struct AiSeatState {
     double speed = 0.0;
     double commandedSpeed = 0.0;
     double cruiseSpeed = 0.0;
+    double maxCommandedSpeed = 0.0;
     bool targetVisible = false;
     bool alive = true;
     bool movable = true;

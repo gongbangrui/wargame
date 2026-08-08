@@ -1015,14 +1015,14 @@ TEST(GameServerCommandTest, SharedUnitSpeedLimitIsEnforcedByAuthority) {
     QString reason;
     EXPECT_TRUE(server.validateCommandOwnership(
         session, QStringLiteral("setSpeed"),
-        QVariantMap{{QStringLiteral("unitId"), unitId}, {QStringLiteral("speed"), 240.0}},
+        QVariantMap{{QStringLiteral("unitId"), unitId}, {QStringLiteral("speed"), 360.0}},
         &code, &reason));
     EXPECT_FALSE(server.validateCommandOwnership(
         session, QStringLiteral("setSpeed"),
-        QVariantMap{{QStringLiteral("unitId"), unitId}, {QStringLiteral("speed"), 241.0}},
+        QVariantMap{{QStringLiteral("unitId"), unitId}, {QStringLiteral("speed"), 361.0}},
         &code, &reason));
     EXPECT_EQ(code, QStringLiteral("INVALID_ARGUMENT"));
-    EXPECT_EQ(reason, QStringLiteral("速度必须大于 0 且不超过 240"));
+    EXPECT_EQ(reason, QStringLiteral("速度必须大于 0 且不超过 360"));
 }
 
 TEST(GameServerCommandTest, AbilityAndServiceAuthorizationMatchesRuntimeState) {
@@ -3420,6 +3420,23 @@ TEST(GameServerAiExecutionTest, AttackBudgetKeepsGeneratedMovementInAuthoritativ
     const GeoPos blueAttackPosition = blueAttack->pos();
     const GeoPos redCommandPostPosition = redCommandPost->pos();
     const GeoPos redAttackPosition = redAttack->pos();
+
+    server.m_aiContactMemory.clear();
+    AiObservedTarget commandPostContact;
+    commandPostContact.targetId = redCommandPostId;
+    commandPostContact.targetKind = QStringLiteral("commandpost");
+    commandPostContact.x = redCommandPostPosition.x;
+    commandPostContact.y = redCommandPostPosition.y;
+    commandPostContact.confidence = 1.0;
+    commandPostContact.lastSeenAt = server.m_engine.simTime();
+    commandPostContact.visible = true;
+    commandPostContact.commandPost = true;
+    server.m_aiContactMemory.insert(redCommandPostId, commandPostContact);
+    const AiKnowledgeState commandPostOnlyKnowledge = server.buildAiKnowledge(
+        {}, server.m_engine.simTime(), RulesAi::parameters(QStringLiteral("easy")));
+    EXPECT_FALSE(commandPostOnlyKnowledge.commandPostThreat);
+    server.m_aiContactMemory.clear();
+
     blueAttack->setPosition(GeoPos{1000.0, 1000.0, 20.0});
     redAttack->setPosition(GeoPos{1050.0, 1000.0, 20.0});
     redCommandPost->setPosition(GeoPos{1400.0, 1000.0, 0.0});
@@ -3431,8 +3448,8 @@ TEST(GameServerAiExecutionTest, AttackBudgetKeepsGeneratedMovementInAuthoritativ
         });
     ASSERT_NE(prioritizedAttack, prioritizedStates.cend());
     EXPECT_TRUE(prioritizedAttack->targetVisible);
-    EXPECT_EQ(prioritizedAttack->targetId, redCommandPostId);
-    EXPECT_EQ(prioritizedAttack->targetKind, QStringLiteral("commandpost"));
+    EXPECT_EQ(prioritizedAttack->targetId, redAttackId);
+    EXPECT_EQ(prioritizedAttack->targetKind, QStringLiteral("attackuav"));
     blueAttack->setPosition(blueAttackPosition);
     redCommandPost->setPosition(redCommandPostPosition);
     redAttack->setPosition(redAttackPosition);

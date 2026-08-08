@@ -426,6 +426,7 @@ TEST(StateProjectorTest, ObserverSnapshotWhitelistsBilateralRuntimeState) {
         QStringLiteral("side"), QStringLiteral("movable"), QStringLiteral("position"),
         QStringLiteral("detectRange"), QStringLiteral("attackRange"),
         QStringLiteral("commRange"), QStringLiteral("speed"), QStringLiteral("baseSpeed"),
+        QStringLiteral("maxCommandedSpeed"),
         QStringLiteral("maxHp"), QStringLiteral("attackPower"), QStringLiteral("armor"),
         QStringLiteral("hp"), QStringLiteral("alive"), QStringLiteral("subsystems"),
         QStringLiteral("serviceRequested"), QStringLiteral("serviceProgress"),

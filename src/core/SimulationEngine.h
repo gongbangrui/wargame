@@ -37,7 +37,7 @@ struct ProjectileState {
     GeoPos position;
     GeoPos previousPosition;
     double headingRad = 0.0;
-    double speed = 420.0;
+    double speed = 500.0;
     double age = 0.0;
     double lifetime = 16.0;
     double launchTime = 0.0;
@@ -73,13 +73,13 @@ class SimulationEngine : public QObject {
     Q_PROPERTY(QVariantList timeline READ timelineForView NOTIFY timelineChanged)
     Q_PROPERTY(QVariantList projectiles READ projectilesForView NOTIFY projectilesChanged)
 public:
-    static constexpr double kMaximumCommandedUnitSpeedMps = 240.0;
-    static constexpr double kProjectileSpeedMps = 420.0;
+    static constexpr double kMaximumCommandedUnitSpeedMps = 360.0;
+    static constexpr double kProjectileSpeedMps = 500.0;
     static constexpr double kProjectileTurnRadiusMeters = 700.0;
     static constexpr double kProjectileLifetimeSec = 16.0;
     static constexpr double kProjectileCollisionRadiusMeters = 60.0;
     static constexpr double kProjectileThreatRadiusMeters = 1300.0;
-    static constexpr double kServiceRadiusMeters = 500.0;
+    static constexpr double kServiceRadiusMeters = 750.0;
     static constexpr qsizetype kMaximumProjectiles = 512;
 
     explicit SimulationEngine(QObject* parent = nullptr);
