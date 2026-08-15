@@ -44,6 +44,8 @@ public:
     /// @brief Tile zoom level for current map view.
     int tileZoomForView() const { return m_tileZoom; }
     void setTileZoom(int z) { m_tileZoom = z; }
+    int minTileZoom() const { return m_minTileZoom; }
+    int maxTileZoom() const { return m_maxTileZoom; }
     int metadataRevision() const { return m_metadataRevision; }
 
     QJsonObject describe() const;
@@ -56,6 +58,8 @@ private:
     GeoPos m_center;
     GeoCoord m_origin;
     int m_tileZoom = 12;
+    int m_minTileZoom = 12;
+    int m_maxTileZoom = 12;
     int m_metadataRevision = 0;
     QPointF m_mercatorOrigin;
 };

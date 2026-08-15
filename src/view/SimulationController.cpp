@@ -265,9 +265,19 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
             });
     connect(&m_networkClient, &NetworkClient::intelHistoryPageReceived, this,
             [this](const QJsonObject& page) {
+                // A room/seat reset invalidates any page that was still in flight.
+                // The wire payload intentionally has no client request id, so the
+                // controller accepts pages only while its single history request is live.
+                if (m_onlineIntelHistoryRequestId.isEmpty()) return;
                 Protocol::IntelHistoryPage projected;
                 const Protocol::ValidationResult validation = Protocol::fromJson(page, &projected);
                 if (!validation.valid) {
+                    m_onlineIntelHistoryRequestId.clear();
+                    m_onlineIntelHistoryAppendPending = false;
+                    m_onlineIntelHistory.clear();
+                    m_onlineIntelHistoryHasMore = false;
+                    m_onlineIntelHistoryCursor.clear();
+                    emit onlineIntelHistoryChanged();
                     m_remoteLastError = validation.message;
                     emit errorForward(validation.message);
                     return;
@@ -428,6 +438,21 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 m_lastCommandStatus = status;
                 m_lastCommandMessage = message;
                 emit commandStatusChanged();
+                if (action == QLatin1String("requestIntelHistory")
+                    && commandId == m_onlineIntelHistoryRequestId
+                    && (status == QLatin1String("accepted")
+                        || status == QLatin1String("rejected")
+                        || status == QLatin1String("unknown")
+                        || status == QLatin1String("canceled"))) {
+                    m_onlineIntelHistoryRequestId.clear();
+                    m_onlineIntelHistoryAppendPending = false;
+                    if (status != QLatin1String("accepted")) {
+                        m_onlineIntelHistory.clear();
+                        m_onlineIntelHistoryHasMore = false;
+                        m_onlineIntelHistoryCursor.clear();
+                    }
+                    emit onlineIntelHistoryChanged();
+                }
                 if (action == QLatin1String("shareIntel")
                     || action == QLatin1String("createIntelReport")
                     || action == QLatin1String("requestIntelHistory")) {
@@ -1454,10 +1479,7 @@ void SimulationController::useLocalMode() {
     m_onlineIntelRecords.clear();
     m_onlineIntelRevision = 0;
     m_onlineIntelShareTargets.clear();
-    m_onlineIntelHistory.clear();
-    m_onlineIntelHistoryHasMore = false;
-    m_onlineIntelHistoryCursor.clear();
-    m_onlineIntelHistoryAppendPending = false;
+    resetOnlineIntelHistory();
     const bool hadObserverTrajectories = !m_observerTrajectories.isEmpty();
     m_observerTrajectories = {};
     m_pendingSeatTransfers.clear();
@@ -1669,12 +1691,30 @@ QString SimulationController::createOnlineIntelReport(const QVariantMap& positio
 }
 
 QString SimulationController::requestOnlineIntelHistory(const QVariantMap& query) {
-    if (isNetworked() && !m_isObserver) {
+    if (isNetworked() && !m_isObserver && m_onlineIntelHistoryRequestId.isEmpty()) {
         m_onlineIntelHistoryAppendPending = !query.value(QStringLiteral("cursor"))
                                                  .toString().trimmed().isEmpty();
-        return m_networkClient.requestIntelHistory(query);
+        const QString requestId = m_networkClient.requestIntelHistory(query);
+        if (!requestId.isEmpty()) {
+            m_onlineIntelHistoryRequestId = requestId;
+            emit onlineIntelHistoryChanged();
+        } else {
+            m_onlineIntelHistoryAppendPending = false;
+        }
+        return requestId;
     }
     return {};
+}
+
+void SimulationController::resetOnlineIntelHistory() {
+    m_networkClient.cancelIntelHistoryRequests();
+    m_onlineIntelHistoryRequestId.clear();
+    m_onlineIntelHistoryAppendPending = false;
+    m_onlineIntelHistory.clear();
+    m_onlineIntelHistoryHasMore = false;
+    m_onlineIntelHistoryCursor.clear();
+    emit onlineIntelHistoryChanged();
+    emit onlineIntelHistoryReset();
 }
 
 void SimulationController::markOnlineMap(const QVariantMap& position, const QString& label,
@@ -1740,6 +1780,10 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_communicationState = QStringLiteral("disconnected");
     m_onlineSeats.clear();
     m_onlineMapMarks.clear();
+    m_onlineIntelRecords.clear();
+    m_onlineIntelRevision = 0;
+    m_onlineIntelShareTargets.clear();
+    resetOnlineIntelHistory();
     const bool hadObserverTrajectories = !m_observerTrajectories.isEmpty();
     m_observerTrajectories = {};
     m_pendingSeatTransfers.clear();
@@ -1775,7 +1819,6 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     emit onlineStateChanged();
     emit mapInfoForward();
     emit onlineIntelChanged();
-    emit onlineIntelHistoryChanged();
 }
 
 QJsonObject SimulationController::scenarioUnitJson(const ScenarioUnit& unit) const {

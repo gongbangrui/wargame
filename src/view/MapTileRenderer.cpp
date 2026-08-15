@@ -37,7 +37,29 @@ void MapTileRenderer::setCenterY(double v) { if (std::isfinite(v) && m_centerY !
 void MapTileRenderer::setZoom(double v) {
     if (!std::isfinite(v)) v = 1.0;
     v = std::max(0.001, v);
-    if (m_zoom != v) { m_zoom = v; update(); emit centerChanged(); }
+    if (m_zoom != v) { m_zoom = v; update(); emit zoomChanged(); }
+}
+void MapTileRenderer::setMinTileZoom(int v) {
+    v = std::clamp(v, Mercator::kMinZoom, Mercator::kMaxZoom);
+    if (m_minTileZoom == v) return;
+    m_minTileZoom = v;
+    if (m_maxTileZoom < m_minTileZoom) m_maxTileZoom = m_minTileZoom;
+    const bool tileValueChanged = m_tileZoom < m_minTileZoom;
+    if (m_tileZoom < m_minTileZoom) m_tileZoom = m_minTileZoom;
+    update();
+    emit tileZoomRangeChanged();
+    if (tileValueChanged) emit tileZoomChanged();
+}
+void MapTileRenderer::setMaxTileZoom(int v) {
+    v = std::clamp(v, Mercator::kMinZoom, Mercator::kMaxZoom);
+    if (v < m_minTileZoom) v = m_minTileZoom;
+    if (m_maxTileZoom == v) return;
+    m_maxTileZoom = v;
+    const bool tileValueChanged = m_tileZoom > m_maxTileZoom;
+    if (m_tileZoom > m_maxTileZoom) m_tileZoom = m_maxTileZoom;
+    update();
+    emit tileZoomRangeChanged();
+    if (tileValueChanged) emit tileZoomChanged();
 }
 void MapTileRenderer::setOriginLon(double v) { m_originLon = v; updateOrigin(); }
 void MapTileRenderer::setOriginLat(double v) { m_originLat = v; updateOrigin(); }
@@ -55,7 +77,14 @@ void MapTileRenderer::setLogicalHeightMeters(double v) {
         emit logicalExtentChanged();
     }
 }
-void MapTileRenderer::setTileZoom(int v) { v = std::clamp(v, Mercator::kMinZoom, Mercator::kMaxZoom); if (m_tileZoom != v) { m_tileZoom = v; update(); emit tileZoomChanged(); } }
+void MapTileRenderer::setTileZoom(int v) {
+    v = std::clamp(v, m_minTileZoom, m_maxTileZoom);
+    if (m_tileZoom != v) {
+        m_tileZoom = v;
+        update();
+        emit tileZoomChanged();
+    }
+}
 QString MapTileRenderer::tileCacheDir() const {
     QMutexLocker lock(&m_tileCacheMutex);
     return m_cacheDir;
@@ -186,8 +215,29 @@ int MapTileRenderer::renderTiles(QPainter* painter, int zoom) {
                 continue;
 
             bool found = false;
-            QImage tile = loadTile(zoom, tx, ty, found);
-            painter->drawImage(targetRect, tile);
+            QImage tile = m_placeholder;
+            QRectF sourceRect;
+            for (int sourceZoom = zoom; sourceZoom >= m_minTileZoom; --sourceZoom) {
+                const int factor = 1 << (zoom - sourceZoom);
+                const int sourceX = tx / factor;
+                const int sourceY = ty / factor;
+                tile = loadTile(sourceZoom, sourceX, sourceY, found);
+                if (!found) continue;
+
+                if (sourceZoom == zoom) {
+                    sourceRect = QRectF(0, 0, tile.width(), tile.height());
+                } else {
+                    const int childX = tx % factor;
+                    const int childY = ty % factor;
+                    const double sourceWidth = tile.width() / static_cast<double>(factor);
+                    const double sourceHeight = tile.height() / static_cast<double>(factor);
+                    sourceRect = QRectF(childX * sourceWidth, childY * sourceHeight,
+                                        sourceWidth, sourceHeight);
+                }
+                break;
+            }
+            if (sourceRect.isEmpty()) sourceRect = QRectF(0, 0, tile.width(), tile.height());
+            painter->drawImage(targetRect, tile, sourceRect);
             if (found) realTilesFound++;
             drawn++;
         }
@@ -201,14 +251,7 @@ void MapTileRenderer::paint(QPainter* painter) {
 
     if (tileCacheDir().isEmpty()) return;
 
-    int realTiles = renderTiles(painter, m_tileZoom);
-
-    // Fallback: if no tiles found at current zoom, retry with zoom 12
-    // (the only zoom level with guaranteed correct tile data on disk)
-    if (realTiles == 0 && m_tileZoom != 12) {
-        painter->fillRect(QRect(0, 0, (int)width(), (int)height()), QColor(8, 11, 20));
-        renderTiles(painter, 12);
-    }
+    renderTiles(painter, m_tileZoom);
 }
 
 } // namespace gbr

@@ -51,7 +51,7 @@ Item {
     // tactical view changes.  Keeping the state here also preserves the tab
     // when the panel is moved into the narrow-screen drawer.
     property int tacticalViewIndex: 0
-    property bool compactLayout: width < 760
+    property bool compactLayout: width < 840
     onCompactLayoutChanged: if (!compactLayout) tacticalDrawer.close()
     property color page: AppContext.page
     property color ink: AppContext.text
@@ -1425,13 +1425,13 @@ Item {
                     Item {
                         id: tacticalPanelHost
                         visible: !root.compactLayout
-                        Layout.fillWidth: !root.compactLayout
+                        Layout.fillWidth: false
                         Layout.fillHeight: !root.compactLayout
                         Layout.minimumWidth: root.compactLayout ? 0 : 332
                         Layout.minimumHeight: root.compactLayout ? 0 : 300
                         Layout.preferredWidth: root.compactLayout ? 0 : 356
                         Layout.preferredHeight: root.compactLayout ? 0 : -1
-                        Layout.maximumWidth: root.compactLayout ? 0 : -1
+                        Layout.maximumWidth: root.compactLayout ? 0 : 356
                         Layout.maximumHeight: root.compactLayout ? 0 : -1
                         Rectangle {
                             id: tacticalPanel

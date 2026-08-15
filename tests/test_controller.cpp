@@ -101,6 +101,23 @@ public:
         controller.m_onlineIntelRecords = records;
     }
 
+    static void seedPendingIntelHistory(SimulationController& controller,
+                                        const QVariantList& history) {
+        controller.m_sessionMode = QStringLiteral("online");
+        controller.m_onlineIntelHistory = history;
+        controller.m_onlineIntelHistoryRequestId = QStringLiteral("history-request");
+        controller.m_onlineIntelHistoryAppendPending = false;
+        controller.m_networkClient.m_pendingIntelRequests.insert(
+            QStringLiteral("history-request"),
+            NetworkClient::PendingIntelRequest{QStringLiteral("requestIntelHistory"),
+                                               QStringLiteral("requestIntelHistory"), {}});
+    }
+
+    static void receiveIntelHistoryPage(SimulationController& controller,
+                                        const QJsonObject& page) {
+        emit controller.m_networkClient.intelHistoryPageReceived(page);
+    }
+
     static void seedPendingObserverJoin(SimulationController& controller) {
         controller.m_sessionMode = QStringLiteral("online");
         controller.m_isObserver = true;
@@ -161,6 +178,14 @@ public:
 
     static bool networkTestWaitingForResync(NetworkClient& client) {
         return client.m_stateStore.waitingForResync();
+    }
+
+    static int networkTestPendingIntelRequests(NetworkClient& client) {
+        return client.m_pendingIntelRequests.size();
+    }
+
+    static int controllerPendingIntelRequests(SimulationController& controller) {
+        return networkTestPendingIntelRequests(controller.m_networkClient);
     }
 };
 
@@ -483,6 +508,44 @@ TEST(NetworkClientTest, QueuesCommandDuringResyncAndSendsAfterRecoverySnapshot) 
     server.close();
 }
 
+TEST(NetworkClientTest, RejectsInvalidIntelHistoryBeforeQueueingRequest) {
+    int argc = 1;
+    char applicationName[] = "network_intel_validation_test";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) application = std::make_unique<QCoreApplication>(argc, argv);
+
+    QWebSocketServer server(QStringLiteral("network intel validation test"),
+                            QWebSocketServer::NonSecureMode);
+    ASSERT_TRUE(server.listen(QHostAddress::LocalHost));
+    QWebSocket* serverSocket = nullptr;
+    QObject::connect(&server, &QWebSocketServer::newConnection, &server, [&]() {
+        serverSocket = server.nextPendingConnection();
+    });
+
+    NetworkClient client;
+    SimulationControllerTestPeer::openNetworkTestSocket(client, server.serverUrl());
+    ASSERT_TRUE(waitFor([&]() {
+        return serverSocket != nullptr
+            && SimulationControllerTestPeer::networkTestSocketConnected(client);
+    }));
+    SimulationControllerTestPeer::markNetworkTestAuthenticated(client);
+
+    QString rejection;
+    QObject::connect(&client, &NetworkClient::commandRejected, &client,
+                     [&rejection](const QString& message) { rejection = message; });
+    const QString requestId = client.requestIntelHistory(
+        QVariantMap{{QStringLiteral("from"), QStringLiteral("not-a-timestamp")}});
+
+    EXPECT_TRUE(requestId.isEmpty());
+    EXPECT_EQ(rejection, QStringLiteral("情报历史查询结构无效"));
+    EXPECT_EQ(SimulationControllerTestPeer::networkTestPendingIntelRequests(client), 0);
+
+    client.close();
+    serverSocket->close();
+    server.close();
+}
+
 TEST(SimulationControllerTest, EmptyAuthoritativeSnapshotClearsLocalUnits) {
     SimulationController controller;
     ASSERT_FALSE(controller.engine()->unitIds().isEmpty());
@@ -691,6 +754,36 @@ TEST(SimulationControllerTest, OnlineAttackTargetsRequireServerActionableSensorI
     ASSERT_EQ(targets.size(), 1);
     EXPECT_EQ(targets.constFirst().toMap().value(QStringLiteral("id")).toString(),
               blueIds.constFirst());
+}
+
+TEST(SimulationControllerTest, ResetIntelHistoryRejectsLatePageFromPreviousSession) {
+    SimulationController controller;
+    SimulationControllerTestPeer::seedPendingIntelHistory(
+        controller, QVariantList{QVariantMap{
+            {QStringLiteral("historyId"), QStringLiteral("old-entry")}}});
+
+    Protocol::IntelHistoryEntry entry;
+    entry.historyId = QStringLiteral("late-entry");
+    entry.intelId = QStringLiteral("intel-1");
+    entry.eventType = QStringLiteral("discovered");
+    entry.occurredAt = QStringLiteral("2026-08-15T00:00:00Z");
+    entry.sourceSeatId = QStringLiteral("red_recon");
+    entry.note = QString();
+    entry.confidence = 50.0;
+    Protocol::IntelHistoryPage page;
+    page.entries.append(entry);
+    page.revision = 4;
+
+    controller.resetOnlineIntelHistory();
+    EXPECT_FALSE(controller.onlineIntelHistoryPending());
+    EXPECT_TRUE(controller.onlineIntelHistory().isEmpty());
+    EXPECT_EQ(SimulationControllerTestPeer::controllerPendingIntelRequests(controller), 0);
+
+    SimulationControllerTestPeer::receiveIntelHistoryPage(controller, page.toJson());
+
+    EXPECT_TRUE(controller.onlineIntelHistory().isEmpty());
+    EXPECT_FALSE(controller.onlineIntelHistoryHasMore());
+    EXPECT_TRUE(controller.onlineIntelHistoryCursor().isEmpty());
 }
 
 TEST(SimulationControllerTest, UnseatedRunningSnapshotStaysInRoomSelectionAndHidesRuntime) {

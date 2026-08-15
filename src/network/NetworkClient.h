@@ -49,6 +49,7 @@ public:
     QString createIntelReport(const QVariantMap& position, const QString& type,
                               const QString& title, const QString& note);
     QString requestIntelHistory(const QVariantMap& query = {});
+    void cancelIntelHistoryRequests();
     void sendMapMark(const QVariantMap& position, const QString& label,
                      const QStringList& recipientSeatIds = {});
     void setObserverTrajectories(const QStringList& unitIds);

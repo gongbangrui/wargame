@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Qt simulation's z12 XYZ tile cache from an original master image."""
+"""Build the Qt simulation's offline XYZ tile pyramid from the canonical master image."""
 
 from __future__ import annotations
 
@@ -8,14 +8,16 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import shutil
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 
 TILE_SIZE = 256
-ZOOM = 12
-X_MIN, X_MAX = 3404, 3409
-Y_MIN, Y_MAX = 1745, 1750
+MIN_ZOOM = 12
+MAX_ZOOM = 14
+BASE_X_MIN, BASE_X_MAX = 3404, 3409
+BASE_Y_MIN, BASE_Y_MAX = 1745, 1750
 PROJECT_ORIGIN_LAT = 25.40
 PROJECT_ORIGIN_LON = 119.30
 DEFAULT_WIDTH_METERS = 20_000
@@ -50,7 +52,7 @@ def tile_set_sha256(root: Path, tiles: list[Path]) -> str:
     return digest.hexdigest()
 
 
-def prepare_master(source: Path) -> Image.Image:
+def prepare_master(source: Path, target_side: int) -> Image.Image:
     with Image.open(source) as image:
         image.load()
         rgb = ImageOps.exif_transpose(image).convert("RGB")
@@ -60,19 +62,29 @@ def prepare_master(source: Path) -> Image.Image:
     top = (rgb.height - side) // 2
     rgb = rgb.crop((left, top, left + side, top + side))
 
-    target_side = (X_MAX - X_MIN + 1) * TILE_SIZE
     rgb = rgb.resize((target_side, target_side), Image.Resampling.LANCZOS)
     rgb = ImageEnhance.Contrast(rgb).enhance(1.04)
     rgb = ImageEnhance.Color(rgb).enhance(0.94)
     return rgb.filter(ImageFilter.UnsharpMask(radius=0.8, percent=45, threshold=3))
 
 
-def write_tile_set(master: Image.Image, root: Path) -> list[Path]:
+def level_range(zoom: int) -> tuple[int, int, int, int]:
+    factor = 1 << (zoom - MIN_ZOOM)
+    return (
+        BASE_X_MIN * factor,
+        (BASE_X_MAX + 1) * factor - 1,
+        BASE_Y_MIN * factor,
+        (BASE_Y_MAX + 1) * factor - 1,
+    )
+
+
+def write_tile_set(master: Image.Image, root: Path, zoom: int) -> list[Path]:
     written: list[Path] = []
-    for column, tile_x in enumerate(range(X_MIN, X_MAX + 1)):
-        tile_dir = root / str(ZOOM) / str(tile_x)
+    x_min, x_max, y_min, y_max = level_range(zoom)
+    for column, tile_x in enumerate(range(x_min, x_max + 1)):
+        tile_dir = root / str(zoom) / str(tile_x)
         tile_dir.mkdir(parents=True, exist_ok=True)
-        for row, tile_y in enumerate(range(Y_MIN, Y_MAX + 1)):
+        for row, tile_y in enumerate(range(y_min, y_max + 1)):
             box = (
                 column * TILE_SIZE,
                 row * TILE_SIZE,
@@ -86,15 +98,27 @@ def write_tile_set(master: Image.Image, root: Path) -> list[Path]:
 
 
 def write_metadata(root: Path, source: Path, tiles: list[Path]) -> None:
-    west = tile_to_lon(X_MIN, ZOOM)
-    east = tile_to_lon(X_MAX + 1, ZOOM)
-    north = tile_to_lat(Y_MIN, ZOOM)
-    south = tile_to_lat(Y_MAX + 1, ZOOM)
+    base_x_min, base_x_max, base_y_min, base_y_max = level_range(MIN_ZOOM)
+    west = tile_to_lon(base_x_min, MIN_ZOOM)
+    east = tile_to_lon(base_x_max + 1, MIN_ZOOM)
+    north = tile_to_lat(base_y_min, MIN_ZOOM)
+    south = tile_to_lat(base_y_max + 1, MIN_ZOOM)
     center_lon = (west + east) / 2.0
     center_lat = (south + north) / 2.0
+    tile_ranges = {}
+    for zoom in range(MIN_ZOOM, MAX_ZOOM + 1):
+        x_min, x_max, y_min, y_max = level_range(zoom)
+        tile_ranges[str(zoom)] = {
+            "xMin": x_min,
+            "xMax": x_max,
+            "yMin": y_min,
+            "yMax": y_max,
+            "count": (x_max - x_min + 1) * (y_max - y_min + 1),
+        }
 
     metadata = {
         "schemaVersion": 1,
+        "revision": 1,
         "mapId": "coastal-mountain-theater-v1",
         "name": "海岸山地联合作战区",
         "description": "为兵棋推演 Qt 项目原创生成的虚构卫星地图",
@@ -108,15 +132,16 @@ def write_metadata(root: Path, source: Path, tiles: list[Path]) -> None:
         "scheme": "xyz",
         "tileSize": TILE_SIZE,
         "format": "png",
-        "minZoom": ZOOM,
-        "maxZoom": ZOOM,
+        "minZoom": MIN_ZOOM,
+        "maxZoom": MAX_ZOOM,
         "tileRange": {
-            "xMin": X_MIN,
-            "xMax": X_MAX,
-            "yMin": Y_MIN,
-            "yMax": Y_MAX,
-            "count": len(tiles),
+            "xMin": base_x_min,
+            "xMax": base_x_max,
+            "yMin": base_y_min,
+            "yMax": base_y_max,
+            "count": tile_ranges[str(MIN_ZOOM)]["count"],
         },
+        "tileRanges": tile_ranges,
         "tileSetSha256": tile_set_sha256(root, tiles),
         "boundsWgs84": [west, south, east, north],
         "projectAlignment": {
@@ -152,10 +177,10 @@ def write_metadata(root: Path, source: Path, tiles: list[Path]) -> None:
         "description": metadata["description"],
         "scheme": "xyz",
         "format": "png",
-        "minzoom": ZOOM,
-        "maxzoom": ZOOM,
+        "minzoom": MIN_ZOOM,
+        "maxzoom": MAX_ZOOM,
         "bounds": [west, south, east, north],
-        "center": [center_lon, center_lat, ZOOM],
+        "center": [center_lon, center_lat, MIN_ZOOM],
         "tiles": ["./{z}/{x}/{y}.png"],
         "attribution": "原创虚构卫星地图",
     }
@@ -199,12 +224,34 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit("Master image must be stored inside the map directory") from exc
 
-    master = prepare_master(source)
-    tiles = write_tile_set(master, root)
-    write_preview(master, root)
+    for zoom in range(MIN_ZOOM, MAX_ZOOM + 1):
+        shutil.rmtree(root / str(zoom), ignore_errors=True)
+
+    base_side = (BASE_X_MAX - BASE_X_MIN + 1) * TILE_SIZE
+    max_x_min, max_x_max, _, _ = level_range(MAX_ZOOM)
+    max_side = (max_x_max - max_x_min + 1) * TILE_SIZE
+    canonical_master = prepare_master(source, base_side)
+    # Keep z12 as the geographic authority. Higher levels are deterministic
+    # derivatives until an alignment-checked high-resolution master is supplied.
+    detail_master = canonical_master.resize((max_side, max_side), Image.Resampling.LANCZOS)
+    detail_master = detail_master.filter(
+        ImageFilter.UnsharpMask(radius=1.1, percent=55, threshold=3)
+    )
+
+    tiles: list[Path] = []
+    for zoom in range(MIN_ZOOM, MAX_ZOOM + 1):
+        if zoom == MIN_ZOOM:
+            level_master = canonical_master
+        else:
+            x_min, x_max, _, _ = level_range(zoom)
+            side = (x_max - x_min + 1) * TILE_SIZE
+            level_master = detail_master.resize((side, side), Image.Resampling.LANCZOS)
+        tiles.extend(write_tile_set(level_master, root, zoom))
+
+    write_preview(canonical_master, root)
     write_metadata(root, source, tiles)
     write_checksums(root, source, tiles)
-    print(f"Built {len(tiles)} tiles at z{ZOOM}: x={X_MIN}..{X_MAX}, y={Y_MIN}..{Y_MAX}")
+    print(f"Built {len(tiles)} tiles at z{MIN_ZOOM}..{MAX_ZOOM}")
 
 
 if __name__ == "__main__":

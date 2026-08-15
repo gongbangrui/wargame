@@ -56,6 +56,8 @@ class SimulationController : public QObject {
     Q_PROPERTY(QVariantList onlineIntelHistory READ onlineIntelHistory NOTIFY onlineIntelHistoryChanged)
     Q_PROPERTY(bool onlineIntelHistoryHasMore READ onlineIntelHistoryHasMore NOTIFY onlineIntelHistoryChanged)
     Q_PROPERTY(QString onlineIntelHistoryCursor READ onlineIntelHistoryCursor NOTIFY onlineIntelHistoryChanged)
+    Q_PROPERTY(bool onlineIntelHistoryPending READ onlineIntelHistoryPending
+               NOTIFY onlineIntelHistoryChanged)
     Q_PROPERTY(QJsonObject observerTrajectories READ observerTrajectories
                NOTIFY observerTrajectoriesChanged)
     Q_PROPERTY(QVariantList pendingSeatTransfers READ pendingSeatTransfers NOTIFY pendingSeatTransfersChanged)
@@ -133,6 +135,7 @@ public:
     QVariantList onlineIntelHistory() const { return m_onlineIntelHistory; }
     bool onlineIntelHistoryHasMore() const { return m_onlineIntelHistoryHasMore; }
     QString onlineIntelHistoryCursor() const { return m_onlineIntelHistoryCursor; }
+    bool onlineIntelHistoryPending() const { return !m_onlineIntelHistoryRequestId.isEmpty(); }
     QJsonObject observerTrajectories() const { return m_observerTrajectories; }
     QVariantList pendingSeatTransfers() const { return m_pendingSeatTransfers; }
     QString currentRoomId() const { return m_currentRoomId; }
@@ -210,6 +213,7 @@ public:
                                                 const QString& title = QString(),
                                                 const QString& note = QString());
     Q_INVOKABLE QString requestOnlineIntelHistory(const QVariantMap& query = {});
+    Q_INVOKABLE void resetOnlineIntelHistory();
     Q_INVOKABLE void markOnlineMap(const QVariantMap& position, const QString& label = QString(),
                                    const QStringList& recipientSeatIds = {});
     Q_INVOKABLE void setObserverTrajectories(const QStringList& unitIds);
@@ -276,6 +280,7 @@ signals:
     void onlineMapMarksChanged();
     void onlineIntelChanged();
     void onlineIntelHistoryChanged();
+    void onlineIntelHistoryReset();
     void observerTrajectoriesChanged();
     void pendingSeatTransfersChanged();
     void onlineStateChanged();
@@ -374,6 +379,7 @@ private:
     bool m_onlineIntelHistoryHasMore = false;
     QString m_onlineIntelHistoryCursor;
     bool m_onlineIntelHistoryAppendPending = false;
+    QString m_onlineIntelHistoryRequestId;
     QJsonObject m_observerTrajectories;
     QVariantList m_pendingSeatTransfers;
     QString m_currentRoomId;

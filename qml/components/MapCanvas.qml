@@ -98,6 +98,9 @@ Item {
     property var mapSize: ({w: 20000, h: 15000})
     property double mapOriginLon: 119.30
     property double mapOriginLat: 25.40
+    property int mapTileMinZoom: 12
+    property int mapTileMaxZoom: 12
+    property double mapTilePixelsPerMeterAtZoom0: 0.00000638801979818
     property int mapTileZoom: 12
     property int mapRevision: 0
     property var routes: []
@@ -116,6 +119,14 @@ Item {
     property double actionPulseX: -1
     property double actionPulseY: -1
     property color actionPulseColor: "#3bd6bd"
+
+    function updateMapTileZoom() {
+        var base = Number(root.mapTilePixelsPerMeterAtZoom0)
+        if (!isFinite(base) || base <= 0) return
+        var requested = Math.round(Math.log(Math.max(0.001, root.zoom) / base) / Math.LN2)
+        root.mapTileZoom = Math.max(root.mapTileMinZoom,
+            Math.min(root.mapTileMaxZoom, requested))
+    }
 
     // 公共刷新方法
     function refresh() { innerCanvas.requestPaint() }
@@ -199,16 +210,25 @@ Item {
         var lon = Number(info.originLon)
         var lat = Number(info.originLat)
         var z = Number(info.tileZoom)
+        var minZ = Number(info.tileMinZoom !== undefined ? info.tileMinZoom : z)
+        var maxZ = Number(info.tileMaxZoom !== undefined ? info.tileMaxZoom : z)
+        var baseResolution = info.tilePixelsPerMeterAtZoom0 !== undefined
+                ? Number(info.tilePixelsPerMeterAtZoom0)
+                : Number(root.mapTilePixelsPerMeterAtZoom0)
 
         if (!Number.isInteger(revision) || revision < 0
                 || !isFinite(w) || w <= 0 || !isFinite(h) || h <= 0
                 || !isFinite(lon) || lon < -180 || lon > 180
                 || !isFinite(lat) || lat < -85.05112878 || lat > 85.05112878
-                || !Number.isInteger(z) || z < 0 || z > 22) return
+                || !Number.isInteger(z) || z < 0 || z > 22
+                || !Number.isInteger(minZ) || minZ < 0 || minZ > 22 || z < minZ
+                || !Number.isInteger(maxZ) || maxZ < minZ || maxZ > 22
+                || !isFinite(baseResolution) || baseResolution <= 0) return
         var sameMetadata = revision === root.mapRevision
                 && root.mapSize.w === w && root.mapSize.h === h
                 && root.mapOriginLon === lon && root.mapOriginLat === lat
-                && root.mapTileZoom === z
+                && root.mapTileMinZoom === minZ && root.mapTileMaxZoom === maxZ
+                && root.mapTilePixelsPerMeterAtZoom0 === baseResolution
         if ((revision === 0 && root.mapRevision > 0)
                 || (revision > 0 && revision < root.mapRevision)
                 || sameMetadata) return
@@ -218,7 +238,10 @@ Item {
         if (recenter || mapSizeChanged) root.center = ({x: w / 2, y: h / 2})
         root.mapOriginLon = lon
         root.mapOriginLat = lat
-        root.mapTileZoom = z
+        root.mapTileMinZoom = minZ
+        root.mapTileMaxZoom = maxZ
+        root.mapTilePixelsPerMeterAtZoom0 = baseResolution
+        root.updateMapTileZoom()
         if (revision > 0) root.mapRevision = revision
         refresh()
     }
@@ -266,7 +289,10 @@ Item {
     onDiscoveryUnitsChanged: refresh()
     onDetectedEnemyIdsChanged: refresh()
     onSimTimeChanged: refresh()
-    onZoomChanged: refresh()
+    onZoomChanged: {
+        root.updateMapTileZoom()
+        refresh()
+    }
     onCenterChanged: refresh()
     onMapSizeChanged: refresh()
     onMapMarkersChanged: refresh()
@@ -416,6 +442,8 @@ Item {
         originLat: root.mapOriginLat
         logicalWidthMeters: root.mapSize.w
         logicalHeightMeters: root.mapSize.h
+        minTileZoom: root.mapTileMinZoom
+        maxTileZoom: root.mapTileMaxZoom
         tileZoom: root.mapTileZoom
     }
     // qmllint enable unqualified

@@ -126,6 +126,8 @@ bool MapProvider::applyMetadata(const QJsonObject& metadata, QString* error) {
     m_center = GeoPos{m_widthM * 0.5, m_heightM * 0.5, 0.0};
     m_origin = GeoCoord{latitude, longitude};
     m_mercatorOrigin = Mercator::latLonToMeters(latitude, longitude);
+    m_minTileZoom = minZoom;
+    m_maxTileZoom = maxZoom;
     m_tileZoom = maxZoom;
     m_metadataRevision = revision;
     m_name = metadata.value(QStringLiteral("name")).toString(m_name);
@@ -170,6 +172,9 @@ QJsonObject MapProvider::describe() const {
     o["originLat"] = m_origin.lat;
     o["originLon"] = m_origin.lon;
     o["tileZoom"] = m_tileZoom;
+    o["tileMinZoom"] = m_minTileZoom;
+    o["tileMaxZoom"] = m_maxTileZoom;
+    o["tilePixelsPerMeterAtZoom0"] = 1.0 / Mercator::kInitialRes;
     o["mapRevision"] = m_metadataRevision;
     return o;
 }

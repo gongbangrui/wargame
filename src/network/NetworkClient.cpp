@@ -867,6 +867,12 @@ QString NetworkClient::sendIntelRequest(const QString& type, const QString& acti
         emit commandRejected(QStringLiteral("待确认情报请求过多，请等待服务器响应"));
         return {};
     }
+    const Protocol::ValidationResult validation =
+        Protocol::validateClientPayloadForVersion(type, payload, m_schemaVersion);
+    if (!validation.valid) {
+        emit commandRejected(validation.message);
+        return {};
+    }
     const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_pendingIntelRequests.insert(requestId,
                                   PendingIntelRequest{type, action, payload});
@@ -898,6 +904,21 @@ QString NetworkClient::requestIntelHistory(const QVariantMap& query) {
     return sendIntelRequest(QStringLiteral("requestIntelHistory"),
                             QStringLiteral("requestIntelHistory"),
                             QJsonObject::fromVariantMap(query));
+}
+
+void NetworkClient::cancelIntelHistoryRequests() {
+    const QStringList requestIds = m_pendingIntelRequests.keys();
+    for (const QString& requestId : requestIds) {
+        if (!m_pendingIntelRequests.contains(requestId)
+            || m_pendingIntelRequests.value(requestId).type
+                   != QLatin1String("requestIntelHistory")) {
+            continue;
+        }
+        const PendingIntelRequest pending = m_pendingIntelRequests.take(requestId);
+        emit commandStatusChanged(requestId, pending.action, QStringLiteral("canceled"),
+                                  QStringLiteral("CLIENT_CANCELED"),
+                                  QStringLiteral("情报历史查询已取消"));
+    }
 }
 
 void NetworkClient::sendMapMark(const QVariantMap& position, const QString& label,

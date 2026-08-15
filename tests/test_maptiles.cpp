@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "core/Geo.h"
+#include "core/MapProvider.h"
 #include "core/SimulationEngine.h"
 #include "core/TileCacheLocator.h"
 #include "core/TileImageProvider.h"
@@ -12,6 +13,7 @@
 #include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPainter>
 #include <QTemporaryDir>
 
 using namespace gbr;
@@ -22,15 +24,16 @@ constexpr auto kTileId = "12/3406/1748";
 
 QJsonObject metadata(const int revision = 1, const double originLat = 25.4,
                      const double originLon = 119.3, const double width = 20000.0,
-                     const double height = 15000.0, const int zoom = 12) {
+                     const double height = 15000.0, const int minZoom = 12,
+                     const int maxZoom = 12) {
     return QJsonObject{
         {QStringLiteral("revision"), revision},
         {QStringLiteral("projection"), QStringLiteral("EPSG:3857")},
         {QStringLiteral("scheme"), QStringLiteral("xyz")},
         {QStringLiteral("format"), QStringLiteral("png")},
         {QStringLiteral("tileSize"), 256},
-        {QStringLiteral("minZoom"), zoom},
-        {QStringLiteral("maxZoom"), zoom},
+        {QStringLiteral("minZoom"), minZoom},
+        {QStringLiteral("maxZoom"), maxZoom},
         {QStringLiteral("projectAlignment"), QJsonObject{
             {QStringLiteral("originLat"), originLat},
             {QStringLiteral("originLon"), originLon},
@@ -224,7 +227,7 @@ TEST(MapTilesTest, SimulationEngineLoadsStagedRuntimeMetadata) {
     ASSERT_TRUE(temporary.isValid());
     ASSERT_TRUE(createMapRoot(temporary.path()));
     ASSERT_TRUE(writeFile(temporary.filePath(QStringLiteral("metadata.json")),
-                          QJsonDocument(metadata(73, 11.5, 22.5, 1234.0, 5678.0, 7))
+                          QJsonDocument(metadata(73, 11.5, 22.5, 1234.0, 5678.0, 7, 9))
                               .toJson(QJsonDocument::Compact)));
 
     ScopedMapDirectoryEnvironment environment(temporary.path());
@@ -236,7 +239,24 @@ TEST(MapTilesTest, SimulationEngineLoadsStagedRuntimeMetadata) {
     EXPECT_DOUBLE_EQ(mapInfo.value(QStringLiteral("heightMeters")).toDouble(), 5678.0);
     EXPECT_DOUBLE_EQ(mapInfo.value(QStringLiteral("originLat")).toDouble(), 11.5);
     EXPECT_DOUBLE_EQ(mapInfo.value(QStringLiteral("originLon")).toDouble(), 22.5);
-    EXPECT_EQ(mapInfo.value(QStringLiteral("tileZoom")).toInt(), 7);
+    EXPECT_EQ(mapInfo.value(QStringLiteral("tileZoom")).toInt(), 9);
+    EXPECT_EQ(mapInfo.value(QStringLiteral("tileMinZoom")).toInt(), 7);
+    EXPECT_EQ(mapInfo.value(QStringLiteral("tileMaxZoom")).toInt(), 9);
+    EXPECT_GT(mapInfo.value(QStringLiteral("tilePixelsPerMeterAtZoom0")).toDouble(), 0.0);
+}
+
+TEST(MapTilesTest, StagedMapMetadataLoadsWithRevisionAndZoomRange) {
+    ensureGuiApplication();
+    const QString metadataPath = QDir(QCoreApplication::applicationDirPath())
+                                     .filePath(QStringLiteral("map/metadata.json"));
+    ASSERT_TRUE(QFile::exists(metadataPath)) << qPrintable(metadataPath);
+
+    MapProvider provider;
+    QString error;
+    ASSERT_TRUE(provider.loadMetadataFile(metadataPath, &error)) << qPrintable(error);
+    EXPECT_EQ(provider.metadataRevision(), 1);
+    EXPECT_EQ(provider.minTileZoom(), 12);
+    EXPECT_EQ(provider.maxTileZoom(), 14);
 }
 
 TEST(MapTilesTest, RendererAlignsOriginTileEdgeAtWideViewport) {
@@ -249,4 +269,87 @@ TEST(MapTilesTest, RendererAlignsOriginTileEdgeAtTallViewport) {
     ensureGuiApplication();
     expectRendererTileEdgeAlignment(QSizeF{800.0, 1200.0}, 0.07,
                                     GeoPos{9000.0, 6000.0, 0.0});
+}
+
+TEST(MapTilesTest, RendererEmitsZoomChangedOnlyForActualChanges) {
+    ensureGuiApplication();
+    MapTileRenderer renderer;
+    int signalCount = 0;
+    QObject::connect(&renderer, &MapTileRenderer::zoomChanged, &renderer,
+                     [&signalCount]() { ++signalCount; });
+
+    renderer.setZoom(2.0);
+    renderer.setZoom(2.0);
+
+    EXPECT_EQ(signalCount, 1);
+}
+
+TEST(MapTilesTest, RendererKeepsZoomRangeValidWhenMinimumIsSetFirst) {
+    ensureGuiApplication();
+    MapTileRenderer renderer;
+
+    renderer.setMinTileZoom(14);
+
+    EXPECT_EQ(renderer.minTileZoom(), 14);
+    EXPECT_EQ(renderer.maxTileZoom(), 14);
+    EXPECT_EQ(renderer.tileZoom(), 14);
+}
+
+TEST(MapTilesTest, RendererCropsParentTileQuadrantWhenDetailTileIsMissing) {
+    ensureGuiApplication();
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    ASSERT_TRUE(createMapRoot(temporary.path()));
+    ASSERT_TRUE(writeFile(temporary.filePath(QStringLiteral("metadata.json")),
+                          QJsonDocument(metadata(1, 25.4, 119.3, 20000.0, 15000.0, 12, 14))
+                              .toJson(QJsonDocument::Compact)));
+
+    QImage parent(256, 256, QImage::Format_RGB32);
+    QPainter parentPainter(&parent);
+    parentPainter.fillRect(parent.rect(), Qt::black);
+    parentPainter.fillRect(QRect(0, 0, 64, 64), QColor(220, 40, 40));
+    parentPainter.fillRect(QRect(64, 0, 64, 64), QColor(40, 210, 80));
+    parentPainter.fillRect(QRect(128, 0, 64, 64), QColor(40, 100, 220));
+    parentPainter.fillRect(QRect(192, 0, 64, 64), QColor(230, 190, 40));
+    parentPainter.end();
+    ASSERT_TRUE(parent.save(tilePath(temporary.path()), "PNG"));
+
+    constexpr int sourceZoom = 12;
+    constexpr int detailZoom = 14;
+    constexpr int childX = 0;
+    constexpr int childY = 0;
+    const int sourceX = 3406;
+    const int sourceY = 1748;
+    const int detailX = sourceX * (1 << (detailZoom - sourceZoom)) + childX;
+    const int detailY = sourceY * (1 << (detailZoom - sourceZoom)) + childY;
+    const QPointF origin = Mercator::latLonToMeters(25.4, 119.3);
+    const double tileWorld = Mercator::kTileSize * Mercator::kInitialRes
+        / Mercator::safeZoomShift(detailZoom);
+    const double tileTopX = detailX * tileWorld - Mercator::kOriginShift;
+    const double tileTopY = Mercator::kOriginShift - detailY * tileWorld;
+    const double tileLeft = tileTopX - origin.x();
+    const double tileTop = tileTopY - origin.y();
+
+    MapTileRenderer renderer;
+    renderer.setWidth(256);
+    renderer.setHeight(256);
+    renderer.setOriginLat(25.4);
+    renderer.setOriginLon(119.3);
+    renderer.setLogicalWidthMeters(20000.0);
+    renderer.setLogicalHeightMeters(15000.0);
+    renderer.setMinTileZoom(sourceZoom);
+    renderer.setMaxTileZoom(detailZoom);
+    renderer.setTileZoom(detailZoom);
+    renderer.setZoom(256.0 / tileWorld);
+    renderer.setCenterX(tileLeft + tileWorld * 0.5);
+    renderer.setCenterY(tileTop - tileWorld * 0.5);
+    renderer.setTileCacheDir(temporary.path());
+
+    QImage rendered(256, 256, QImage::Format_RGB32);
+    rendered.fill(Qt::black);
+    QPainter painter(&rendered);
+    renderer.paint(&painter);
+    painter.end();
+
+    EXPECT_EQ(rendered.pixelColor(128, 128), QColor(220, 40, 40));
 }

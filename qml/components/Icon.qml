@@ -25,7 +25,7 @@ Text {
             missile: "➤", countermeasure: "✦", scan: "◎", repair: "✚",
             service: "▰", fuel: "◒", "return": "↩", menu: "☰",
             unit: "▦", command: "⌁",
-            "chevron-left": "‹", "chevron-right": "›"
+            "chevron-left": "‹", "chevron-right": "›", "chevron-down": "⌄"
         }
         return glyphs[root.name] || glyphs.dot
     }

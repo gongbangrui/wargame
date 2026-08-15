@@ -28,6 +28,8 @@ Item {
     property string shareRequestId: ""
     property string reportRequestId: ""
     property string historyRequestId: ""
+    property bool historyDirty: true
+    property string historySubmittedKey: ""
     signal reportPickRequested()
     signal reportPickCancelled()
 
@@ -104,12 +106,54 @@ Item {
         return query
     }
 
+    function historyFilterKey() {
+        return JSON.stringify([
+            historySearch.text.trim(),
+            historyType.currentValue || "",
+            historyFreshness.currentValue || "",
+            historySource.text.trim(),
+            historyFrom.text.trim(),
+            historyTo.text.trim()
+        ])
+    }
+
+    function invalidateHistoryQuery() {
+        root.historyDirty = true
+        root.historySubmittedKey = ""
+        root.historyState = "筛选条件已变更"
+        if (root.controller && !root.controller.onlineIntelHistoryPending)
+            root.controller.resetOnlineIntelHistory()
+    }
+
+    function resetHistoryFilters() {
+        historySearch.clear()
+        historyType.currentIndex = 0
+        historyFreshness.currentIndex = 0
+        historySource.clear()
+        historyFrom.clear()
+        historyTo.clear()
+        root.invalidateHistoryQuery()
+        root.requestHistory("")
+    }
+
     function requestHistory(cursor) {
-        if (!root.controller || root.historyRequestId.length > 0) return
-        root.historyState = "已提交"
-        root.historyRequestId = root.controller.requestOnlineIntelHistory(
-            root.historyQuery(cursor || ""))
-        if (!root.historyRequestId) root.historyState = "未提交"
+        if (!root.controller || root.historyRequestId.length > 0
+                || root.controller.onlineIntelHistoryPending) return
+        var nextCursor = cursor || ""
+        var key = root.historyFilterKey()
+        if (nextCursor && (root.historyDirty || root.historySubmittedKey !== key)) return
+        if (!nextCursor) root.controller.resetOnlineIntelHistory()
+        root.historyState = "加载中"
+        var requestId = root.controller.requestOnlineIntelHistory(
+            root.historyQuery(nextCursor))
+        if (!requestId) {
+            root.historyState = "未提交"
+            root.historyDirty = true
+            return
+        }
+        root.historyRequestId = requestId
+        root.historySubmittedKey = key
+        root.historyDirty = false
     }
 
     function statusText(status, message) {
@@ -142,9 +186,21 @@ Item {
             } else if (action === "requestIntelHistory"
                        && requestId === root.historyRequestId) {
                 root.historyState = root.statusText(status, message)
-                if (status === "accepted" || status === "rejected" || status === "unknown")
+                if (status === "rejected" || status === "unknown") {
+                    root.historyDirty = true
+                    if (root.controller) root.controller.resetOnlineIntelHistory()
+                }
+                if (status === "accepted" || status === "rejected" || status === "unknown"
+                        || status === "canceled")
                     root.historyRequestId = ""
             }
+        }
+        function onOnlineIntelHistoryReset() {
+            root.historyRequestId = ""
+            root.historyDirty = true
+            root.historySubmittedKey = ""
+            if (root.historyState === "加载中" || root.historyState === "已确认")
+                root.historyState = "待查询"
         }
         function onSettingChanged(key) {
             if (key === "online/intel/defaultHistoryFreshness")
@@ -154,7 +210,10 @@ Item {
             if (!root.selectedRecord || !root.controller) return
             var records = root.controller.onlineIntelRecords || []
             for (var i = 0; i < records.length; ++i) {
-                if (records[i] && records[i].intelId === root.selectedRecord.intelId) return
+                if (records[i] && records[i].intelId === root.selectedRecord.intelId) {
+                    root.selectedRecord = records[i]
+                    return
+                }
             }
             root.selectedRecord = null
         }
@@ -183,8 +242,21 @@ Item {
                 Layout.preferredWidth: 78
                 Layout.preferredHeight: 26
                 onActivated: if (currentIndex === 1
-                                    && root.controller.onlineIntelHistory.length === 0)
+                                    && (root.historyDirty
+                                        || root.controller.onlineIntelHistory.length === 0))
                                  root.requestHistory("")
+                contentItem: Text {
+                    text: viewMode.displayText
+                    color: root.text
+                    font.pixelSize: 9
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: viewMode.activeFocus ? root.panel : root.page
+                    border.color: viewMode.activeFocus ? root.accent : root.line
+                    radius: 4
+                }
             }
         }
 
@@ -192,32 +264,38 @@ Item {
             visible: viewMode.currentIndex === 0
             Layout.fillWidth: true
             spacing: 4
-            TextField {
+            IntelTextField {
                 Layout.fillWidth: true
                 placeholderText: "目标、来源或备注"
                 maximumLength: 128
+                Accessible.name: "当前情报搜索"
                 onTextChanged: root.filterText = text
             }
-            ComboBox {
+            IntelComboBox {
                 id: freshness
                 model: ["全部", "实时", "失联", "归档"]
-                Layout.preferredWidth: 76
+                Layout.preferredWidth: 78
+                Layout.minimumWidth: 0
+                Accessible.name: "当前情报鲜度"
                 onActivated: root.freshnessFilter = currentIndex === 1 ? "live"
                     : currentIndex === 2 ? "stale" : currentIndex === 3 ? "archived" : "all"
             }
-            ComboBox {
+            IntelComboBox {
                 id: kind
                 model: ["全部", "接触", "人工"]
-                Layout.preferredWidth: 76
+                Layout.preferredWidth: 78
+                Layout.minimumWidth: 0
+                Accessible.name: "当前情报类型"
                 onActivated: root.typeFilter = currentIndex === 1 ? "sensorContact"
                     : currentIndex === 2 ? "manualReport" : "all"
             }
         }
-        TextField {
+        IntelTextField {
             visible: viewMode.currentIndex === 0
             Layout.fillWidth: true
             placeholderText: "来源战位"
             maximumLength: 128
+            Accessible.name: "当前情报来源战位"
             onTextChanged: root.sourceFilter = text.trim()
         }
 
@@ -376,11 +454,12 @@ Item {
             visible: viewMode.currentIndex === 0
             Layout.fillWidth: true
             spacing: 5
-            TextField {
+            IntelTextField {
                 id: shareNote
                 Layout.fillWidth: true
                 placeholderText: "共享备注"
                 maximumLength: 500
+                Accessible.name: "共享备注"
             }
             Button {
                 id: shareButton
@@ -441,7 +520,7 @@ Item {
                     font.pixelSize: 9
                     elide: Text.ElideRight
                 }
-                ComboBox {
+                IntelComboBox {
                     id: reportType
                     model: [
                         { label: "位置报告", value: "location" },
@@ -451,22 +530,26 @@ Item {
                     textRole: "label"
                     valueRole: "value"
                     Layout.preferredWidth: 112
+                    Layout.minimumWidth: 0
+                    Accessible.name: "报告类型"
                 }
             }
-            TextField {
+            IntelTextField {
                 id: reportTitle
                 Layout.fillWidth: true
                 placeholderText: "报告标题"
                 maximumLength: 64
+                Accessible.name: "报告标题"
             }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 4
-                TextField {
+                IntelTextField {
                     id: reportNote
                     Layout.fillWidth: true
                     placeholderText: "报告备注"
                     maximumLength: 500
+                    Accessible.name: "报告备注"
                 }
                 Button {
                     id: reportButton
@@ -507,14 +590,48 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 4
-                TextField {
-                    id: historySearch
-                    Layout.fillWidth: true
-                    placeholderText: "目标名称或标识"
-                    maximumLength: 128
+                Text {
+                    text: "历史台账"
+                    color: root.text
+                    font.bold: true
+                    font.pixelSize: 10
                 }
-                ComboBox {
+                Text {
+                    Layout.fillWidth: true
+                    text: root.controller ? (root.controller.onlineIntelHistory.length + " 条") : ""
+                    color: root.muted
+                    font.pixelSize: 9
+                    elide: Text.ElideRight
+                }
+                GhostButton {
+                    id: historyResetButton
+                    text: "重置"
+                    iconName: "close"
+                    enabled: root.historyRequestId.length === 0
+                    onClicked: root.resetHistoryFilters()
+                    ToolTip.visible: hovered
+                    ToolTip.text: "清除历史筛选"
+                    Accessible.name: "重置历史筛选"
+                }
+            }
+            IntelTextField {
+                id: historySearch
+                Layout.fillWidth: true
+                enabled: root.historyRequestId.length === 0
+                placeholderText: "目标、标识或备注"
+                maximumLength: 128
+                Accessible.name: "历史情报搜索"
+                onTextEdited: root.invalidateHistoryQuery()
+                onAccepted: root.requestHistory("")
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 4
+                IntelComboBox {
                     id: historyType
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    enabled: root.historyRequestId.length === 0
                     model: [
                         { label: "全部类型", value: "" },
                         { label: "接触", value: "sensorContact" },
@@ -522,14 +639,14 @@ Item {
                     ]
                     textRole: "label"
                     valueRole: "value"
-                    Layout.preferredWidth: 92
+                    Accessible.name: "历史情报类型"
+                    onActivated: root.invalidateHistoryQuery()
                 }
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 4
-                ComboBox {
+                IntelComboBox {
                     id: historyFreshness
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    enabled: root.historyRequestId.length === 0
                     model: [
                         { label: "全部鲜度", value: "" },
                         { label: "实时", value: "live" },
@@ -538,53 +655,66 @@ Item {
                     ]
                     textRole: "label"
                     valueRole: "value"
-                    Layout.preferredWidth: 92
+                    Accessible.name: "历史情报鲜度"
+                    onActivated: root.invalidateHistoryQuery()
                 }
-                TextField {
-                    id: historySource
-                    Layout.fillWidth: true
-                    placeholderText: "来源战位"
-                    maximumLength: 128
-                }
+            }
+            IntelTextField {
+                id: historySource
+                Layout.fillWidth: true
+                enabled: root.historyRequestId.length === 0
+                placeholderText: "来源战位"
+                maximumLength: 128
+                Accessible.name: "历史情报来源战位"
+                onTextEdited: root.invalidateHistoryQuery()
             }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 4
-                TextField {
+                IntelTextField {
                     id: historyFrom
                     Layout.fillWidth: true
-                    placeholderText: "开始时间 ISO 8601"
+                    enabled: root.historyRequestId.length === 0
+                    placeholderText: "起始时间"
                     maximumLength: 64
+                    Accessible.name: "历史起始时间 ISO 8601"
+                    onTextEdited: root.invalidateHistoryQuery()
                 }
-                TextField {
+                IntelTextField {
                     id: historyTo
                     Layout.fillWidth: true
-                    placeholderText: "结束时间 ISO 8601"
+                    enabled: root.historyRequestId.length === 0
+                    placeholderText: "结束时间"
                     maximumLength: 64
+                    Accessible.name: "历史结束时间 ISO 8601"
+                    onTextEdited: root.invalidateHistoryQuery()
                 }
             }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 4
-                Button {
-                    text: "首页"
+                GhostButton {
+                    id: historyQueryButton
+                    text: "查询"
+                    iconName: "refresh"
                     enabled: root.historyRequestId.length === 0
                     onClicked: root.requestHistory("")
-                    contentItem: Text { text: "首页"; color: root.accent; font.pixelSize: 9 }
-                    background: Rectangle { color: "transparent" }
+                    ToolTip.visible: hovered
+                    ToolTip.text: "按当前条件查询第一页"
+                    Accessible.name: "查询历史情报"
                 }
-                Button {
+                GhostButton {
+                    id: historyNextButton
                     text: "下一页"
+                    iconName: "chevron-right"
                     enabled: root.historyRequestId.length === 0 && root.controller
+                        && !root.historyDirty
                         && root.controller.onlineIntelHistoryHasMore
                         && root.controller.onlineIntelHistoryCursor.length > 0
                     onClicked: root.requestHistory(root.controller.onlineIntelHistoryCursor)
-                    contentItem: Text {
-                        text: "下一页"
-                        color: parent.enabled ? root.accent : root.muted
-                        font.pixelSize: 9
-                    }
-                    background: Rectangle { color: "transparent" }
+                    ToolTip.visible: hovered
+                    ToolTip.text: "加载下一页"
+                    Accessible.name: "历史情报下一页"
                 }
                 Item { Layout.fillWidth: true }
                 Text {
@@ -595,9 +725,17 @@ Item {
                     elide: Text.ElideRight
                 }
             }
+            Text {
+                visible: root.controller && root.controller.onlineIntelHistory.length === 0
+                Layout.fillWidth: true
+                text: root.historyDirty ? "待查询" : "暂无历史记录"
+                color: root.muted
+                font.pixelSize: 9
+                horizontalAlignment: Text.AlignHCenter
+            }
             ListView {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(180, Math.max(38, contentHeight))
+                Layout.preferredHeight: Math.min(206, Math.max(38, contentHeight))
                 clip: true
                 model: root.controller ? root.controller.onlineIntelHistory : []
                 delegate: Button {
@@ -606,6 +744,8 @@ Item {
                     width: ListView.view.width
                     height: 34
                     onClicked: root.locate(historyDelegate.modelData)
+                    Accessible.name: "历史情报 " + (historyDelegate.modelData.targetId
+                        || historyDelegate.modelData.intelId || "")
                     contentItem: Text {
                         text: (historyDelegate.modelData.occurredAt || "") + " · "
                             + (historyDelegate.modelData.eventType || "") + " · "
@@ -616,7 +756,12 @@ Item {
                         elide: Text.ElideRight
                         verticalAlignment: Text.AlignVCenter
                     }
-                    background: Rectangle { color: historyDelegate.hovered ? root.page : "transparent" }
+                    background: Rectangle {
+                        color: historyDelegate.down ? root.panel
+                            : historyDelegate.hovered ? root.page : "transparent"
+                        border.color: historyDelegate.hovered ? root.line : "transparent"
+                        radius: 3
+                    }
                 }
             }
         }

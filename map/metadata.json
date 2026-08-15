@@ -15,7 +15,7 @@
   "tileSize": 256,
   "format": "png",
   "minZoom": 12,
-  "maxZoom": 12,
+  "maxZoom": 14,
   "tileRange": {
     "xMin": 3404,
     "xMax": 3409,
@@ -23,7 +23,30 @@
     "yMax": 1750,
     "count": 36
   },
-  "tileSetSha256": "6ba117b23154ace4e94aa997c19b86e0b9156a34a8367e9d0a6641f3e9e8b881",
+  "tileRanges": {
+    "12": {
+      "xMin": 3404,
+      "xMax": 3409,
+      "yMin": 1745,
+      "yMax": 1750,
+      "count": 36
+    },
+    "13": {
+      "xMin": 6808,
+      "xMax": 6819,
+      "yMin": 3490,
+      "yMax": 3501,
+      "count": 144
+    },
+    "14": {
+      "xMin": 13616,
+      "xMax": 13639,
+      "yMin": 6980,
+      "yMax": 7003,
+      "count": 576
+    }
+  },
+  "tileSetSha256": "32e7a340d1da76d49f4fcc85ecae3de53f9b90d0b2329d02320091765d2627e3",
   "boundsWgs84": [
     119.1796875,
     25.244695951306028,

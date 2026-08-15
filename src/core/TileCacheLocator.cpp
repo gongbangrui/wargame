@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QFileInfo>
 
+#include <algorithm>
+
 namespace gbr {
 
 QString TileCacheLocator::normalizedUsableDirectory(const QString& path) {
@@ -14,7 +16,15 @@ QString TileCacheLocator::normalizedUsableDirectory(const QString& path) {
     if (!info.isDir()) return {};
 
     const QDir directory(info.absoluteFilePath());
-    if (!QDir(directory.filePath(QStringLiteral("12"))).exists()
+    const QStringList zoomDirectories = directory.entryList(
+        QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    const bool hasZoomDirectory = std::any_of(
+        zoomDirectories.cbegin(), zoomDirectories.cend(), [](const QString& name) {
+            bool ok = false;
+            const int zoom = name.toInt(&ok);
+            return ok && zoom >= 0 && zoom <= 22;
+        });
+    if (!hasZoomDirectory
         || !QFileInfo(directory.filePath(QStringLiteral("metadata.json"))).isFile()
         || !QFileInfo(directory.filePath(QStringLiteral("tilejson.json"))).isFile()) {
         return {};

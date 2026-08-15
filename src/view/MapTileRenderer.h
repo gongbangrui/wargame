@@ -14,11 +14,13 @@ class MapTileRenderer : public QQuickPaintedItem {
     Q_OBJECT
     Q_PROPERTY(double centerX READ centerX WRITE setCenterX NOTIFY centerChanged)
     Q_PROPERTY(double centerY READ centerY WRITE setCenterY NOTIFY centerChanged)
-    Q_PROPERTY(double zoom READ zoom WRITE setZoom NOTIFY centerChanged)
+    Q_PROPERTY(double zoom READ zoom WRITE setZoom NOTIFY zoomChanged)
     Q_PROPERTY(double originLon READ originLon WRITE setOriginLon NOTIFY originChanged)
     Q_PROPERTY(double originLat READ originLat WRITE setOriginLat NOTIFY originChanged)
     Q_PROPERTY(double logicalWidthMeters READ logicalWidthMeters WRITE setLogicalWidthMeters NOTIFY logicalExtentChanged)
     Q_PROPERTY(double logicalHeightMeters READ logicalHeightMeters WRITE setLogicalHeightMeters NOTIFY logicalExtentChanged)
+    Q_PROPERTY(int minTileZoom READ minTileZoom WRITE setMinTileZoom NOTIFY tileZoomRangeChanged)
+    Q_PROPERTY(int maxTileZoom READ maxTileZoom WRITE setMaxTileZoom NOTIFY tileZoomRangeChanged)
     Q_PROPERTY(int tileZoom READ tileZoom WRITE setTileZoom NOTIFY tileZoomChanged)
     Q_PROPERTY(QString tileCacheDir READ tileCacheDir WRITE setTileCacheDir NOTIFY tileCacheDirChanged)
 public:
@@ -30,6 +32,10 @@ public:
     void setCenterY(double v);
     double zoom() const { return m_zoom; }
     void setZoom(double v);
+    int minTileZoom() const { return m_minTileZoom; }
+    void setMinTileZoom(int v);
+    int maxTileZoom() const { return m_maxTileZoom; }
+    void setMaxTileZoom(int v);
     double originLon() const { return m_originLon; }
     void setOriginLon(double v);
     double originLat() const { return m_originLat; }
@@ -51,8 +57,10 @@ public:
 
 signals:
     void centerChanged();
+    void zoomChanged();
     void originChanged();
     void logicalExtentChanged();
+    void tileZoomRangeChanged();
     void tileZoomChanged();
     void tileCacheDirChanged();
 
@@ -70,6 +78,8 @@ private:
     double m_originLat = 25.40;
     double m_logicalWidthMeters = 20000;
     double m_logicalHeightMeters = 15000;
+    int m_minTileZoom = 12;
+    int m_maxTileZoom = 12;
     int m_tileZoom = 12;
     QString m_cacheDir;
     QPointF m_mercatorOrigin;

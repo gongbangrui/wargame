@@ -159,6 +159,8 @@ qt_add_qml_module(appindex
         qml/components/LocalSettingsPanel.qml
         qml/components/OnlineSettingsPanel.qml
         qml/components/OnlineIntelWorkspace.qml
+        qml/components/IntelTextField.qml
+        qml/components/IntelComboBox.qml
         qml/components/SessionDialog.qml
         qml/components/ChatPanel.qml
         qml/components/BattleReportDialog.qml
@@ -181,12 +183,33 @@ set(WARGAME_MAP_METADATA
     "${WARGAME_MAP_SOURCE_DIR}/metadata.json"
     "${WARGAME_MAP_SOURCE_DIR}/tilejson.json"
 )
-file(GLOB_RECURSE WARGAME_MAP_TILES CONFIGURE_DEPENDS
-    "${WARGAME_MAP_SOURCE_DIR}/12/*.png"
-)
-if(NOT WARGAME_MAP_TILES)
-    message(FATAL_ERROR "No GIS tiles found under ${WARGAME_MAP_SOURCE_DIR}/12")
+file(GLOB WARGAME_MAP_CANDIDATE_DIRS CONFIGURE_DEPENDS
+    LIST_DIRECTORIES true "${WARGAME_MAP_SOURCE_DIR}/*")
+set(WARGAME_MAP_ZOOM_DIRS)
+set(WARGAME_MAP_TILES)
+foreach(map_candidate_dir IN LISTS WARGAME_MAP_CANDIDATE_DIRS)
+    if(IS_DIRECTORY "${map_candidate_dir}")
+        get_filename_component(map_zoom_name "${map_candidate_dir}" NAME)
+        if(map_zoom_name MATCHES "^[0-9]+$")
+            list(APPEND WARGAME_MAP_ZOOM_DIRS "${map_candidate_dir}")
+            file(GLOB_RECURSE map_zoom_tiles CONFIGURE_DEPENDS
+                "${map_candidate_dir}/*.png")
+            list(APPEND WARGAME_MAP_TILES ${map_zoom_tiles})
+        endif()
+    endif()
+endforeach()
+if(NOT WARGAME_MAP_ZOOM_DIRS OR NOT WARGAME_MAP_TILES)
+    message(FATAL_ERROR "No GIS tiles found under numeric zoom directories in ${WARGAME_MAP_SOURCE_DIR}")
 endif()
+list(SORT WARGAME_MAP_ZOOM_DIRS)
+list(SORT WARGAME_MAP_TILES)
+set(WARGAME_MAP_STAGE_COMMANDS)
+foreach(map_zoom_dir IN LISTS WARGAME_MAP_ZOOM_DIRS)
+    get_filename_component(map_zoom_name "${map_zoom_dir}" NAME)
+    list(APPEND WARGAME_MAP_STAGE_COMMANDS
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${map_zoom_dir}" "${WARGAME_MAP_STAGE_DIR}/${map_zoom_name}")
+endforeach()
 foreach(map_metadata_file IN LISTS WARGAME_MAP_METADATA)
     if(NOT EXISTS "${map_metadata_file}")
         message(FATAL_ERROR "Required GIS metadata is missing: ${map_metadata_file}")
@@ -195,7 +218,6 @@ endforeach()
 
 # Track additions/removals as well as file content changes, so a stale tile
 # cannot survive in the staged directory after the source set changes.
-list(SORT WARGAME_MAP_TILES)
 string(REPLACE ";" "\n" WARGAME_MAP_FILE_LIST_CONTENT "${WARGAME_MAP_TILES}")
 set(WARGAME_MAP_FILE_LIST "${CMAKE_CURRENT_BINARY_DIR}/wargame-map-files.txt")
 file(GENERATE OUTPUT "${WARGAME_MAP_FILE_LIST}"
@@ -205,8 +227,7 @@ add_custom_command(
     OUTPUT "${WARGAME_MAP_STAGE_DIR}/.stage-stamp"
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${WARGAME_MAP_STAGE_DIR}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${WARGAME_MAP_STAGE_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${WARGAME_MAP_SOURCE_DIR}/12" "${WARGAME_MAP_STAGE_DIR}/12"
+    ${WARGAME_MAP_STAGE_COMMANDS}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${WARGAME_MAP_METADATA} "${WARGAME_MAP_STAGE_DIR}"
     COMMAND ${CMAKE_COMMAND} -E touch "${WARGAME_MAP_STAGE_DIR}/.stage-stamp"
@@ -223,8 +244,10 @@ install(TARGETS appindex
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-install(DIRECTORY "${WARGAME_MAP_SOURCE_DIR}/12"
-    DESTINATION "${CMAKE_INSTALL_BINDIR}/map")
+foreach(map_zoom_dir IN LISTS WARGAME_MAP_ZOOM_DIRS)
+    install(DIRECTORY "${map_zoom_dir}"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}/map")
+endforeach()
 install(FILES ${WARGAME_MAP_METADATA}
     DESTINATION "${CMAKE_INSTALL_BINDIR}/map")
 
