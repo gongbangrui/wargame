@@ -67,6 +67,8 @@ struct AiSeatState {
     double y = 0.0;
     double targetX = 0.0;
     double targetY = 0.0;
+    double collisionRadius = 0.0;
+    double collisionHalfHeight = 0.0;
     // Runtime speed is after damage effects. Commanded and cruise speeds stay
     // local to the rules executor and are never part of AiPlanV1's wire shape.
     double speed = 0.0;

@@ -7,7 +7,7 @@ services:
       context: ..
       dockerfile: deploy/account.Dockerfile
       args:
-        WARGAME_VERSION: "${WARGAME_VERSION:-1.0.0}"
+        WARGAME_VERSION: "${WARGAME_VERSION:-2.0.0}"
         WARGAME_SOURCE_DIGEST: "${WARGAME_SOURCE_DIGEST:-dev}"
     restart: unless-stopped
     read_only: true
@@ -50,7 +50,7 @@ services:
       context: ..
       dockerfile: deploy/game-server.Dockerfile
       args:
-        WARGAME_VERSION: "${WARGAME_VERSION:-1.0.0}"
+        WARGAME_VERSION: "${WARGAME_VERSION:-2.0.0}"
         WARGAME_SOURCE_DIGEST: "${WARGAME_SOURCE_DIGEST:-dev}"
         WARGAME_ENABLE_FASTDDS: "${WARGAME_ENABLE_FASTDDS:-OFF}"
     restart: unless-stopped

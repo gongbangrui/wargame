@@ -42,8 +42,9 @@ tar -C "$ROOT_DIR" \
     --exclude='*.jsonl' --exclude='*.log' \
     --exclude='*/backups' --exclude='backups' \
     --exclude='*/build' --exclude='build' --exclude='*/cache' --exclude='cache' \
+    --exclude='*/.omo' --exclude='.omo' \
     --exclude='.codegraph' --exclude='dist' \
-    -cf - CMakeLists.txt cmake src server map/metadata.json deploy .dockerignore README.md docs \
+    -cf - CMakeLists.txt Main.qml main.cpp qml cmake src server map/metadata.json deploy .dockerignore README.md docs \
     | tar -C "$SOURCE_COPY" -xf -
 
 WARGAME_VERSION="standalone-$$" DIST_DIR="$DIST_DIR" \

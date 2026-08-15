@@ -93,7 +93,7 @@ TEST(StateProjectorTest, ProjectsPerUnitActionCapabilitiesWithoutEnemyPrivateSta
     const QJsonObject cpActions = cp.value(QStringLiteral("actions")).toObject();
     EXPECT_TRUE(cpActions.contains(QStringLiteral("activateCountermeasure")));
     EXPECT_TRUE(cpActions.contains(QStringLiteral("attemptFieldRepair")));
-    EXPECT_FALSE(cpActions.contains(QStringLiteral("moveTo")));
+    EXPECT_TRUE(cpActions.contains(QStringLiteral("moveTo")));
 
     const QJsonObject attack = StateProjector::snapshotFor(
         engine, QStringLiteral("red_attack_1"), 2, roomState(), {},
@@ -311,6 +311,43 @@ TEST(StateProjectorTest, ScanContactsRequireScannerToRecipientCommunication) {
         QStringLiteral("red_a1"))
         .value(QStringLiteral("units")).toArray();
     EXPECT_FALSE(unitById(sharedUnits, QStringLiteral("blue_a1")).isEmpty());
+}
+
+TEST(StateProjectorTest, ActiveScanUsesSkillRangeAndExpiresWithoutPersistentSensorContact) {
+    Scenario scenario = ScenarioIo::defaultScenario();
+    for (ScenarioUnit& unit : scenario.units) {
+        unit.schedule.clear();
+        unit.detectRange = 0.0;
+        unit.commRange = 0.0;
+        unit.pos = GeoPos{19000.0, 14000.0, unit.pos.alt};
+        if (unit.id == QLatin1String("red_r1")) {
+            unit.pos = GeoPos{1000.0, 1000.0, 3000.0};
+        } else if (unit.id == QLatin1String("blue_a1")) {
+            // Inside the 15 km active-scan range, but outside passive detection.
+            unit.pos = GeoPos{5000.0, 1000.0, 2000.0};
+        }
+    }
+    SimulationEngine engine;
+    ASSERT_TRUE(engine.setScenario(scenario));
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("activateScan"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")}}).accepted);
+
+    const QJsonArray active = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_recon_1"), 6, roomState(), {},
+        QStringLiteral("red_r1")).value(QStringLiteral("units")).toArray();
+    EXPECT_FALSE(unitById(active, QStringLiteral("blue_a1")).isEmpty());
+    EXPECT_TRUE(unitById(active, QStringLiteral("blue_g1")).isEmpty());
+    EXPECT_FALSE(StateProjector::sensorVisibleUnitIds(
+                     engine, QStringLiteral("red_recon_1"), QStringLiteral("red_r1"))
+                     .contains(QStringLiteral("blue_a1")));
+
+    engine.stepOnce(18.1);
+
+    const QJsonArray expired = StateProjector::snapshotFor(
+        engine, QStringLiteral("red_recon_1"), 7, roomState(), {},
+        QStringLiteral("red_r1")).value(QStringLiteral("units")).toArray();
+    EXPECT_TRUE(unitById(expired, QStringLiteral("blue_a1")).isEmpty());
 }
 
 TEST(StateProjectorTest, ObservedEnemyExcludesPrivateBehaviorState) {

@@ -1,4 +1,5 @@
 #include "Protocol.h"
+#include "IntelProtocol.h"
 
 #include <QDateTime>
 #include <QHash>
@@ -23,6 +24,7 @@ const QSet<QString>& clientTypes() {
         QStringLiteral("leaveRoom"), QStringLiteral("claimSeat"),
         QStringLiteral("releaseSeat"), QStringLiteral("seatReady"),
         QStringLiteral("deployment"), QStringLiteral("shareIntel"),
+        QStringLiteral("createIntelReport"), QStringLiteral("requestIntelHistory"),
         QStringLiteral("mapMark"), QStringLiteral("setUnitName"),
         QStringLiteral("requestRedeploy"), QStringLiteral("redeploy"),
         QStringLiteral("setObserverTrajectories"), QStringLiteral("setObserverTrails")};
@@ -35,7 +37,7 @@ const QSet<QString>& serverTypes() {
         QStringLiteral("commandResult"), QStringLiteral("event"), QStringLiteral("chat"),
         QStringLiteral("pong"), QStringLiteral("error"), QStringLiteral("roomDirectory"),
         QStringLiteral("seatState"), QStringLiteral("deploymentPrompt"),
-        QStringLiteral("intelShare")};
+        QStringLiteral("intelShare"), QStringLiteral("intelHistoryPage")};
     return types;
 }
 
@@ -110,14 +112,19 @@ ValidationResult validateComplexity(const QJsonObject& envelope) {
     return ValidationResult::success();
 }
 
-ValidationResult validateCommon(const QJsonObject& envelope, bool fromServer) {
+ValidationResult validateCommon(const QJsonObject& envelope, bool fromServer,
+                                bool allowCompatibleVersion) {
     const QJsonValue protocolVersion = envelope.value(QStringLiteral("protocolVersion"));
-    if (!validNonNegativeInteger(protocolVersion) || protocolVersion.toInteger() != Version) {
+    if (!validNonNegativeInteger(protocolVersion)
+        || (!allowCompatibleVersion && protocolVersion.toInteger() != Version)) {
         return ValidationResult::failure(QStringLiteral("PROTOCOL_MISMATCH"),
                                          QStringLiteral("协议版本不兼容"));
     }
     const QJsonValue schemaVersion = envelope.value(QStringLiteral("schemaVersion"));
-    if (!validNonNegativeInteger(schemaVersion) || schemaVersion.toInteger() != SchemaVersion) {
+    if (!validNonNegativeInteger(schemaVersion)
+        || (!allowCompatibleVersion && schemaVersion.toInteger() != SchemaVersion)
+        || (allowCompatibleVersion
+            && !isSupportedWireVersion(protocolVersion.toInteger(), schemaVersion.toInteger()))) {
         return ValidationResult::failure(QStringLiteral("SCHEMA_MISMATCH"),
                                          QStringLiteral("消息结构版本不兼容"));
     }
@@ -727,6 +734,7 @@ bool validObserverSnapshot(const QJsonObject& payload, const QJsonObject& roomSt
         QStringLiteral("schemaVersion"), QStringLiteral("stateRevision"),
         QStringLiteral("scenario"), QStringLiteral("units"), QStringLiteral("projectiles"),
         QStringLiteral("roomState"), QStringLiteral("observerTrajectories"),
+        QStringLiteral("intelState"),
         // Older servers included an empty participant map-mark collection in
         // observer projections. Accept that inert legacy shape so a client
         // upgrade does not turn an observer join into a fatal protocol error.
@@ -883,12 +891,13 @@ ValidationResult projectSnapshot(const QJsonObject& payload, SnapshotProjection*
     return ValidationResult::success();
 }
 
-ValidationResult validateSnapshotState(const QJsonObject& payload) {
+ValidationResult validateSnapshotState(const QJsonObject& payload, int schemaVersion) {
     const auto invalid = [](const QString& message) {
         return ValidationResult::failure(QStringLiteral("INVALID_PAYLOAD"), message);
     };
-    if (!validNonNegativeInteger(payload.value(QStringLiteral("schemaVersion")))
-        || payload.value(QStringLiteral("schemaVersion")).toInteger() != SchemaVersion
+    if (!isSupportedWireVersion(schemaVersion, schemaVersion)
+        || !validNonNegativeInteger(payload.value(QStringLiteral("schemaVersion")))
+        || payload.value(QStringLiteral("schemaVersion")).toInteger() != schemaVersion
         || !validNonNegativeInteger(payload.value(QStringLiteral("stateRevision")))
         || payload.value(QStringLiteral("stateRevision")).toInteger() <= 0
         || !payload.value(QStringLiteral("scenario")).isObject()
@@ -907,6 +916,12 @@ ValidationResult validateSnapshotState(const QJsonObject& payload) {
     const ValidationResult lifecycle = projectSnapshot(payload, nullptr);
     if (!lifecycle.valid) return lifecycle;
     const bool observer = roomState.value(QStringLiteral("observer")).toBool(false);
+    if (payload.contains(QStringLiteral("intelState"))) {
+        if (schemaVersion < IntelSchemaVersion || observer
+            || !validateIntelState(payload.value(QStringLiteral("intelState")).toObject()).valid) {
+            return invalid(QStringLiteral("情报台账投影无效"));
+        }
+    }
     if (!validProjectedProjectiles(payload, observer)) {
         return invalid(QStringLiteral("完整快照导弹状态无效"));
     }
@@ -956,8 +971,9 @@ ValidationResult projectDeploymentPrompt(const QJsonObject& payload,
 
 ValidationResult projectIntelShare(const QJsonObject& payload,
                                    IntelShareProjection* projection) {
-    if (!validIdentifier(payload.value(QStringLiteral("targetId")))
+    if (!validIdentifier(payload.value(QStringLiteral("intelId")))
         || !validIdentifier(payload.value(QStringLiteral("senderSeatId")))
+        || !validOptionalIdentifier(payload, QStringLiteral("targetId"), true)
         || !validOptionalString(payload, QStringLiteral("sharedAt"), 64)
         || !validOptionalString(payload, QStringLiteral("note"), 1024)) {
         return ValidationResult::failure(QStringLiteral("INVALID_PAYLOAD"),
@@ -965,6 +981,7 @@ ValidationResult projectIntelShare(const QJsonObject& payload,
     }
     if (projection) {
         projection->senderSeatId = payload.value(QStringLiteral("senderSeatId")).toString();
+        projection->intelId = payload.value(QStringLiteral("intelId")).toString();
         projection->targetId = payload.value(QStringLiteral("targetId")).toString();
         projection->sharedAt = payload.value(QStringLiteral("sharedAt")).toString();
         projection->note = payload.value(QStringLiteral("note")).toString();
@@ -1072,10 +1089,17 @@ bool isKnownServerMessageType(const QString& type) {
     return serverTypes().contains(type);
 }
 
-ValidationResult validateClientEnvelope(const QJsonObject& envelope) {
+bool isSupportedWireVersion(int protocolVersion, int schemaVersion) {
+    return (protocolVersion == Version && schemaVersion == SchemaVersion)
+        || (protocolVersion == PreviousVersion && schemaVersion == PreviousSchemaVersion)
+        || (protocolVersion == LegacyVersion && schemaVersion == LegacySchemaVersion);
+}
+
+ValidationResult validateClientEnvelopeInternal(const QJsonObject& envelope,
+                                                bool allowCompatibleVersion) {
     ValidationResult complexity = validateComplexity(envelope);
     if (!complexity.valid) return complexity;
-    ValidationResult result = validateCommon(envelope, false);
+    ValidationResult result = validateCommon(envelope, false, allowCompatibleVersion);
     if (!result.valid) return result;
     const QJsonValue messageId = envelope.value(QStringLiteral("messageId"));
     if (!messageId.isString() || messageId.toString().isEmpty()
@@ -1083,25 +1107,48 @@ ValidationResult validateClientEnvelope(const QJsonObject& envelope) {
         return ValidationResult::failure(QStringLiteral("INVALID_ENVELOPE"),
                                          QStringLiteral("消息 ID 缺失或过长"));
     }
-    return validateClientPayload(envelope.value(QStringLiteral("type")).toString(),
-                                 envelope.value(QStringLiteral("payload")).toObject());
+    return validateClientPayloadForVersion(
+        envelope.value(QStringLiteral("type")).toString(),
+        envelope.value(QStringLiteral("payload")).toObject(),
+        envelope.value(QStringLiteral("schemaVersion")).toInteger());
 }
 
-ValidationResult validateServerEnvelope(const QJsonObject& envelope) {
+ValidationResult validateServerEnvelopeInternal(const QJsonObject& envelope,
+                                                bool allowCompatibleVersion) {
     ValidationResult complexity = validateComplexity(envelope);
     if (!complexity.valid) return complexity;
-    ValidationResult result = validateCommon(envelope, true);
+    ValidationResult result = validateCommon(envelope, true, allowCompatibleVersion);
     if (!result.valid) return result;
     const QJsonValue sequence = envelope.value(QStringLiteral("sequence"));
     if (!validNonNegativeInteger(sequence) || sequence.toInteger() <= 0) {
         return ValidationResult::failure(QStringLiteral("INVALID_ENVELOPE"),
                                          QStringLiteral("服务器消息序号无效"));
     }
-    return validateServerPayload(envelope.value(QStringLiteral("type")).toString(),
-                                 envelope.value(QStringLiteral("payload")).toObject());
+    return validateServerPayloadForVersion(
+        envelope.value(QStringLiteral("type")).toString(),
+        envelope.value(QStringLiteral("payload")).toObject(),
+        envelope.value(QStringLiteral("schemaVersion")).toInteger());
 }
 
-ValidationResult validateClientPayload(const QString& type, const QJsonObject& payload) {
+ValidationResult validateClientEnvelope(const QJsonObject& envelope) {
+    return validateClientEnvelopeInternal(envelope, false);
+}
+
+ValidationResult validateServerEnvelope(const QJsonObject& envelope) {
+    return validateServerEnvelopeInternal(envelope, false);
+}
+
+ValidationResult validateClientEnvelopeForVersion(const QJsonObject& envelope) {
+    return validateClientEnvelopeInternal(envelope, true);
+}
+
+ValidationResult validateServerEnvelopeForVersion(const QJsonObject& envelope) {
+    return validateServerEnvelopeInternal(envelope, true);
+}
+
+ValidationResult validateClientPayloadForVersion(const QString& type,
+                                                 const QJsonObject& payload,
+                                                 int schemaVersion) {
     auto invalid = [](const QString& message) {
         return ValidationResult::failure(QStringLiteral("INVALID_PAYLOAD"), message);
     };
@@ -1301,15 +1348,43 @@ ValidationResult validateClientPayload(const QString& type, const QJsonObject& p
             return invalid(QStringLiteral("重新部署目标战位无效"));
         }
     } else if (type == QLatin1String("shareIntel")) {
-        if (!validIdentifier(payload.value(QStringLiteral("targetId")))
-            || !payload.value(QStringLiteral("recipientSeatIds")).isArray()
-            || payload.value(QStringLiteral("recipientSeatIds")).toArray().isEmpty()
-            || !validOptionalString(payload, QStringLiteral("note"), 1024)) {
-            return invalid(QStringLiteral("情报共享目标或接收战位无效"));
+        if (schemaVersion == LegacySchemaVersion) {
+            if (!validIdentifier(payload.value(QStringLiteral("targetId")))
+                || !payload.value(QStringLiteral("recipientSeatIds")).isArray()
+                || payload.value(QStringLiteral("recipientSeatIds")).toArray().isEmpty()
+                || !validOptionalString(payload, QStringLiteral("note"),
+                                        LegacyShareIntelNoteLength)) {
+                return invalid(QStringLiteral("情报共享目标或接收战位无效"));
+            }
+            for (const QJsonValue& value
+                 : payload.value(QStringLiteral("recipientSeatIds")).toArray()) {
+                if (!validIdentifier(value)) return invalid(QStringLiteral("接收战位 ID 无效"));
+            }
+        } else {
+            const ValidationResult intel = validateIntelShareRequest(payload);
+            if (!intel.valid) return intel;
         }
-        for (const QJsonValue& value : payload.value(QStringLiteral("recipientSeatIds")).toArray()) {
-            if (!validIdentifier(value)) return invalid(QStringLiteral("接收战位 ID 无效"));
+    } else if (type == QLatin1String("createIntelReport")) {
+        if (schemaVersion == LegacySchemaVersion) {
+            return invalid(QStringLiteral("当前协议版本不支持人工情报"));
         }
+        static const QSet<QString> fields{QStringLiteral("position"), QStringLiteral("type"),
+                                          QStringLiteral("title"), QStringLiteral("note")};
+        if (!hasOnlyFields(payload, fields) || payload.size() > fields.size()) {
+            return invalid(QStringLiteral("人工情报字段无效"));
+        }
+        if (!payload.value(QStringLiteral("position")).isObject()
+            || !validPoint(payload.value(QStringLiteral("position")))
+            || !validString(payload.value(QStringLiteral("type")), MaxIdentifierLength)
+            || !validOptionalString(payload, QStringLiteral("title"), MaxIntelTitleLength)
+            || !validOptionalString(payload, QStringLiteral("note"), MaxIntelNoteLength)) {
+            return invalid(QStringLiteral("人工情报报告结构无效"));
+        }
+    } else if (type == QLatin1String("requestIntelHistory")) {
+        if (schemaVersion == LegacySchemaVersion) {
+            return invalid(QStringLiteral("当前协议版本不支持情报历史"));
+        }
+        return validateIntelHistoryQuery(payload);
     } else if (type == QLatin1String("setObserverTrajectories")
                || type == QLatin1String("setObserverTrails")) {
         if (payload.size() != 1
@@ -1341,7 +1416,9 @@ ValidationResult validateClientPayload(const QString& type, const QJsonObject& p
     return ValidationResult::success();
 }
 
-ValidationResult validateServerPayload(const QString& type, const QJsonObject& payload) {
+ValidationResult validateServerPayloadForVersion(const QString& type,
+                                                 const QJsonObject& payload,
+                                                 int schemaVersion) {
     auto invalid = [](const QString& message) {
         return ValidationResult::failure(QStringLiteral("INVALID_PAYLOAD"), message);
     };
@@ -1364,13 +1441,15 @@ ValidationResult validateServerPayload(const QString& type, const QJsonObject& p
             return invalid(QStringLiteral("欢迎消息中的 DDS 票据有效期无效"));
         }
     } else if (type == QLatin1String("snapshot")) {
-        const ValidationResult snapshot = validateSnapshotState(payload);
+        const ValidationResult snapshot = validateSnapshotState(payload, schemaVersion);
         if (!snapshot.valid) return snapshot;
     } else if (type == QLatin1String("delta")) {
         if (!validNonNegativeInteger(payload.value(QStringLiteral("schemaVersion")))
-            || payload.value(QStringLiteral("schemaVersion")).toInteger() != SchemaVersion
+            || payload.value(QStringLiteral("schemaVersion")).toInteger() != schemaVersion
             || !validNonNegativeInteger(payload.value(QStringLiteral("baseStateRevision")))
             || !validNonNegativeInteger(payload.value(QStringLiteral("stateRevision")))
+            || payload.value(QStringLiteral("stateRevision")).toInteger()
+                   <= payload.value(QStringLiteral("baseStateRevision")).toInteger()
             || !validNonNegativeInteger(payload.value(QStringLiteral("scenarioRevision")))
             || !payload.value(QStringLiteral("units")).isArray()
             || !validRuntimeActionFields(payload.value(QStringLiteral("units")))
@@ -1381,6 +1460,11 @@ ValidationResult validateServerPayload(const QString& type, const QJsonObject& p
                                               false))
             || !payload.value(QStringLiteral("roomState")).isObject()) {
             return invalid(QStringLiteral("状态增量结构无效"));
+        }
+        if (schemaVersion == LegacySchemaVersion
+            && (payload.contains(QStringLiteral("intelState"))
+                || payload.contains(QStringLiteral("intelDelta")))) {
+            return invalid(QStringLiteral("旧版状态增量包含未知情报字段"));
         }
         if (!projectRoomLifecycle(payload.value(QStringLiteral("roomState")).toObject(),
                                   nullptr).valid) {
@@ -1394,6 +1478,72 @@ ValidationResult validateServerPayload(const QString& type, const QJsonObject& p
         if (payload.contains(QStringLiteral("mapMarks"))
             && !payload.value(QStringLiteral("mapMarks")).isArray()) {
             return invalid(QStringLiteral("状态增量地图标记结构无效"));
+        }
+        if (payload.contains(QStringLiteral("intelDelta"))) {
+            const QJsonObject intelDelta = payload.value(QStringLiteral("intelDelta")).toObject();
+            if (intelDelta.isEmpty()
+                || !validNonNegativeInteger(intelDelta.value(QStringLiteral("baseRevision")))
+                || !validNonNegativeInteger(intelDelta.value(QStringLiteral("revision")))
+                || intelDelta.value(QStringLiteral("revision")).toInteger()
+                       < intelDelta.value(QStringLiteral("baseRevision")).toInteger()
+                || !intelDelta.value(QStringLiteral("upserts")).isArray()
+                || !intelDelta.value(QStringLiteral("archivedIntelIds")).isArray()
+                || !intelDelta.value(QStringLiteral("deletedIntelIds")).isArray()
+                || !intelDelta.value(QStringLiteral("shareTargets")).isArray()) {
+                return invalid(QStringLiteral("情报状态增量结构无效"));
+            }
+            if (intelDelta.value(QStringLiteral("revision")).toInteger()
+                    == intelDelta.value(QStringLiteral("baseRevision")).toInteger()
+                && (!intelDelta.value(QStringLiteral("upserts")).toArray().isEmpty()
+                    || !intelDelta.value(QStringLiteral("archivedIntelIds")).toArray().isEmpty()
+                    || !intelDelta.value(QStringLiteral("deletedIntelIds")).toArray().isEmpty())) {
+                return invalid(QStringLiteral("相同情报版本不能包含记录变更"));
+            }
+            QSet<QString> upsertIds;
+            QJsonArray projectedRecords;
+            for (const QJsonValue& value : intelDelta.value(QStringLiteral("upserts")).toArray()) {
+                if (!value.isObject()) return invalid(QStringLiteral("情报增量项目必须是对象"));
+                IntelContact contact;
+                const ValidationResult contactValidation = fromJson(value.toObject(), &contact);
+                if (!contactValidation.valid || upsertIds.contains(contact.intelId)) {
+                    return invalid(QStringLiteral("情报增量项目无效或重复"));
+                }
+                upsertIds.insert(contact.intelId);
+                projectedRecords.append(contact.toJson());
+            }
+            auto validIntelIdList = [](const QJsonValue& value, const QSet<QString>& forbidden) {
+                if (!value.isArray() || value.toArray().size() > MaxIntelRecords) return false;
+                QSet<QString> ids;
+                for (const QJsonValue& item : value.toArray()) {
+                    if (!validIdentifier(item) || ids.contains(item.toString())
+                        || forbidden.contains(item.toString())) return false;
+                    ids.insert(item.toString());
+                }
+                return true;
+            };
+            if (!validIntelIdList(intelDelta.value(QStringLiteral("archivedIntelIds")), {})
+                || !validIntelIdList(intelDelta.value(QStringLiteral("deletedIntelIds")), upsertIds)
+                || !validateIntelState(QJsonObject{
+                       {QStringLiteral("revision"), intelDelta.value(QStringLiteral("revision"))},
+                       {QStringLiteral("records"), projectedRecords},
+                       {QStringLiteral("shareTargets"), intelDelta.value(QStringLiteral("shareTargets"))}}).valid) {
+                return invalid(QStringLiteral("情报状态增量项目无效"));
+            }
+            for (const QJsonValue& value : intelDelta.value(QStringLiteral("archivedIntelIds")).toArray()) {
+                const QJsonObject record = projectedRecords.isEmpty()
+                    ? QJsonObject{} : [&]() {
+                          for (const QJsonValue& item : projectedRecords) {
+                              if (item.toObject().value(QStringLiteral("intelId")) == value) {
+                                  return item.toObject();
+                              }
+                          }
+                          return QJsonObject{};
+                      }();
+                if (record.isEmpty() || record.value(QStringLiteral("freshness"))
+                                       != QLatin1String("archived")) {
+                    return invalid(QStringLiteral("情报归档增量缺少归档记录"));
+                }
+            }
         }
     } else if (type == QLatin1String("commandResult")) {
         return projectCommandResult(payload, nullptr);
@@ -1433,15 +1583,44 @@ ValidationResult validateServerPayload(const QString& type, const QJsonObject& p
     } else if (type == QLatin1String("deploymentPrompt")) {
         return projectDeploymentPrompt(payload, nullptr);
     } else if (type == QLatin1String("intelShare")) {
+        if (schemaVersion == LegacySchemaVersion) {
+            if (!validIdentifier(payload.value(QStringLiteral("senderSeatId")))
+                || !validIdentifier(payload.value(QStringLiteral("targetId")))
+                || !validOptionalString(payload, QStringLiteral("sharedAt"), MaxIntelTimestampLength)
+                || !validOptionalString(payload, QStringLiteral("note"),
+                                        LegacyShareIntelNoteLength)) {
+                return invalid(QStringLiteral("旧版情报共享消息结构无效"));
+            }
+            return ValidationResult::success();
+        }
         return projectIntelShare(payload, nullptr);
+    } else if (type == QLatin1String("intelHistoryPage")) {
+        if (schemaVersion == LegacySchemaVersion) {
+            return invalid(QStringLiteral("当前协议版本不支持情报历史"));
+        }
+        return validateIntelHistoryPage(payload);
     }
     return ValidationResult::success();
 }
 
+ValidationResult validateClientPayload(const QString& type, const QJsonObject& payload) {
+    return validateClientPayloadForVersion(type, payload, SchemaVersion);
+}
+
+ValidationResult validateServerPayload(const QString& type, const QJsonObject& payload) {
+    return validateServerPayloadForVersion(type, payload, SchemaVersion);
+}
+
 QJsonObject makeClientEnvelope(const QString& type, const QString& messageId,
                                const QJsonObject& payload) {
-    return {{QStringLiteral("protocolVersion"), Version},
-            {QStringLiteral("schemaVersion"), SchemaVersion},
+    return makeClientEnvelopeForVersion(type, messageId, payload, Version, SchemaVersion);
+}
+
+QJsonObject makeClientEnvelopeForVersion(const QString& type, const QString& messageId,
+                                         const QJsonObject& payload,
+                                         int protocolVersion, int schemaVersion) {
+    return {{QStringLiteral("protocolVersion"), protocolVersion},
+            {QStringLiteral("schemaVersion"), schemaVersion},
             {QStringLiteral("type"), type},
             {QStringLiteral("messageId"), messageId},
             {QStringLiteral("payload"), payload}};
@@ -1449,8 +1628,14 @@ QJsonObject makeClientEnvelope(const QString& type, const QString& messageId,
 
 QJsonObject makeServerEnvelope(const QString& type, quint64 sequence,
                                const QJsonObject& payload) {
-    return {{QStringLiteral("protocolVersion"), Version},
-            {QStringLiteral("schemaVersion"), SchemaVersion},
+    return makeServerEnvelopeForVersion(type, sequence, payload, Version, SchemaVersion);
+}
+
+QJsonObject makeServerEnvelopeForVersion(const QString& type, quint64 sequence,
+                                         const QJsonObject& payload,
+                                         int protocolVersion, int schemaVersion) {
+    return {{QStringLiteral("protocolVersion"), protocolVersion},
+            {QStringLiteral("schemaVersion"), schemaVersion},
             {QStringLiteral("type"), type},
             {QStringLiteral("sequence"), static_cast<qint64>(sequence)},
             {QStringLiteral("sentAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},

@@ -8,14 +8,16 @@
 namespace gbr {
 
 CommandPost::CommandPost(const QString& id, Side side, MessageBus* bus, QObject* parent)
-    : UnitBase(id, UnitKind::CommandPost, side, bus, parent) {
-    setStatus("待命");
+    : MobileUnitBase(id, UnitKind::CommandPost, side, bus, parent) {
+    setupMobileFsm("moving", "指挥所缓慢机动", "待命");
 }
 
-void CommandPost::onTick(double) {
+void CommandPost::onTick(double dt) {
+    MobileUnitBase::onTick(dt);
 }
 
 void CommandPost::onMessage(const Message& m) {
+    onMobileMessage(m);
     switch (m.type) {
     case Message::Type::TargetDetect: {
         const QString tid = m.payload.value("targetId").toString();
@@ -158,11 +160,14 @@ void CommandPost::sendAck(const Message& original) {
 }
 
 QJsonObject CommandPost::behaviorCheckpoint() const {
-    return {{QStringLiteral("pendingTargets"), m_pending},
-            {QStringLiteral("knownTargets"), m_targets}};
+    QJsonObject state = MobileUnitBase::behaviorCheckpoint();
+    state.insert(QStringLiteral("pendingTargets"), m_pending);
+    state.insert(QStringLiteral("knownTargets"), m_targets);
+    return state;
 }
 
-bool CommandPost::restoreBehaviorCheckpoint(const QJsonObject& state, QString*) {
+bool CommandPost::restoreBehaviorCheckpoint(const QJsonObject& state, QString* error) {
+    if (!MobileUnitBase::restoreBehaviorCheckpoint(state, error)) return false;
     m_pending = state.value(QStringLiteral("pendingTargets")).toObject();
     m_targets = state.value(QStringLiteral("knownTargets")).toObject();
     emit sharedKnowledgeChanged();

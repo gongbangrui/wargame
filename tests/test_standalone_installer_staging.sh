@@ -35,19 +35,15 @@ esac
 EOF
 chmod +x "$BIN_DIR/docker" "$BIN_DIR/curl"
 
-archive="$WORK_DIR/wargame-server-fixture.tar.gz"
+archive="$WORK_DIR/dist/wargame-server-fixture.tar.gz"
+mkdir -p "$WORK_DIR/dist"
 grep -Fqx 'AI_PROVIDER=auto' "$ROOT_DIR/deploy/.env.example"
 grep -Fqx 'OLLAMA_BASE_URL=http://host.docker.internal:11434' "$ROOT_DIR/deploy/.env.example"
 grep -Fqx 'OLLAMA_MODEL=auto' "$ROOT_DIR/deploy/.env.example"
 grep -Fqx '      OLLAMA_MODEL: "${OLLAMA_MODEL:-auto}"' "$ROOT_DIR/deploy/compose.yml"
 grep -Fqx 'OLLAMA_MODEL="auto"' <(sed -n '1,80p' "$ROOT_DIR/deploy/install-server.sh")
-tar -C "$ROOT_DIR" \
-    --exclude='server/account/*.db*' \
-    --exclude='server/account/*.log' \
-    --exclude='server/account/backups' \
-    --exclude='build' --exclude='dist' --exclude='.codegraph' \
-    --transform='s,^,wargame-server-fixture/,' \
-    -czf "$archive" CMakeLists.txt cmake src server map/metadata.json deploy .dockerignore README.md docs
+WARGAME_VERSION=fixture DIST_DIR="$WORK_DIR/dist" \
+    "$ROOT_DIR/deploy/package-one-click.sh" >/dev/null
 
 run_installer() {
     PATH="$BIN_DIR:$PATH" DOCKER_LOG="$DOCKER_LOG" HOME="$WORK_DIR/home" \
@@ -162,7 +158,6 @@ printf 'cache\n' >"$raw_source/server/account/.pytest_cache/fixture"
 run_source_installer "$raw_source" "$raw_install"
 raw_first_digest="$(sed -n 's/^WARGAME_SOURCE_DIGEST=//p' "$raw_install/.env" | head -n1)"
 test -n "$raw_first_digest"
-test -f "$raw_install/current/deploy/.env.example"
 test ! -e "$raw_install/current/deploy/.env"
 test ! -e "$raw_install/current/server/account/runtime.db"
 test ! -e "$raw_install/current/server/account/events.jsonl"

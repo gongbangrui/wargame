@@ -3,6 +3,9 @@
 #include <QDateTime>
 #include <QJsonArray>
 #include <QDebug>
+#include <QQueue>
+#include <QSet>
+#include <cmath>
 
 namespace gbr {
 
@@ -36,6 +39,12 @@ void MessageBus::updateUnitPosition(const QString& unitId, const QPointF& pos, d
     if (!side.isEmpty()) r.side = side;
 }
 
+void MessageBus::setUnitActive(const QString& unitId, bool active) {
+    auto it = m_units.find(unitId);
+    if (it == m_units.end()) return;
+    it->second.active = active;
+}
+
 void MessageBus::setUnitCommandPost(const QString& unitId, bool isCp) {
     auto it = m_units.find(unitId);
     if (it == m_units.end()) return;
@@ -61,13 +70,34 @@ bool MessageBus::canCommunicate(const QString& aId, const QString& bId) const {
     auto a = m_units.find(aId);
     auto b = m_units.find(bId);
     if (a == m_units.end() || b == m_units.end()) return false;
+    if (!a->second.active || !b->second.active) return false;
     if (a->second.side.isEmpty() || b->second.side.isEmpty()
         || a->second.side != b->second.side) return false;
-    if (a->second.isCp || b->second.isCp) return true;
-    const double dx = a->second.pos.x() - b->second.pos.x();
-    const double dy = a->second.pos.y() - b->second.pos.y();
-    const double dist = std::sqrt(dx*dx + dy*dy);
-    return dist <= std::min(a->second.commRange, b->second.commRange);
+    if (aId == bId) return true;
+
+    // Communication is a directed, sender-range-limited graph. A message may
+    // cross friendly relay units, matching the authoritative server
+    // projection instead of granting the command post a hidden global link.
+    QQueue<QString> pending;
+    QSet<QString> visited;
+    pending.enqueue(aId);
+    visited.insert(aId);
+    while (!pending.isEmpty()) {
+        const QString currentId = pending.dequeue();
+        const auto current = m_units.find(currentId);
+        if (current == m_units.end() || !current->second.active) continue;
+        for (const auto& [candidateId, candidate] : m_units) {
+            if (visited.contains(candidateId) || !candidate.active
+                || candidate.side != a->second.side) continue;
+            const double dx = current->second.pos.x() - candidate.pos.x();
+            const double dy = current->second.pos.y() - candidate.pos.y();
+            if (std::hypot(dx, dy) > std::max(0.0, current->second.commRange)) continue;
+            if (candidateId == bId) return true;
+            visited.insert(candidateId);
+            pending.enqueue(candidateId);
+        }
+    }
+    return false;
 }
 
 void MessageBus::send(const Message& msg) {

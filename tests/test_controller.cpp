@@ -8,13 +8,17 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QHostAddress>
+#include <QJsonDocument>
 #include <QNetworkReply>
 #include <QSignalBlocker>
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QWebSocket>
+#include <QWebSocketServer>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 
@@ -91,6 +95,12 @@ public:
         emit controller.m_networkClient.commandRejected(QStringLiteral("leave rejected"));
     }
 
+    static void seedOnlineIntelRecords(SimulationController& controller,
+                                       const QVariantList& records) {
+        controller.m_sessionMode = QStringLiteral("online");
+        controller.m_onlineIntelRecords = records;
+    }
+
     static void seedPendingObserverJoin(SimulationController& controller) {
         controller.m_sessionMode = QStringLiteral("online");
         controller.m_isObserver = true;
@@ -127,6 +137,30 @@ public:
 
     static void receiveTextMessage(NetworkClient& client, const QString& text) {
         client.onTextMessage(text);
+    }
+
+    static void openNetworkTestSocket(NetworkClient& client, const QUrl& url) {
+        client.m_manualClose = false;
+        client.m_token = QStringLiteral("network-test-token");
+        client.m_webSocketUrl = url;
+        client.m_socket.open(url);
+    }
+
+    static void markNetworkTestAuthenticated(NetworkClient& client) {
+        client.m_authenticated = true;
+        client.m_state = QStringLiteral("connected");
+    }
+
+    static bool networkTestSocketConnected(NetworkClient& client) {
+        return client.m_socket.state() == QAbstractSocket::ConnectedState;
+    }
+
+    static quint64 networkTestLastSequence(NetworkClient& client) {
+        return client.m_stateStore.lastSequence();
+    }
+
+    static bool networkTestWaitingForResync(NetworkClient& client) {
+        return client.m_stateStore.waitingForResync();
     }
 };
 
@@ -231,6 +265,31 @@ QString serverErrorEnvelopeAtLength(qsizetype targetLength, const QString& messa
     return QString::fromLatin1(QJsonDocument(envelope).toJson(QJsonDocument::Compact));
 }
 
+QJsonObject networkTestSnapshot(qint64 revision) {
+    return {{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+            {QStringLiteral("stateRevision"), revision},
+            {QStringLiteral("scenario"),
+             QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                         {QStringLiteral("map"),
+                          QJsonObject{{QStringLiteral("name"), QStringLiteral("test")},
+                                      {QStringLiteral("widthMeters"), 1000.0},
+                                      {QStringLiteral("heightMeters"), 800.0}}},
+                         {QStringLiteral("units"), QJsonArray{}}}},
+            {QStringLiteral("units"), QJsonArray{}},
+            {QStringLiteral("projectiles"), QJsonArray{}},
+            {QStringLiteral("messages"), QJsonArray{}},
+            {QStringLiteral("roomState"),
+             QJsonObject{{QStringLiteral("scenarioRevision"), 1},
+                         {QStringLiteral("simTime"), 0.0}}}};
+}
+
+void sendNetworkTestEnvelope(QWebSocket* socket, const QString& type, quint64 sequence,
+                             const QJsonObject& payload) {
+    socket->sendTextMessage(QString::fromUtf8(
+        QJsonDocument(Protocol::makeServerEnvelope(type, sequence, payload))
+            .toJson(QJsonDocument::Compact)));
+}
+
 }
 
 TEST(SimulationControllerTest, UnitsJsonUsesCanonicalScenarioShape) {
@@ -279,6 +338,149 @@ TEST(NetworkClientTest, ParsesUtf16TextAtConservativeIngressBoundary) {
 
     EXPECT_TRUE(fatalError.isEmpty());
     EXPECT_EQ(commandRejection, QStringLiteral("boundary parsed"));
+}
+
+TEST(NetworkClientTest, QueuesCommandUntilInitialSnapshotIsApplied) {
+    int argc = 1;
+    char applicationName[] = "network_command_queue_test";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) application = std::make_unique<QCoreApplication>(argc, argv);
+
+    QWebSocketServer server(QStringLiteral("network command queue test"),
+                            QWebSocketServer::NonSecureMode);
+    ASSERT_TRUE(server.listen(QHostAddress::LocalHost));
+    QWebSocket* serverSocket = nullptr;
+    QObject::connect(&server, &QWebSocketServer::newConnection, &server, [&]() {
+        serverSocket = server.nextPendingConnection();
+    });
+
+    NetworkClient client;
+    SimulationControllerTestPeer::openNetworkTestSocket(client, server.serverUrl());
+    ASSERT_TRUE(waitFor([&]() {
+        return serverSocket != nullptr
+            && SimulationControllerTestPeer::networkTestSocketConnected(client);
+    }));
+    SimulationControllerTestPeer::markNetworkTestAuthenticated(client);
+
+    QStringList messages;
+    QObject::connect(serverSocket, &QWebSocket::textMessageReceived, &client,
+                     [&messages](const QString& text) { messages.append(text); });
+    client.sendCommand(QStringLiteral("activateScan"),
+                       QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")}});
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    EXPECT_TRUE(std::none_of(messages.cbegin(), messages.cend(), [](const QString& text) {
+        return QJsonDocument::fromJson(text.toUtf8()).object()
+            .value(QStringLiteral("type")).toString() == QLatin1String("command");
+    }));
+
+    sendNetworkTestEnvelope(
+        serverSocket, QStringLiteral("welcome"), 1,
+        QJsonObject{{QStringLiteral("username"), QStringLiteral("red-user")},
+                    {QStringLiteral("displayName"), QStringLiteral("红方用户")},
+                    {QStringLiteral("role"), QStringLiteral("red")} });
+    sendNetworkTestEnvelope(serverSocket, QStringLiteral("snapshot"), 2,
+                             networkTestSnapshot(42));
+    ASSERT_TRUE(waitFor([&]() {
+        return std::any_of(messages.cbegin(), messages.cend(), [](const QString& text) {
+            return QJsonDocument::fromJson(text.toUtf8()).object()
+                .value(QStringLiteral("type")).toString() == QLatin1String("command");
+        });
+    }));
+    QJsonObject commandEnvelope;
+    for (const QString& text : messages) {
+        const QJsonObject candidate = QJsonDocument::fromJson(text.toUtf8()).object();
+        if (candidate.value(QStringLiteral("type")).toString() == QLatin1String("command")) {
+            commandEnvelope = candidate;
+            break;
+        }
+    }
+    ASSERT_FALSE(commandEnvelope.isEmpty());
+    EXPECT_EQ(commandEnvelope.value(QStringLiteral("payload")).toObject()
+                  .value(QStringLiteral("stateRevision")).toInteger(), 42);
+
+    client.close();
+    serverSocket->close();
+    server.close();
+}
+
+TEST(NetworkClientTest, QueuesCommandDuringResyncAndSendsAfterRecoverySnapshot) {
+    int argc = 1;
+    char applicationName[] = "network_resync_queue_test";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) application = std::make_unique<QCoreApplication>(argc, argv);
+
+    QWebSocketServer server(QStringLiteral("network resync queue test"),
+                            QWebSocketServer::NonSecureMode);
+    ASSERT_TRUE(server.listen(QHostAddress::LocalHost));
+    QWebSocket* serverSocket = nullptr;
+    QObject::connect(&server, &QWebSocketServer::newConnection, &server, [&]() {
+        serverSocket = server.nextPendingConnection();
+    });
+
+    NetworkClient client;
+    SimulationControllerTestPeer::openNetworkTestSocket(client, server.serverUrl());
+    ASSERT_TRUE(waitFor([&]() {
+        return serverSocket != nullptr
+            && SimulationControllerTestPeer::networkTestSocketConnected(client);
+    }));
+    SimulationControllerTestPeer::markNetworkTestAuthenticated(client);
+    QStringList messages;
+    QObject::connect(serverSocket, &QWebSocket::textMessageReceived, &client,
+                     [&messages](const QString& text) { messages.append(text); });
+
+    sendNetworkTestEnvelope(
+        serverSocket, QStringLiteral("welcome"), 1,
+        QJsonObject{{QStringLiteral("username"), QStringLiteral("red-user")},
+                    {QStringLiteral("displayName"), QStringLiteral("红方用户")},
+                    {QStringLiteral("role"), QStringLiteral("red")} });
+    sendNetworkTestEnvelope(serverSocket, QStringLiteral("snapshot"), 2,
+                             networkTestSnapshot(10));
+    ASSERT_TRUE(waitFor([&]() {
+        return SimulationControllerTestPeer::networkTestLastSequence(client) == 2;
+    }));
+
+    sendNetworkTestEnvelope(
+        serverSocket, QStringLiteral("delta"), 3,
+        QJsonObject{{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+                    {QStringLiteral("baseStateRevision"), 10},
+                    {QStringLiteral("stateRevision"), 11}});
+    ASSERT_TRUE(waitFor([&]() {
+        return SimulationControllerTestPeer::networkTestWaitingForResync(client);
+    }));
+    messages.clear();
+    client.sendCommand(QStringLiteral("activateScan"),
+                       QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_r1")}});
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    EXPECT_TRUE(std::none_of(messages.cbegin(), messages.cend(), [](const QString& text) {
+        return QJsonDocument::fromJson(text.toUtf8()).object()
+            .value(QStringLiteral("type")).toString() == QLatin1String("command");
+    }));
+
+    sendNetworkTestEnvelope(serverSocket, QStringLiteral("snapshot"), 4,
+                             networkTestSnapshot(20));
+    ASSERT_TRUE(waitFor([&]() {
+        return std::any_of(messages.cbegin(), messages.cend(), [](const QString& text) {
+            return QJsonDocument::fromJson(text.toUtf8()).object()
+                .value(QStringLiteral("type")).toString() == QLatin1String("command");
+        });
+    }));
+    QJsonObject commandEnvelope;
+    for (const QString& text : messages) {
+        const QJsonObject candidate = QJsonDocument::fromJson(text.toUtf8()).object();
+        if (candidate.value(QStringLiteral("type")).toString() == QLatin1String("command")) {
+            commandEnvelope = candidate;
+            break;
+        }
+    }
+    ASSERT_FALSE(commandEnvelope.isEmpty());
+    EXPECT_EQ(commandEnvelope.value(QStringLiteral("payload")).toObject()
+                  .value(QStringLiteral("stateRevision")).toInteger(), 20);
+
+    client.close();
+    serverSocket->close();
+    server.close();
 }
 
 TEST(SimulationControllerTest, EmptyAuthoritativeSnapshotClearsLocalUnits) {
@@ -451,6 +653,44 @@ TEST(SimulationControllerTest, UnitStateRevisionRefreshesRuntimePositionAmmoAndC
         }
     }
     EXPECT_TRUE(foundThreat);
+}
+
+TEST(SimulationControllerTest, OnlineAttackTargetsRequireServerActionableSensorIntel) {
+    SimulationController controller;
+    QStringList blueIds;
+    for (const QJsonValue& value : controller.engine()->collectAllUnitsSnapshot()) {
+        const QJsonObject unit = value.toObject();
+        if (unit.value(QStringLiteral("side")).toString() == QLatin1String("blue")
+            && unit.value(QStringLiteral("alive")).toBool()) {
+            blueIds.append(unit.value(QStringLiteral("id")).toString());
+        }
+    }
+    ASSERT_GE(blueIds.size(), 3);
+    SimulationControllerTestPeer::seedOnlineIntelRecords(
+        controller,
+        QVariantList{
+            QVariantMap{{QStringLiteral("intelId"), QStringLiteral("live-contact")},
+                        {QStringLiteral("type"), QStringLiteral("sensorContact")},
+                        {QStringLiteral("targetId"), blueIds.at(0)},
+                        {QStringLiteral("freshness"), QStringLiteral("live")},
+                        {QStringLiteral("actionable"), true}},
+            QVariantMap{{QStringLiteral("intelId"), QStringLiteral("stale-contact")},
+                        {QStringLiteral("type"), QStringLiteral("sensorContact")},
+                        {QStringLiteral("targetId"), blueIds.at(1)},
+                        {QStringLiteral("freshness"), QStringLiteral("stale")},
+                        {QStringLiteral("actionable"), false}},
+            QVariantMap{{QStringLiteral("intelId"), QStringLiteral("manual-report")},
+                        {QStringLiteral("type"), QStringLiteral("manualReport")},
+                        {QStringLiteral("targetId"), blueIds.at(2)},
+                        {QStringLiteral("freshness"), QStringLiteral("live")},
+                        {QStringLiteral("actionable"), true}}});
+
+    const QVariantList targets = controller.detectedEnemyOptions(
+        QString(), QStringLiteral("red"), QStringLiteral("blue"));
+
+    ASSERT_EQ(targets.size(), 1);
+    EXPECT_EQ(targets.constFirst().toMap().value(QStringLiteral("id")).toString(),
+              blueIds.constFirst());
 }
 
 TEST(SimulationControllerTest, UnseatedRunningSnapshotStaysInRoomSelectionAndHidesRuntime) {
@@ -864,11 +1104,35 @@ TEST(SimulationControllerTest, ShortcutSettingIsReadableWhenChangeIsSignaled) {
     EXPECT_EQ(valueObservedByQml, QStringLiteral("Ctrl+Alt+9"));
 }
 
+TEST(SimulationControllerTest, SettingIsReadableWhenGeneralChangeIsSignaled) {
+    QStandardPaths::setTestModeEnabled(true);
+    SimulationController controller;
+    QString changedKey;
+    QVariant valueObservedByQml;
+    QObject::connect(&controller, &SimulationController::settingChanged,
+                     &controller, [&controller, &changedKey, &valueObservedByQml](
+                                      const QString& key) {
+                         changedKey = key;
+                         valueObservedByQml = controller.loadSetting(key);
+                     });
+
+    controller.saveSetting(QStringLiteral("online/intel/showLive"), false);
+
+    EXPECT_EQ(changedKey, QStringLiteral("online/intel/showLive"));
+    EXPECT_FALSE(valueObservedByQml.toBool());
+}
+
 TEST(SimulationControllerTest, NetworkPasswordIsNeverWrittenToSettingsJson) {
     QStandardPaths::setTestModeEnabled(true);
     SimulationController controller;
+    int settingChangeCount = 0;
+    QObject::connect(&controller, &SimulationController::settingChanged,
+                     &controller, [&settingChangeCount](const QString&) {
+                         ++settingChangeCount;
+                     });
 
     controller.saveSetting(QStringLiteral("network/password"), QStringLiteral("plaintext-secret"));
 
     EXPECT_FALSE(controller.allSettings().contains(QStringLiteral("network/password")));
+    EXPECT_EQ(settingChangeCount, 0);
 }

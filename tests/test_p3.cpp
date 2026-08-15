@@ -134,10 +134,7 @@ TEST(P3LifecycleTest, LowFuelAndEmptyAmmoDoNotForcePlayerReturn) {
     attacker->cancelWaypointMotion();
     attacker->restoreRuntimeWeaponState(1, 0.0, QString(), 10.0, 0.0);
     attacker->setPosition(engine.unit(QStringLiteral("blue_r1"))->pos());
-    ASSERT_TRUE(engine.executeCommand(
-        QStringLiteral("engageTarget"),
-        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
-                    {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
+    attacker->fireOnTarget(QStringLiteral("blue_r1"));
     engine.stepOnce(0.05);
     EXPECT_EQ(attacker->ammoRemaining(), 0);
     EXPECT_FALSE(attacker->serviceRequested());
@@ -152,15 +149,16 @@ TEST(P3LifecycleTest, RulesOfEngagementAndCancelEngagementAreEnforced) {
     ASSERT_NE(attacker, nullptr);
     ASSERT_NE(target, nullptr);
     attacker->setPosition(target->pos());
+    // The attacker is moved to the remote engagement area. Place the mobile
+    // command post nearby so the command remains a valid in-network order.
+    engine.unit(QStringLiteral("red_cp"))->setPosition(
+        GeoPos{target->pos().x - 1000.0, target->pos().y, target->pos().alt});
 
     ASSERT_TRUE(engine.executeCommand(
         QStringLiteral("setRoe"),
         QVariantMap{{QStringLiteral("unitId"), QStringLiteral("red_a1")},
                     {QStringLiteral("roe"), QStringLiteral("hold")}}).accepted);
-    ASSERT_TRUE(engine.executeCommand(
-        QStringLiteral("engageTarget"),
-        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
-                    {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
+    attacker->fireOnTarget(QStringLiteral("blue_r1"));
     const int ammoBefore = attacker->ammoRemaining();
     engine.stepOnce(1.0);
     EXPECT_EQ(attacker->ammoRemaining(), ammoBefore);
@@ -216,6 +214,10 @@ TEST(P3ReplayTest, SeekReproducesRecordedStateAndReportAggregatesCombat) {
             unit.damageMax = 20.0;
             unit.cooldownSec = 10.0;
             unit.minAttackRange = 0.0;
+        } else if (unit.id == QLatin1String("red_cp")) {
+            // Keep this replay fixture focused on combat, while still using
+            // the real command/communication path.
+            unit.commRange = 20000.0;
         }
     }
     SimulationEngine engine;

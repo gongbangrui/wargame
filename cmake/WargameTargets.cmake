@@ -52,6 +52,8 @@ function(wargame_add_protocol_library target source_root)
     add_library(${target} STATIC
         ${source_root}/src/protocol/Protocol.h
         ${source_root}/src/protocol/Protocol.cpp
+        ${source_root}/src/protocol/IntelProtocol.h
+        ${source_root}/src/protocol/IntelProtocol.cpp
         ${source_root}/src/protocol/StateDelta.h
         ${source_root}/src/protocol/StateDelta.cpp
         ${source_root}/src/protocol/dds/WargameEnvelope.h

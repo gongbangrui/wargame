@@ -84,6 +84,8 @@ class UnitBase : public QObject {
     Q_PROPERTY(double attackRange READ attackRange WRITE setAttackRange NOTIFY paramsChanged)
     Q_PROPERTY(double commRange READ commRange WRITE setCommRange NOTIFY paramsChanged)
     Q_PROPERTY(double speed READ speed WRITE setSpeed NOTIFY paramsChanged)
+    Q_PROPERTY(double collisionRadius READ collisionRadius NOTIFY paramsChanged)
+    Q_PROPERTY(double collisionHalfHeight READ collisionHalfHeight NOTIFY paramsChanged)
     Q_PROPERTY(double maxCommandedSpeed READ maxCommandedSpeed CONSTANT)
     Q_PROPERTY(double maxHp READ maxHp WRITE setMaxHp NOTIFY paramsChanged)
     Q_PROPERTY(double attackPower READ attackPower WRITE setAttackPower NOTIFY paramsChanged)
@@ -104,8 +106,10 @@ public:
     struct Params {
         double detectRange = 5000.0;
         double attackRange = 1500.0;
-        double commRange = 20000.0;
+        double commRange = 7000.0;
         double speed = 50.0;
+        double collisionRadius = 0.0;
+        double collisionHalfHeight = 0.0;
         double maxHp = 100.0;
         double attackPower = 100.0;
         double armor = 0.0;
@@ -160,14 +164,14 @@ public:
     QString kindStr() const { return kindName(m_kind); }
     UnitKind kind() const { return m_kind; }
     Side side() const { return m_side; }
-    bool movable() const { return m_kind != UnitKind::CommandPost; }
+    bool movable() const { return commandedSpeedLimitMps(m_kind) > 0.0; }
 
     /// @brief Maximum speed accepted by an authoritative movement command.
     /// @details Direct setters remain available for snapshot/replay fixtures;
     /// command and scenario validation use this rule as the security boundary.
     static constexpr double commandedSpeedLimitMps(UnitKind kind) {
         switch (kind) {
-        case UnitKind::CommandPost: return 0.0;
+        case UnitKind::CommandPost: return 8.0;
         case UnitKind::ReconUAV: return 300.0;
         case UnitKind::AttackUAV: return 360.0;
         case UnitKind::GroundScout: return 36.0;
@@ -177,7 +181,7 @@ public:
     }
     static constexpr double defaultSpeedMps(UnitKind kind) {
         switch (kind) {
-        case UnitKind::CommandPost: return 0.0;
+        case UnitKind::CommandPost: return 4.0;
         case UnitKind::ReconUAV: return 150.0;
         case UnitKind::AttackUAV: return 200.0;
         case UnitKind::GroundScout: return 18.0;
@@ -186,6 +190,60 @@ public:
         return 0.0;
     }
     double maxCommandedSpeed() const { return commandedSpeedLimitMps(m_kind); }
+
+    static constexpr double defaultCommRangeM(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 7000.0;
+        case UnitKind::ReconUAV: return 6000.0;
+        case UnitKind::AttackUAV: return 5000.0;
+        case UnitKind::GroundScout: return 4000.0;
+        case UnitKind::JammerUAV: return 6500.0;
+        }
+        return 4000.0;
+    }
+    static constexpr double defaultCollisionRadiusM(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 120.0;
+        case UnitKind::ReconUAV: return 35.0;
+        case UnitKind::AttackUAV: return 45.0;
+        case UnitKind::GroundScout: return 30.0;
+        case UnitKind::JammerUAV: return 50.0;
+        }
+        return 30.0;
+    }
+    static constexpr double defaultCollisionHalfHeightM(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 20.0;
+        case UnitKind::ReconUAV: return 15.0;
+        case UnitKind::AttackUAV: return 20.0;
+        case UnitKind::GroundScout: return 2.0;
+        case UnitKind::JammerUAV: return 20.0;
+        }
+        return 2.0;
+    }
+    static constexpr double collisionImpactPower(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 1.40;
+        case UnitKind::ReconUAV: return 0.65;
+        case UnitKind::AttackUAV: return 1.00;
+        case UnitKind::GroundScout: return 0.85;
+        case UnitKind::JammerUAV: return 0.90;
+        }
+        return 1.0;
+    }
+    static constexpr double collisionResistance(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 1.60;
+        case UnitKind::ReconUAV: return 0.70;
+        case UnitKind::AttackUAV: return 1.00;
+        case UnitKind::GroundScout: return 0.90;
+        case UnitKind::JammerUAV: return 0.80;
+        }
+        return 1.0;
+    }
+    static constexpr bool isGroundCollisionLayer(UnitKind kind) {
+        return kind == UnitKind::CommandPost || kind == UnitKind::GroundScout;
+    }
 
     QVariantList position() const;
     QJsonObject perceptionJson() const;
@@ -203,6 +261,8 @@ public:
     double baseCommRange() const { return m_baseCommRange; }
     double baseAttackRange() const { return m_baseAttackRange; }
     double baseSpeed() const { return m_baseSpeed; }
+    double collisionRadius() const { return m_params.collisionRadius; }
+    double collisionHalfHeight() const { return m_params.collisionHalfHeight; }
     double speed() const { return m_params.speed; }
     double maxHp() const { return m_params.maxHp; }
     double attackPower() const { return m_params.attackPower; }
@@ -229,6 +289,7 @@ public:
         if (m_hp > v) {
             m_hp = v;
             m_lastNotifiedHp = m_hp;
+            if (m_bus) m_bus->setUnitActive(m_id, alive());
             emit hpChanged();
         }
         emit paramsChanged();
@@ -239,6 +300,7 @@ public:
         if (m_hp != c) {
             const bool wasAlive = alive();
             m_hp = c;
+            if (m_bus && wasAlive != alive()) m_bus->setUnitActive(m_id, alive());
             // Coalesce tiny updates, but compare against the last value that
             // observers actually saw so repeated small damage is not hidden.
             if (wasAlive != alive() || std::abs(c - m_lastNotifiedHp) >= 0.5) {
@@ -267,7 +329,9 @@ public:
     double fuelBurnRate() const { return m_fuelBurnRate; }
     double estimatedFuelEndurance() const;
     double economyCruiseSpeed() const { return m_economyCruiseSpeed; }
-    bool hasUsableFuel() const { return !movable() || m_fuelRemaining > 1e-9; }
+    bool hasUsableFuel() const {
+        return m_kind == UnitKind::CommandPost || m_fuelRemaining > 1e-9;
+    }
 
     const AbilityState& countermeasureState() const { return m_countermeasure; }
     const AbilityState& scanState() const { return m_scan; }

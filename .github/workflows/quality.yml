@@ -58,6 +58,12 @@ jobs:
         run: cmake --build --preset debug --parallel
       - name: Build Sanitizers
         run: cmake --build --preset sanitizers --parallel
+      - name: Verify test baseline
+        run: ./tools/verify-test-baseline.sh build/debug build/sanitizers
+      - name: Test Debug
+        run: ctest --test-dir build/debug --output-on-failure
+      - name: Test Sanitizers
+        run: ctest --test-dir build/sanitizers --output-on-failure
       - name: Lint QML
         run: cmake --build build/debug --target all_qmllint --parallel
       - name: Check source format

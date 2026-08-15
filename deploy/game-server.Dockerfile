@@ -10,7 +10,7 @@ WORKDIR /source
 COPY src /source/src
 COPY cmake /source/cmake
 COPY server /source/server
-ARG WARGAME_VERSION=1.0.0
+ARG WARGAME_VERSION=2.0.0
 ARG WARGAME_SOURCE_DIGEST=dev
 ARG WARGAME_ENABLE_FASTDDS=OFF
 RUN cmake -S /source/server -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWARGAME_VERSION=${WARGAME_VERSION} -DWARGAME_SOURCE_DIGEST=${WARGAME_SOURCE_DIGEST} -DWARGAME_ENABLE_FASTDDS=${WARGAME_ENABLE_FASTDDS} \
@@ -30,7 +30,7 @@ COPY map/metadata.json /opt/wargame/map/metadata.json
 ENV WARGAME_MAP_DIR=/opt/wargame/map
 USER wargame
 WORKDIR /opt/wargame
-ARG WARGAME_VERSION=1.0.0
+ARG WARGAME_VERSION=2.0.0
 ARG WARGAME_SOURCE_DIGEST=dev
 LABEL org.opencontainers.image.title="wargame-server" \
       org.opencontainers.image.version="${WARGAME_VERSION}" \

@@ -32,6 +32,7 @@ make_fixture() {
         --exclude='*/logs' \
         --exclude='*/backups' \
         -cf - CMakeLists.txt cmake src server map/metadata.json deploy .dockerignore README.md docs \
+        Main.qml main.cpp qml \
         | tar -C "$fixture" -xf -
 }
 
@@ -60,6 +61,11 @@ if [[ -f "$archive" ]]; then
         'wargame-server-fixture/deploy/install-server.sh' \
         'wargame-server-fixture/deploy/account.Dockerfile' \
         'wargame-server-fixture/deploy/game-server.Dockerfile' \
+        'wargame-server-fixture/deploy/release-lib.sh' \
+        'wargame-server-fixture/deploy/release-manifest.env' \
+        'wargame-server-fixture/release-identity.txt' \
+        'wargame-server-fixture/Main.qml' \
+        'wargame-server-fixture/main.cpp' \
         'wargame-server-fixture/deploy/QUICK_START.md'; do
         grep -Fqx "$required" "$listing" || fail "archive is missing: $required"
     done

@@ -2,7 +2,7 @@
 
 /*
  * 联网模式冒烟验证：账号单客户端、房间生命周期、指挥官优先、容量展开、
- * 战位视野与通信边界、就绪开局、战位命令以及管理员移出房间。脚本只创建临时账号。
+ * 战位视野与通信边界、情报台账/共享、就绪开局、战位命令以及管理员移出房间。脚本只创建临时账号。
  */
 
 const accountUrl = (process.env.ACCOUNT_URL || "http://127.0.0.1:8080").replace(/\/$/, "");
@@ -76,6 +76,20 @@ class GameSession {
         this.state.roomState = message.payload.roomState;
         if (message.payload.messages) this.state.messages = message.payload.messages;
         if (message.payload.mapMarks) this.state.mapMarks = message.payload.mapMarks;
+        if (message.payload.intelDelta) {
+          const delta = message.payload.intelDelta;
+          const current = this.state.intelState || { revision: 0, records: [], shareTargets: [] };
+          assert(delta.baseRevision === current.revision,
+            `${this.name}: 情报增量基线不连续`);
+          const records = new Map((current.records || []).map(record => [record.intelId, record]));
+          for (const record of delta.upserts || []) records.set(record.intelId, structuredClone(record));
+          for (const intelId of delta.deletedIntelIds || []) records.delete(intelId);
+          this.state.intelState = {
+            revision: delta.revision,
+            records: [...records.values()].sort((a, b) => a.intelId.localeCompare(b.intelId)),
+            shareTargets: structuredClone(delta.shareTargets || []),
+          };
+        }
         this.state.stateRevision = message.payload.stateRevision;
         this.messages.push({ type: "state", payload: structuredClone(this.state) });
       }
@@ -91,8 +105,8 @@ class GameSession {
 
   sendWithId(messageId, type, payload) {
     this.socket.send(JSON.stringify({
-      protocolVersion: 4,
-      schemaVersion: 4,
+      protocolVersion: 6,
+      schemaVersion: 6,
       type,
       messageId,
       payload,
@@ -458,14 +472,51 @@ try {
 
   byKey.redCommander.send("control", { action: "pause" });
   await byKey.redCommander.waitFor(message => message.type === "error" && message.payload.code === "PERMISSION_DENIED");
-  byKey.redAttack.send("shareIntel", {
-    targetId: target.id,
+  await byKey.redAttack.waitFor(message => message.type === "state"
+    && (message.payload.intelState?.records || []).some(record => record.targetId === target.id), 10000);
+  const intel = byKey.redAttack.state.intelState.records.find(record => record.targetId === target.id);
+  assert(intel?.intelId, "可见敌方目标必须先进入发送方情报台账");
+  const shareRequestId = crypto.randomUUID();
+  byKey.redAttack.sendWithId(shareRequestId, "shareIntel", {
+    intelId: intel.intelId,
     recipientSeatIds: ["red_commander"],
     note: "联网冒烟情报共享",
   });
+  await byKey.redAttack.waitFor(message => message.type === "commandResult"
+    && message.payload.commandId === shareRequestId && message.payload.accepted);
   await byKey.redCommander.waitFor(message => message.type === "intelShare"
+    && message.payload.intelId === intel.intelId
     && message.payload.targetId === target.id
     && message.payload.note === "联网冒烟情报共享");
+  const manualReportRequestId = crypto.randomUUID();
+  byKey.redAttack.sendWithId(manualReportRequestId, "createIntelReport", {
+    position: { x: 1800, y: 2800 },
+    type: "obstacle",
+    title: "桥梁",
+    note: "联网冒烟人工报告",
+  });
+  await byKey.redAttack.waitFor(message => message.type === "commandResult"
+    && message.payload.commandId === manualReportRequestId && message.payload.accepted);
+  await byKey.redAttack.waitFor(message => message.type === "state"
+    && (message.payload.intelState?.records || []).filter(record => record.type === "manualReport"
+      && record.note === "联网冒烟人工报告").length === 1);
+  const duplicateStart = byKey.redAttack.messages.length;
+  byKey.redAttack.sendWithId(manualReportRequestId, "createIntelReport", {
+    position: { x: 1800, y: 2800 },
+    type: "obstacle",
+    title: "桥梁",
+    note: "联网冒烟人工报告",
+  });
+  await byKey.redAttack.waitForAfter(duplicateStart, message => message.type === "commandResult"
+    && message.payload.commandId === manualReportRequestId && message.payload.accepted);
+  const duplicateReports = (byKey.redAttack.state.intelState?.records || [])
+    .filter(record => record.type === "manualReport" && record.note === "联网冒烟人工报告");
+  assert(duplicateReports.length === 1, "重复人工情报请求不能产生重复台账记录");
+  const historyRequestId = crypto.randomUUID();
+  byKey.redAttack.sendWithId(historyRequestId, "requestIntelHistory", { pageSize: 20 });
+  await byKey.redAttack.waitFor(message => message.type === "intelHistoryPage");
+  await byKey.redAttack.waitFor(message => message.type === "commandResult"
+    && message.payload.commandId === historyRequestId && message.payload.accepted);
   byKey.redCommander.close();
   await byKey.redAttack.waitFor(message => message.type === "seatState"
     && message.payload.yourSeatId === "red_commander", 10000);

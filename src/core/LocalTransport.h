@@ -7,8 +7,8 @@
 namespace gbr {
 
 /// @brief In-process transport wrapping the existing MessageBus.
-/// @details Zero behavioural difference from the pre-refactor MessageBus:
-/// same in-memory pub/sub, same canCommunicate rules, same CP bypass.
+/// @details In-memory pub/sub transport with the same directed range graph as
+/// the authoritative online communication model.
 /// All methods forward to the held MessageBus. This is the default transport
 /// when running single-process; networking layers would be TcpTransport,
 /// UdpTransport, etc.

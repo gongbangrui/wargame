@@ -1,6 +1,7 @@
 #pragma once
 
 #include "protocol/Protocol.h"
+#include "protocol/IntelProtocol.h"
 
 #include <QJsonObject>
 #include <QString>
@@ -36,13 +37,17 @@ public:
     const Protocol::RoomLifecycleProjection& lifecycle() const { return m_lifecycle; }
     bool waitingForSnapshot() const { return m_waitingForSnapshot; }
     bool waitingForResync() const { return m_waitingForResync; }
+    const Protocol::IntelState& intelState() const { return m_intelState; }
 
 private:
     quint64 m_lastSequence = 0;
+    int m_protocolVersion = 0;
+    int m_schemaVersion = 0;
     QJsonObject m_snapshot;
     Protocol::RoomLifecycleProjection m_lifecycle;
     bool m_waitingForSnapshot = true;
     bool m_waitingForResync = false;
+    Protocol::IntelState m_intelState;
 };
 
 } // namespace gbr

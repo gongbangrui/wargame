@@ -245,6 +245,14 @@ void AttackUAV::stepCombat(double dt) {
     request.attackerEffectiveness = jamFactor() * weaponEffectiveness();
     request.weapon = WeaponProfile{m_hitProbability, m_minAttackRange, m_optimalRange,
                                    attackRange(), m_damageMin, m_damageMax, m_rangeFalloff};
+    // Preserve the legacy attackPower safety boundary: an explicitly disabled
+    // weapon must not inflict damage merely because a separate damage range is
+    // populated in the scenario profile.
+    if (attackPower() <= 1e-9) {
+        request.attackerEffectiveness = 0.0;
+        request.weapon.damageMin = 0.0;
+        request.weapon.damageMax = 0.0;
+    }
     m_pendingShot = request;
 }
 

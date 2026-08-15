@@ -13,6 +13,7 @@
 | `network-smoke.mjs` | Node, account/game services, admin secret | Auth, rooms, seats, visibility and commands |
 | `room-hosting-contract.mjs` | Node, deployed services, admin secret | Room hosting lifecycle |
 | `verify-docker-recovery.sh` | Docker Compose, ports | Isolated smoke, stop, backup, restore and restart |
+| `build-release.sh` | Qt 6.10, Qt 6.4 standalone, CMake/Ninja | One release identity for desktop and both server artifacts |
 
 ## CONVENTIONS
 

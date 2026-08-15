@@ -651,6 +651,8 @@ function openRoomModal(room = null) {
   $("roomModePve").checked = room?.mode === "pve";
   $("roomModePvp").checked = room?.mode !== "pve";
   $("roomAiDifficulty").value = room?.aiDifficulty || "normal";
+  $("roomIntelStale").value = room?.intelStaleAfterSec ?? 10;
+  $("roomIntelArchive").value = room?.intelArchiveAfterSec ?? 120;
   const globalAi = state.overview?.aiConfig || {};
   const defaultProvider = room?.aiProvider
     || (["rules"].includes(globalAi.provider) ? "rules" : "ollama");
@@ -676,6 +678,8 @@ function updateRoomModeEditor() {
   $("roomAiProvider").disabled = locked || mode !== "pve";
   $("roomAiModel").disabled = locked || mode !== "pve";
   $("roomAiDifficulty").disabled = locked || mode !== "pve";
+  $("roomIntelStale").disabled = locked;
+  $("roomIntelArchive").disabled = locked;
   $("roomModeLockHint").classList.toggle("hidden", !locked);
   if (mode !== "pve") $("roomAiResolved").textContent = "PVP 房间固定使用规则引擎";
 }
@@ -1421,7 +1425,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const seatLimits = collectSeatLimits();
       const seatParameters = collectSeatParameters();
       const roomId = $("roomId").value || $("roomKey").value.trim();
-      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_limits: seatLimits, seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value, ai_provider: $("roomAiProvider").value, ai_model: $("roomAiModel").value.trim() };
+      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_limits: seatLimits, seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value, ai_provider: $("roomAiProvider").value, ai_model: $("roomAiModel").value.trim(), intel_stale_after_sec: Number($("roomIntelStale").value), intel_archive_after_sec: Number($("roomIntelArchive").value) };
       await api(roomId && $("roomId").value ? `/api/admin/rooms/${encodeURIComponent(roomId)}` : "/api/admin/rooms", { method: roomId && $("roomId").value ? "PUT" : "POST", body: JSON.stringify(body) });
       closeRoomModal(); await loadRooms(); toast("房间已保存");
     } catch (error) { toast(error.message || "房间配置 JSON 无效", true); state.roomSaving = false; $("roomSave").disabled = false; }

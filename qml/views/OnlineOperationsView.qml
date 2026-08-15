@@ -28,6 +28,8 @@ Item {
     property string unitSpeedDraftUnitId: ""
     property bool unitSpeedDirty: false
     property string selectedCommandMarkerId: ""
+    property var intelReportPosition: null
+    property bool intelReportPicking: false
     property var dismissedCommandMarkerIds: []
     property var selectedRecipientIds: []
     property bool switchSeatSelection: false
@@ -36,6 +38,15 @@ Item {
     property string switchSourceSeatId: ""
     property string switchTargetSeatId: ""
     property string observedMatchPhase: ""
+    property bool showIntelLive: true
+    property bool showIntelStale: true
+    property bool showIntelManual: true
+    property bool showIntelUncertainty: true
+    property bool notifyNewIntel: true
+    property bool notifyIntelShare: true
+    property string intelNotificationScope: ""
+    property bool intelNotificationBaselineReady: false
+    property var knownIntelIds: ({})
     // The compact and desktop layouts share this one panel; only its active
     // tactical view changes.  Keeping the state here also preserves the tab
     // when the panel is moved into the narrow-screen drawer.
@@ -56,6 +67,69 @@ Item {
     onAttackTargetIdChanged: root.syncAttackTargetBox()
 
     signal openChatRequested()
+
+    function reloadOnlineSettings() {
+        if (!root.controller) return
+        root.showIntelLive = Boolean(root.controller.loadSetting("online/intel/showLive", true))
+        root.showIntelStale = Boolean(root.controller.loadSetting("online/intel/showStale", true))
+        root.showIntelManual = Boolean(root.controller.loadSetting("online/intel/showManual", true))
+        root.showIntelUncertainty = Boolean(root.controller.loadSetting("online/intel/showUncertainty", true))
+        root.notifyNewIntel = Boolean(root.controller.loadSetting("online/notifications/newIntel", true))
+        root.notifyIntelShare = Boolean(root.controller.loadSetting("online/notifications/intelShare", true))
+        root.showCommunicationRange = Boolean(root.controller.loadSetting("online/map/showCommunicationRange", false))
+        root.showDetectionRange = Boolean(root.controller.loadSetting("online/map/showDetectionRange", true))
+        root.showAttackRange = Boolean(root.controller.loadSetting("online/map/showAttackRange", true))
+        root.tacticalViewIndex = Math.max(0, Math.min(2,
+            Number(root.controller.loadSetting("online/sidebar/defaultView", 0))))
+    }
+
+    function currentIntelNotificationScope() {
+        if (!root.controller) return ""
+        return String(root.controller.currentRoomId || "") + "|"
+            + String(root.controller.currentSeatId || "")
+    }
+
+    function resetIntelNotificationBaseline() {
+        root.intelNotificationScope = root.currentIntelNotificationScope()
+        root.intelNotificationBaselineReady = false
+        root.knownIntelIds = ({})
+    }
+
+    function rememberIntelId(intelId) {
+        var id = String(intelId || "")
+        if (!id) return
+        var known = root.knownIntelIds
+        known[id] = true
+        root.knownIntelIds = known
+    }
+
+    function syncIntelNotifications() {
+        var scope = root.currentIntelNotificationScope()
+        if (scope !== root.intelNotificationScope)
+            root.resetIntelNotificationBaseline()
+        var records = root.controller ? root.controller.onlineIntelRecords : []
+        var known = root.knownIntelIds
+        var newRecords = []
+        for (var i = 0; i < records.length; ++i) {
+            var record = records[i] || ({})
+            var intelId = String(record.intelId || "")
+            if (!intelId) continue
+            if (root.intelNotificationBaselineReady && !known[intelId])
+                newRecords.push(record)
+            known[intelId] = true
+        }
+        root.knownIntelIds = known
+        root.intelNotificationBaselineReady = true
+        if (!root.notifyNewIntel || newRecords.length === 0) return
+        if (newRecords.length > 1) {
+            root.deploymentNotice = "收到 " + newRecords.length + " 条新情报"
+            return
+        }
+        var item = newRecords[0]
+        var attributes = item.knownAttributes || ({})
+        root.deploymentNotice = "新情报 · "
+            + String(item.targetId || attributes.title || item.intelId)
+    }
 
     property bool isHumanControlledSeat: root.controller && (root.controller.roomMode !== "pve"
         || root.controller.currentSeatSide === "red")
@@ -96,6 +170,8 @@ Item {
         root.deploymentTargetSeatId = ""
         root.deploymentState = "idle"
         root.selectedCommandMarkerId = ""
+        root.intelReportPosition = null
+        root.intelReportPicking = false
         root.dismissedCommandMarkerIds = []
         root.selectedRecipientIds = []
         root.subordinateMessageDraft = ""
@@ -176,6 +252,21 @@ Item {
         var state = root.normalizedCommunicationState()
         return state === "bilateral" ? root.cyan
              : state === "receiveOnly" ? root.orange : root.danger
+    }
+    function priorityIntelSummary() {
+        var records = root.controller ? (root.controller.onlineIntelRecords || []) : []
+        var live = 0
+        var stale = 0
+        var actionable = 0
+        for (var i = 0; i < records.length; ++i) {
+            var record = records[i] || ({})
+            if (record.freshness === "live") live++
+            else if (record.freshness === "stale") stale++
+            if (record.actionable === true) actionable++
+        }
+        if (actionable > 0) return "待处置 " + actionable
+        if (stale > 0) return "失联 " + stale + " · 实时 " + live
+        return live > 0 ? "实时 " + live : "无待处置情报"
     }
     function commanderSeatId() {
         var seats = root.controller.onlineSeats || []
@@ -614,6 +705,7 @@ Item {
         }
         return result
     }
+
     function mapMarkRecipientSeats() {
         var selected = root.recipientSeats()
         if (selected.length > 0 || !root.isCommander) return selected
@@ -801,6 +893,8 @@ Item {
             }
         }
         function onOnlineStateChanged() {
+            if (root.currentIntelNotificationScope() !== root.intelNotificationScope)
+                root.resetIntelNotificationBaseline()
             if (root.controller.onlineStage === "login") root.controller.requestOnlineRooms()
             if (root.controller.onlineStage === "seatSelect"
                     && root.controller.currentSeatId === ""
@@ -879,15 +973,26 @@ Item {
         }
         function onIntelShareReceived(share) {
             if (!share) return
+            root.rememberIntelId(share.intelId)
+            if (!root.notifyIntelShare) return
             var source = root.seatById(share.senderSeatId)
             var target = root.controller.unitAt(share.targetId)
             var sourceLabel = source ? root.seatLabel(source) : (share.senderSeatId || "友方战位")
-            var targetLabel = target && target.callsign ? target.callsign : (share.targetId || "未知目标")
-            root.deploymentNotice = sourceLabel + "共享敌情 · " + targetLabel
+            var targetLabel = target && target.callsign ? target.callsign
+                : (share.targetId || share.intelId || "情报")
+            root.deploymentNotice = sourceLabel + "共享情报 · " + targetLabel
+        }
+        function onOnlineIntelChanged() { root.syncIntelNotifications() }
+        function onSettingChanged(key) {
+            if (String(key).indexOf("online/") === 0)
+                root.reloadOnlineSettings()
         }
     }
 
     Component.onCompleted: {
+        root.reloadOnlineSettings()
+        root.resetIntelNotificationBaseline()
+        root.syncIntelNotifications()
         root.observedMatchPhase = root.controller.matchPhase
         if (root.controller.onlineStage === "login") root.controller.requestOnlineRooms()
         root.refreshUnitNameDraft()
@@ -1057,6 +1162,14 @@ Item {
                     color: root.dim; font.pixelSize: 10; font.family: "Consolas"
                     elide: Text.ElideRight
                 }
+                Text {
+                    visible: !root.controller.isObserver && !root.compactLayout
+                    text: root.priorityIntelSummary()
+                    color: root.controller.onlineIntelRecords.length > 0 ? root.orange : root.dim
+                    font.pixelSize: 10
+                    font.bold: root.controller.onlineIntelRecords.length > 0
+                    elide: Text.ElideRight
+                }
             }
             Behavior on opacity { NumberAnimation { duration: 220 } }
         }
@@ -1168,7 +1281,7 @@ Item {
             Item {
                     GridLayout { id: battleLayout; anchors.fill: parent; columns: root.compactLayout ? 1 : 2; columnSpacing: 12; rowSpacing: 12
                     Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 420; Layout.preferredWidth: root.compactLayout ? -1 : Math.max(420, battleLayout.width - 368); Layout.minimumHeight: root.compactLayout ? 250 : 0; Layout.preferredHeight: root.compactLayout ? battleLayout.height : -1; color: root.panel; border.color: root.line; radius: 6
-                        MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.controller.isObserver ? null : root.deployedUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId
+                            MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.controller.isObserver ? null : root.deployedUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); intelRecords: root.controller.isObserver ? [] : root.controller.onlineIntelRecords; showIntelLive: root.showIntelLive; showIntelStale: root.showIntelStale; showIntelManual: root.showIntelManual; showIntelUncertainty: root.showIntelUncertainty; selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId
                             onClickedMap: function(point) {
                                 if (root.controller.isObserver) return
                                 if (root.canDeploy) {
@@ -1185,6 +1298,15 @@ Item {
                             }
                             onRightClickedMap: function(point) {
                                 if (root.controller.isObserver) return
+                                if (root.intelReportPicking) {
+                                    root.intelReportPosition = point
+                                    root.intelReportPicking = false
+                                    onlineCanvas.pulseActionAt(point, root.cyan)
+                                    root.deploymentNotice = "已选情报位置 "
+                                        + Number(point.x).toFixed(0) + ", "
+                                        + Number(point.y).toFixed(0)
+                                    return
+                                }
                                 if (root.controller.matchPhase === "running") {
                                     var recipients = root.mapMarkRecipientSeats()
                                     root.controller.markOnlineMap(point,
@@ -1200,6 +1322,17 @@ Item {
                             onUnitClicked: function(unitId, button) {
                                 var unit = root.controller.unitAt(unitId)
                                 if (!unit) return
+                                if (root.intelReportPicking && button === "right"
+                                        && unit.position && unit.position.length >= 2) {
+                                    root.intelReportPosition = {
+                                        x: Number(unit.position[0]), y: Number(unit.position[1])
+                                    }
+                                    root.intelReportPicking = false
+                                    root.deploymentNotice = "已选情报位置 "
+                                        + Number(unit.position[0]).toFixed(0) + ", "
+                                        + Number(unit.position[1]).toFixed(0)
+                                    return
+                                }
                                 if (root.controller.isObserver) {
                                     root.selectUnit(unit)
                                 } else if (unit.side === root.controller.currentSeatSide) {
@@ -1209,8 +1342,6 @@ Item {
                                     root.deploymentNotice = "已选中攻击目标 · " + (unit.callsign || unit.id)
                                 } else if (root.controller.currentSeatType === "attack") {
                                     root.selectAttackTarget(unitId)
-                                } else if (root.controller.currentSeatType === "recon" && button === "right") {
-                                    root.controller.shareOnlineIntel(unitId, root.recipientSeats(), "地图标记敌情")
                                 }
                             }
                             onGuideSourceChanged: function(unitId) {
@@ -1365,7 +1496,11 @@ Item {
                                             bottomPadding: 0
                                             property bool active: root.tacticalViewIndex === tacticalTabButton.index
                                             Accessible.name: tacticalTabButton.modelData.accessible
-                                            onClicked: root.tacticalViewIndex = tacticalTabButton.index
+                                            onClicked: {
+                                                root.tacticalViewIndex = tacticalTabButton.index
+                                                root.controller.saveSetting("online/sidebar/defaultView",
+                                                                            tacticalTabButton.index)
+                                            }
 
                                             contentItem: Item {
                                                 anchors.fill: parent
@@ -1734,15 +1869,15 @@ Item {
                                 visible: !root.controller.isObserver && root.tacticalViewIndex === 2
                                 Layout.fillWidth: true
                                 spacing: 6
-                                CheckBox { id: communicationRangeToggle; text: "通信范围"; checked: root.showCommunicationRange; Accessible.name: "显示选中单位的通信范围"; onToggled: root.showCommunicationRange = checked
+                                CheckBox { id: communicationRangeToggle; text: "通信范围"; checked: root.showCommunicationRange; Accessible.name: "显示选中单位的通信范围"; onToggled: root.controller.saveSetting("online/map/showCommunicationRange", checked)
                                     contentItem: Text { text: communicationRangeToggle.text; color: communicationRangeToggle.checked ? AppContext.rangeCommunication : root.dim; font.pixelSize: 10; leftPadding: 18; verticalAlignment: Text.AlignVCenter }
                                     indicator: Rectangle { x: 1; anchors.verticalCenter: parent.verticalCenter; width: 13; height: 13; radius: 2; color: communicationRangeToggle.checked ? AppContext.rangeCommunication : root.page; border.color: root.line; Text { anchors.centerIn: parent; text: communicationRangeToggle.checked ? "✓" : ""; color: root.page; font.pixelSize: 9 } }
                                 }
-                                CheckBox { id: detectionRangeToggle; text: "探测范围"; checked: root.showDetectionRange; Accessible.name: "显示选中单位的探测范围"; onToggled: root.showDetectionRange = checked
+                                CheckBox { id: detectionRangeToggle; text: "探测范围"; checked: root.showDetectionRange; Accessible.name: "显示选中单位的探测范围"; onToggled: root.controller.saveSetting("online/map/showDetectionRange", checked)
                                     contentItem: Text { text: detectionRangeToggle.text; color: detectionRangeToggle.checked ? AppContext.rangeDetection : root.dim; font.pixelSize: 10; leftPadding: 18; verticalAlignment: Text.AlignVCenter }
                                     indicator: Rectangle { x: 1; anchors.verticalCenter: parent.verticalCenter; width: 13; height: 13; radius: 2; color: detectionRangeToggle.checked ? AppContext.rangeDetection : root.page; border.color: root.line; Text { anchors.centerIn: parent; text: detectionRangeToggle.checked ? "✓" : ""; color: root.page; font.pixelSize: 9 } }
                                 }
-                                CheckBox { id: attackRangeToggle; text: "攻击范围"; checked: root.showAttackRange; Accessible.name: "显示选中单位的攻击范围"; onToggled: root.showAttackRange = checked
+                                CheckBox { id: attackRangeToggle; text: "攻击范围"; checked: root.showAttackRange; Accessible.name: "显示选中单位的攻击范围"; onToggled: root.controller.saveSetting("online/map/showAttackRange", checked)
                                     contentItem: Text { text: attackRangeToggle.text; color: attackRangeToggle.checked ? AppContext.rangeAttack : root.dim; font.pixelSize: 10; leftPadding: 18; verticalAlignment: Text.AlignVCenter }
                                     indicator: Rectangle { x: 1; anchors.verticalCenter: parent.verticalCenter; width: 13; height: 13; radius: 2; color: attackRangeToggle.checked ? AppContext.rangeAttack : root.page; border.color: root.line; Text { anchors.centerIn: parent; text: attackRangeToggle.checked ? "✓" : ""; color: root.page; font.pixelSize: 9 } }
                                 }
@@ -1818,25 +1953,19 @@ Item {
                                                     && root.controller.matchPhase === "running"
                                 Accessible.name: "选中友方单位详情"
                             }
-                            ComboBox {
-                                id: intelTargetBox
-                                visible: !root.controller.isObserver
-                                         && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander")
-                                         && root.controller.matchPhase === "running"
-                                         && root.tacticalViewIndex === 2
+                            OnlineIntelWorkspace {
+                                visible: !root.controller.isObserver && root.tacticalViewIndex === 2
+                                controller: root.controller
+                                mapCanvas: onlineCanvas
+                                seats: root.controller.onlineSeats
+                                reportPosition: root.intelReportPosition
+                                reportPicking: root.intelReportPicking
                                 Layout.fillWidth: true
-                                model: root.controller.unitStateRevision >= 0
-                                    ? root.controller.detectedEnemyOptions(root.selectedUnitId, root.controller.currentSeatSide, root.controller.currentSeatSide === "red" ? "blue" : "red") : []
-                                textRole: "callsign"
-                                valueRole: "id"
-                                enabled: count > 0
-                                background: Rectangle { color: "#0b151c"; border.color: root.line; radius: 4 }
-                                contentItem: Text { text: intelTargetBox.currentText || "选择要共享的敌情"; color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; font.pixelSize: 10 }
-                            }
-                            Button { id: shareIntelButton; visible: !root.controller.isObserver && (root.controller.currentSeatType === "recon" || root.controller.currentSeatType === "commander") && root.tacticalViewIndex === 2; Layout.fillWidth: true; text: "共享选定敌情"; enabled: intelTargetBox.count > 0 && root.recipientSeats().length > 0
-                                onClicked: root.controller.shareOnlineIntel(intelTargetBox.currentValue, root.recipientSeats(), "手动共享敌情")
-                                contentItem: Text { text: shareIntelButton.text; color: root.cyan; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
-                                background: Rectangle { color: shareIntelButton.enabled ? root.panelAlt : root.line; border.color: root.line; radius: 4 }
+                                onReportPickRequested: {
+                                    root.intelReportPicking = true
+                                    root.deploymentNotice = "右键选择人工情报位置"
+                                }
+                                onReportPickCancelled: root.intelReportPicking = false
                             }
                             ComboBox {
                                 id: targetBox

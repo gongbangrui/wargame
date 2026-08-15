@@ -426,8 +426,7 @@ TEST_F(EngineTest, CommandPostDestructionReportsOutcomeOnce) {
                          ++outcomeCount;
                          winner = w;
                      });
-    engine.command("engageTarget", QVariantMap{{"attackerId", "red_a1"},
-                                                {"targetId", "blue_cp"}});
+    dynamic_cast<AttackUAV*>(attacker)->fireOnTarget(QStringLiteral("blue_cp"));
 
     engine.stepOnce(0.1);
     engine.stepOnce(0.1);
@@ -473,10 +472,8 @@ TEST_F(EngineTest, SimultaneousCommandPostKillsProduceDraw) {
                          loser = l;
                      });
 
-    engine.command("engageTarget", QVariantMap{{"attackerId", "red_a1"},
-                                                {"targetId", "blue_cp"}});
-    engine.command("engageTarget", QVariantMap{{"attackerId", "blue_a1"},
-                                                {"targetId", "red_cp"}});
+    dynamic_cast<AttackUAV*>(redAttacker)->fireOnTarget(QStringLiteral("blue_cp"));
+    dynamic_cast<AttackUAV*>(blueAttacker)->fireOnTarget(QStringLiteral("red_cp"));
     engine.stepOnce(0.1);
 
     EXPECT_FALSE(redCp->alive());
@@ -558,8 +555,7 @@ TEST_F(EngineTest, DestroyedTargetLeavesAttackerInPlaceWithoutAutoWithdraw) {
     attacker->setPosition(target->pos());
     target->setHp(50.0);
 
-    engine.command("engageTarget", QVariantMap{{"attackerId", "red_a1"},
-                                                {"targetId", "blue_r1"}});
+    dynamic_cast<AttackUAV*>(attacker)->fireOnTarget(QStringLiteral("blue_r1"));
     engine.stepOnce(0.1);
 
     ASSERT_FALSE(target->alive());

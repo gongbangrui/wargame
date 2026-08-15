@@ -50,6 +50,12 @@ class SimulationController : public QObject {
     Q_PROPERTY(QVariantList onlineRooms READ onlineRooms NOTIFY onlineRoomsChanged)
     Q_PROPERTY(QVariantList onlineSeats READ onlineSeats NOTIFY onlineSeatsChanged)
     Q_PROPERTY(QVariantList onlineMapMarks READ onlineMapMarks NOTIFY onlineMapMarksChanged)
+    Q_PROPERTY(QVariantList onlineIntelRecords READ onlineIntelRecords NOTIFY onlineIntelChanged)
+    Q_PROPERTY(qint64 onlineIntelRevision READ onlineIntelRevision NOTIFY onlineIntelChanged)
+    Q_PROPERTY(QStringList onlineIntelShareTargets READ onlineIntelShareTargets NOTIFY onlineIntelChanged)
+    Q_PROPERTY(QVariantList onlineIntelHistory READ onlineIntelHistory NOTIFY onlineIntelHistoryChanged)
+    Q_PROPERTY(bool onlineIntelHistoryHasMore READ onlineIntelHistoryHasMore NOTIFY onlineIntelHistoryChanged)
+    Q_PROPERTY(QString onlineIntelHistoryCursor READ onlineIntelHistoryCursor NOTIFY onlineIntelHistoryChanged)
     Q_PROPERTY(QJsonObject observerTrajectories READ observerTrajectories
                NOTIFY observerTrajectoriesChanged)
     Q_PROPERTY(QVariantList pendingSeatTransfers READ pendingSeatTransfers NOTIFY pendingSeatTransfersChanged)
@@ -121,6 +127,12 @@ public:
     QVariantList onlineRooms() const { return m_onlineRooms; }
     QVariantList onlineSeats() const { return m_onlineSeats; }
     QVariantList onlineMapMarks() const { return m_onlineMapMarks; }
+    QVariantList onlineIntelRecords() const { return m_onlineIntelRecords; }
+    qint64 onlineIntelRevision() const { return m_onlineIntelRevision; }
+    QStringList onlineIntelShareTargets() const { return m_onlineIntelShareTargets; }
+    QVariantList onlineIntelHistory() const { return m_onlineIntelHistory; }
+    bool onlineIntelHistoryHasMore() const { return m_onlineIntelHistoryHasMore; }
+    QString onlineIntelHistoryCursor() const { return m_onlineIntelHistoryCursor; }
     QJsonObject observerTrajectories() const { return m_observerTrajectories; }
     QVariantList pendingSeatTransfers() const { return m_pendingSeatTransfers; }
     QString currentRoomId() const { return m_currentRoomId; }
@@ -164,10 +176,9 @@ public:
     Q_INVOKABLE void saveRememberedPassword(const QString& server, const QString& username,
                                             const QString& password, bool remember);
     Q_INVOKABLE void loadRememberedPassword(const QString& server, const QString& username);
-    /// @brief Tell QML "your cached settings are stale, please re-read".
-    /// @details Emitted whenever a shortcut or other UI-binding setting changes,
-    /// so QML can re-call reloadAllShortcuts()/applySettings() without waiting
-    /// for the settings panel to close.
+    /// @brief Tell QML that a setting was durably written and can be re-read.
+    Q_SIGNAL void settingChanged(const QString& key);
+    /// @brief Compatibility signal for the root shortcut cache.
     Q_SIGNAL void shortcutsChanged();
     Q_SIGNAL void rememberedPasswordLoaded(const QString& password);
 
@@ -192,8 +203,13 @@ public:
     Q_INVOKABLE void requestOnlineRedeploy();
     Q_INVOKABLE void redeployOnlineUnit(const QString& seatId);
     Q_INVOKABLE void setOnlineUnitName(const QString& unitName);
-    Q_INVOKABLE void shareOnlineIntel(const QString& targetId, const QStringList& recipientSeatIds,
-                                      const QString& note = QString());
+    Q_INVOKABLE QString shareOnlineIntel(const QString& intelId,
+                                         const QStringList& recipientSeatIds,
+                                         const QString& note = QString());
+    Q_INVOKABLE QString createOnlineIntelReport(const QVariantMap& position, const QString& type,
+                                                const QString& title = QString(),
+                                                const QString& note = QString());
+    Q_INVOKABLE QString requestOnlineIntelHistory(const QVariantMap& query = {});
     Q_INVOKABLE void markOnlineMap(const QVariantMap& position, const QString& label = QString(),
                                    const QStringList& recipientSeatIds = {});
     Q_INVOKABLE void setObserverTrajectories(const QStringList& unitIds);
@@ -258,12 +274,17 @@ signals:
     void onlineRoomsChanged();
     void onlineSeatsChanged();
     void onlineMapMarksChanged();
+    void onlineIntelChanged();
+    void onlineIntelHistoryChanged();
     void observerTrajectoriesChanged();
     void pendingSeatTransfersChanged();
     void onlineStateChanged();
     void leaveRoomPendingChanged();
     void deploymentPrompt(const QVariantMap& prompt);
     void intelShareReceived(const QVariantMap& share);
+    void onlineIntelCommandStatus(const QString& action, const QString& requestId,
+                                  const QString& status, const QString& code,
+                                  const QString& message);
     void transferEventReceived(const QVariantMap& event);
     void chatMessagesChanged();
     void commandStatusChanged();
@@ -346,6 +367,13 @@ private:
     QVariantList m_onlineRooms;
     QVariantList m_onlineSeats;
     QVariantList m_onlineMapMarks;
+    QVariantList m_onlineIntelRecords;
+    qint64 m_onlineIntelRevision = 0;
+    QStringList m_onlineIntelShareTargets;
+    QVariantList m_onlineIntelHistory;
+    bool m_onlineIntelHistoryHasMore = false;
+    QString m_onlineIntelHistoryCursor;
+    bool m_onlineIntelHistoryAppendPending = false;
     QJsonObject m_observerTrajectories;
     QVariantList m_pendingSeatTransfers;
     QString m_currentRoomId;

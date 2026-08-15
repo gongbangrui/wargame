@@ -38,7 +38,7 @@ public:
     virtual void updateUnitPosition(const QString& unitId, const QPointF& pos,
                                     double commRange, const QString& side = QString()) = 0;
 
-    /// @brief Mark a unit as a command post (bypasses range checks).
+    /// @brief Mark a unit as a command post for projection metadata.
     virtual void setUnitCommandPost(const QString& unitId, bool isCp) = 0;
 
     /// @brief Update a unit's side (used when scenario changes side).

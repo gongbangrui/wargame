@@ -38,6 +38,10 @@ bool finiteNonNegative(double value) {
 UnitBase::UnitBase(const QString& id, UnitKind kind, Side side, MessageBus* bus,
                      QObject* parent, UnitOwner owner)
     : QObject(parent), m_id(id), m_kind(kind), m_side(side), m_owner(owner), m_bus(bus) {
+    m_params.commRange = defaultCommRangeM(kind);
+    m_params.speed = defaultSpeedMps(kind);
+    m_params.collisionRadius = defaultCollisionRadiusM(kind);
+    m_params.collisionHalfHeight = defaultCollisionHalfHeightM(kind);
     m_hp = m_params.maxHp;
     m_lastNotifiedHp = m_hp;
     m_baseDetectRange = m_params.detectRange;
@@ -76,6 +80,14 @@ void UnitBase::setParams(const Params& p) {
     m_armor = std::clamp(p.armor, 0.0, 0.9);
     m_repairRate = std::max(0.0, p.repairRate);
     m_subsystemRepairRate = std::max(0.0, p.subsystemRepairRate);
+    m_params.collisionRadius = std::clamp(
+        std::isfinite(p.collisionRadius) && p.collisionRadius > 0.0
+            ? p.collisionRadius : defaultCollisionRadiusM(m_kind),
+        1.0, 1000.0);
+    m_params.collisionHalfHeight = std::clamp(
+        std::isfinite(p.collisionHalfHeight) && p.collisionHalfHeight > 0.0
+            ? p.collisionHalfHeight : defaultCollisionHalfHeightM(m_kind),
+        0.1, 500.0);
     bool hpWasClamped = false;
     if (m_hp > m_params.maxHp) { m_hp = m_params.maxHp; hpWasClamped = true; }
     if (hpWasClamped || std::abs(m_hp - prevHp) >= 0.5) {
@@ -259,7 +271,7 @@ void UnitBase::configureAbilitiesAndFuelEconomy() {
 
 void UnitBase::configureFuel(double capacity, double initialFuel,
                              double economyCruiseSpeed) {
-    if (!movable() || !std::isfinite(capacity) || capacity <= 0.0
+    if (m_kind == UnitKind::CommandPost || !movable() || !std::isfinite(capacity) || capacity <= 0.0
         || !std::isfinite(initialFuel) || !std::isfinite(economyCruiseSpeed)
         || economyCruiseSpeed <= 0.0) {
         if (!movable()) {
@@ -286,7 +298,7 @@ void UnitBase::advanceRuntimeState(double dt, double actualSpeed) {
     advanceCooldown(m_scan.cooldownRemaining);
     advanceCooldown(m_repairCooldownRemaining);
 
-    if (movable() && m_fuelCapacity > 0.0) {
+    if (movable() && m_kind != UnitKind::CommandPost && m_fuelCapacity > 0.0) {
         const double speedRatio = std::max(0.0, actualSpeed)
             / std::max(1e-6, m_economyCruiseSpeed);
         const double rawBurnRate = m_fuelIdleRate + m_fuelMoveCoefficient
@@ -315,7 +327,7 @@ void UnitBase::advanceRuntimeState(double dt, double actualSpeed) {
 }
 
 double UnitBase::estimatedFuelEndurance() const {
-    if (!movable() || m_fuelCapacity <= 0.0) return 0.0;
+    if (m_kind == UnitKind::CommandPost || !movable() || m_fuelCapacity <= 0.0) return 0.0;
     if (m_fuelBurnRate <= 1e-9) return std::numeric_limits<double>::infinity();
     return m_fuelRemaining / m_fuelBurnRate;
 }
@@ -438,7 +450,7 @@ void UnitBase::completeService() {
     m_commsHealth = 1.0;
     m_mobilityHealth = 1.0;
     m_weaponHealth = 1.0;
-    if (movable()) m_fuelRemaining = m_fuelCapacity;
+    if (movable() && m_kind != UnitKind::CommandPost) m_fuelRemaining = m_fuelCapacity;
     if (!m_countermeasure.unlimited()) m_countermeasure.remaining = m_countermeasure.capacity;
     restoreServiceSpecificResources();
     m_fuelWarningStage = 0;

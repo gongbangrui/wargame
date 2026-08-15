@@ -116,6 +116,34 @@ TEST(ProtocolTest, ClientEnvelopeRequiresBothVersionsAndMessageId) {
               QStringLiteral("INVALID_ENVELOPE"));
 }
 
+TEST(ProtocolTest, AcceptsLegacyWireVersionOnlyThroughCompatibleValidation) {
+    const QJsonObject legacyClient = Protocol::makeClientEnvelopeForVersion(
+        QStringLiteral("ping"), QStringLiteral("legacy-ping"), QJsonObject{},
+        Protocol::LegacyVersion, Protocol::LegacySchemaVersion);
+    EXPECT_TRUE(Protocol::validateClientEnvelopeForVersion(legacyClient).valid);
+    EXPECT_FALSE(Protocol::validateClientEnvelope(legacyClient).valid);
+
+    const QJsonObject legacySnapshot{
+        {QStringLiteral("schemaVersion"), Protocol::LegacySchemaVersion},
+        {QStringLiteral("stateRevision"), 1},
+        {QStringLiteral("scenario"), QJsonObject{}},
+        {QStringLiteral("units"), QJsonArray{}},
+        {QStringLiteral("projectiles"), QJsonArray{}},
+        {QStringLiteral("roomState"),
+         QJsonObject{{QStringLiteral("scenarioRevision"), 1}}}};
+    const QJsonObject legacyServer = Protocol::makeServerEnvelopeForVersion(
+        QStringLiteral("snapshot"), 1, legacySnapshot,
+        Protocol::LegacyVersion, Protocol::LegacySchemaVersion);
+    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(legacyServer).valid);
+    EXPECT_FALSE(Protocol::validateServerEnvelope(legacyServer).valid);
+
+    const QJsonObject mixed = Protocol::makeServerEnvelopeForVersion(
+        QStringLiteral("pong"), 1, QJsonObject{},
+        Protocol::Version, Protocol::LegacySchemaVersion);
+    EXPECT_EQ(Protocol::validateServerEnvelopeForVersion(mixed).code,
+              QStringLiteral("SCHEMA_MISMATCH"));
+}
+
 TEST(ProtocolTest, RejectsFractionalVersionsAndRevisions) {
     QJsonObject client = Protocol::makeClientEnvelope(
         QStringLiteral("ping"), QStringLiteral("fractional-client"), QJsonObject{});
@@ -371,13 +399,47 @@ TEST(ProtocolTest, ValidatesRoomSeatAndIntelMessages) {
     EXPECT_TRUE(Protocol::validateClientEnvelope(join).valid);
     const auto share = Protocol::makeClientEnvelope(
         QStringLiteral("shareIntel"), QStringLiteral("share-1"),
-        QJsonObject{{QStringLiteral("targetId"), QStringLiteral("blue_r1")},
+        QJsonObject{{QStringLiteral("intelId"), QStringLiteral("sensor-red-blue_r1")},
                     {QStringLiteral("recipientSeatIds"), QJsonArray{QStringLiteral("red_commander")}}});
     EXPECT_TRUE(Protocol::validateClientEnvelope(share).valid);
+    const auto legacyShare = Protocol::makeClientEnvelope(
+        QStringLiteral("shareIntel"), QStringLiteral("share-legacy"),
+        QJsonObject{{QStringLiteral("targetId"), QStringLiteral("blue_r1")},
+                    {QStringLiteral("recipientSeatIds"), QJsonArray{QStringLiteral("red_commander")}}});
+    EXPECT_FALSE(Protocol::validateClientEnvelope(legacyShare).valid);
     const auto badSeat = Protocol::makeClientEnvelope(
         QStringLiteral("claimSeat"), QStringLiteral("seat-1"),
         QJsonObject{{QStringLiteral("seatId"), QString(Protocol::MaxIdentifierLength + 1, QLatin1Char('x'))}});
     EXPECT_FALSE(Protocol::validateClientEnvelope(badSeat).valid);
+}
+
+TEST(ProtocolTest, PreservesLegacyShareIntelNoteLimit) {
+    const QJsonObject legacyRequest = Protocol::makeClientEnvelopeForVersion(
+        QStringLiteral("shareIntel"), QStringLiteral("legacy-share"),
+        QJsonObject{{QStringLiteral("targetId"), QStringLiteral("blue_r1")},
+                    {QStringLiteral("recipientSeatIds"),
+                     QJsonArray{QStringLiteral("red_commander")} },
+                    {QStringLiteral("note"),
+                     QString(Protocol::LegacyShareIntelNoteLength, QLatin1Char('n'))}},
+        Protocol::LegacyVersion, Protocol::LegacySchemaVersion);
+    EXPECT_TRUE(Protocol::validateClientEnvelopeForVersion(legacyRequest).valid);
+
+    QJsonObject tooLongRequest = legacyRequest;
+    QJsonObject requestPayload = tooLongRequest.value(QStringLiteral("payload")).toObject();
+    requestPayload[QStringLiteral("note")] =
+        QString(Protocol::LegacyShareIntelNoteLength + 1, QLatin1Char('n'));
+    tooLongRequest[QStringLiteral("payload")] = requestPayload;
+    EXPECT_FALSE(Protocol::validateClientEnvelopeForVersion(tooLongRequest).valid);
+
+    const QJsonObject legacyEvent = Protocol::makeServerEnvelopeForVersion(
+        QStringLiteral("intelShare"), 1,
+        QJsonObject{{QStringLiteral("senderSeatId"), QStringLiteral("red_recon")},
+                    {QStringLiteral("targetId"), QStringLiteral("blue_r1")},
+                    {QStringLiteral("sharedAt"), QStringLiteral("2026-08-14T00:00:00.000Z")},
+                    {QStringLiteral("note"),
+                     QString(Protocol::LegacyShareIntelNoteLength, QLatin1Char('n'))}},
+        Protocol::LegacyVersion, Protocol::LegacySchemaVersion);
+    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(legacyEvent).valid);
 }
 
 TEST(ProtocolTest, MapMarkRejectsMalformedRecipientSeatIds) {
@@ -580,10 +642,19 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
     Protocol::IntelShareProjection intel;
     ASSERT_TRUE(Protocol::projectIntelShare(
         QJsonObject{{QStringLiteral("senderSeatId"), QStringLiteral("red_recon_1")},
+                    {QStringLiteral("intelId"), QStringLiteral("sensor_red_recon_1_blue_r1")},
                     {QStringLiteral("targetId"), QStringLiteral("blue_r1")},
                     {QStringLiteral("sharedAt"), QStringLiteral("2026-07-23T12:00:00Z")},
                     {QStringLiteral("note"), QStringLiteral("contact")}}, &intel).valid);
     EXPECT_EQ(intel.note, QStringLiteral("contact"));
+
+    Protocol::IntelShareProjection manualIntel;
+    ASSERT_TRUE(Protocol::projectIntelShare(
+        QJsonObject{{QStringLiteral("senderSeatId"), QStringLiteral("red_ground_1")},
+                    {QStringLiteral("intelId"), QStringLiteral("manual_red_ground_1_1")},
+                    {QStringLiteral("sharedAt"), QStringLiteral("2026-07-23T12:00:00Z")}},
+        &manualIntel).valid);
+    EXPECT_TRUE(manualIntel.targetId.isEmpty());
 
     Protocol::CommandResultProjection command;
     ASSERT_TRUE(Protocol::projectCommandResult(
@@ -723,6 +794,39 @@ QJsonObject observerProtocolSnapshot() {
         {QStringLiteral("roomState"), roomState}};
 }
 
+}
+
+TEST(StateDeltaTest, CreatesAndAppliesLegacySchemaDelta) {
+    QJsonObject base{
+        {QStringLiteral("schemaVersion"), Protocol::LegacySchemaVersion},
+        {QStringLiteral("stateRevision"), 1},
+        {QStringLiteral("scenario"), QJsonObject{}},
+        {QStringLiteral("units"), QJsonArray{}},
+        {QStringLiteral("projectiles"), QJsonArray{}},
+        {QStringLiteral("roomState"),
+         QJsonObject{{QStringLiteral("scenarioRevision"), 1}}}};
+    QJsonObject current = base;
+    current[QStringLiteral("stateRevision")] = 2;
+    QJsonObject roomState = current.value(QStringLiteral("roomState")).toObject();
+    roomState[QStringLiteral("stateRevision")] = 2;
+    roomState[QStringLiteral("simTime")] = 1.1;
+    current[QStringLiteral("roomState")] = roomState;
+
+    ASSERT_TRUE(StateDelta::canCreate(base, current));
+    const QJsonObject delta = StateDelta::create(base, current);
+    ASSERT_FALSE(delta.isEmpty());
+    EXPECT_EQ(delta.value(QStringLiteral("schemaVersion")).toInteger(),
+              Protocol::LegacySchemaVersion);
+    EXPECT_FALSE(delta.contains(QStringLiteral("intelDelta")));
+    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(
+                    Protocol::makeServerEnvelopeForVersion(
+                        QStringLiteral("delta"), 2, delta,
+                        Protocol::LegacyVersion, Protocol::LegacySchemaVersion))
+                    .valid);
+
+    QString error;
+    ASSERT_TRUE(StateDelta::apply(base, delta, &error)) << error.toStdString();
+    EXPECT_EQ(base, current);
 }
 
 TEST(ProtocolTest, ObserverFlagDefaultsFalseAndRequiresBooleanWhenPresent) {
@@ -1069,4 +1173,12 @@ TEST(StateDeltaTest, RejectsWrongBaseRevision) {
     QString error;
     EXPECT_FALSE(StateDelta::apply(state, delta, &error));
     EXPECT_FALSE(error.isEmpty());
+
+    QJsonObject stagnant = delta;
+    stagnant[QStringLiteral("baseStateRevision")] = 7;
+    stagnant[QStringLiteral("stateRevision")] = 7;
+    EXPECT_FALSE(Protocol::validateServerEnvelopeForVersion(
+                     Protocol::makeServerEnvelope(QStringLiteral("delta"), 2, stagnant))
+                     .valid);
+    EXPECT_FALSE(StateDelta::apply(state, stagnant, &error));
 }

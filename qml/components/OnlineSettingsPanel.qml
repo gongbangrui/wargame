@@ -1,0 +1,109 @@
+pragma ComponentBehavior: Bound
+import QtQuick
+import QtQuick.Controls.Basic
+import QtQuick.Layouts
+
+Dialog {
+    id: root
+    property var controller: null
+    property var editor: null
+    property var appWindow: null
+    signal sessionChangeRequested()
+    modal: true
+    title: "联网设置"
+    standardButtons: Dialog.NoButton
+    width: Math.max(360, Math.min(620, parent ? parent.width - 32 : 620))
+    height: Math.max(420, Math.min(700, parent ? parent.height - 32 : 700))
+    property var onlineDefs: [
+        { action: "nextUnit", label: "下一个单元", defSeq: "Tab" },
+        { action: "prevUnit", label: "上一个单元", defSeq: "Shift+Tab" },
+        { action: "locate", label: "定位焦点", defSeq: "F" },
+        { action: "fitMap", label: "适配地图", defSeq: "Ctrl+F" },
+        { action: "sidebar", label: "战术侧栏", defSeq: "B" },
+        { action: "cancel", label: "取消操作", defSeq: "Escape" },
+        { action: "scan", label: "扫描", defSeq: "S" },
+        { action: "engage", label: "交战", defSeq: "Return" }
+    ]
+    function read(key, fallback) { return root.controller ? root.controller.loadSetting(key, fallback) : fallback }
+    function save(key, value) { if (root.controller) root.controller.saveSetting(key, value) }
+    function load() {
+        live.checked = read("online/intel/showLive", true)
+        stale.checked = read("online/intel/showStale", true)
+        manual.checked = read("online/intel/showManual", true)
+        uncertainty.checked = read("online/intel/showUncertainty", true)
+        newNotice.checked = read("online/notifications/newIntel", true)
+        shareNotice.checked = read("online/notifications/intelShare", true)
+        commRange.checked = read("online/map/showCommunicationRange", false)
+        detectRange.checked = read("online/map/showDetectionRange", true)
+        attackRange.checked = read("online/map/showAttackRange", true)
+        defaultView.currentIndex = Math.max(0, Math.min(2,
+            Number(read("online/sidebar/defaultView", 0))))
+        var historyFreshness = String(read("online/intel/defaultHistoryFreshness", ""))
+        defaultHistory.currentIndex = historyFreshness === "live" ? 1
+            : historyFreshness === "stale" ? 2 : historyFreshness === "archived" ? 3 : 0
+        shortcutEditor.reload()
+    }
+    background: Rectangle { color: AppContext.page; border.color: AppContext.line; radius: 6; border.width: 1 }
+    contentItem: Flickable {
+        clip: true; contentWidth: width; contentHeight: body.implicitHeight + 24
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ColumnLayout {
+            id: body; width: parent.width - 28; x: 14; y: 12; spacing: 8
+            SettingsSection { title: "会话"; iconName: "network"
+                GridLayout { columns: 2; Layout.fillWidth: true
+                    Label { text: "账号"; color: AppContext.muted }
+                    Label { text: root.controller ? (root.controller.displayName || root.controller.username) : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Label { text: "服务器"; color: AppContext.muted }
+                    Label { text: root.controller ? root.controller.serverAddress : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Label { text: "房间 / 战位"; color: AppContext.muted }
+                    Label { text: root.controller ? (root.controller.currentRoomId + " / " + root.controller.currentSeatId) : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Label { text: "连接"; color: AppContext.muted }
+                    Label { text: root.controller ? root.controller.networkStatus : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Label { text: "延迟"; color: AppContext.muted }
+                    Label { text: root.controller && root.controller.gameLatencyMs >= 0 ? root.controller.gameLatencyMs + " ms" : "--"; color: AppContext.text; Layout.fillWidth: true }
+                }
+                RowLayout { Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    GhostButton { text: "更换会话"; iconName: "network"; onClicked: { root.close(); root.sessionChangeRequested() } }
+                }
+            }
+            SettingsSection { title: "联网显示"; iconName: "settings"
+                SettingsToggleRow { id: commRange; label: "通信范围"; iconName: "network"; onChanged: value => root.save("online/map/showCommunicationRange", value) }
+                SettingsToggleRow { id: detectRange; label: "探测范围"; iconName: "scan"; onChanged: value => root.save("online/map/showDetectionRange", value) }
+                SettingsToggleRow { id: attackRange; label: "攻击范围"; iconName: "warning"; onChanged: value => root.save("online/map/showAttackRange", value) }
+                RowLayout { Layout.fillWidth: true; spacing: 8
+                    Label { text: "默认侧栏"; color: AppContext.text; Layout.fillWidth: true }
+                    ComboBox { id: defaultView; model: ["单位", "指挥", "情报"]; Layout.preferredWidth: 120
+                        onActivated: root.save("online/sidebar/defaultView", currentIndex)
+                    }
+                }
+            }
+            SettingsSection { title: "情报地图"; iconName: "map"
+                SettingsToggleRow { id: live; label: "显示实时接触"; iconName: "locate"; onChanged: value => root.save("online/intel/showLive", value) }
+                SettingsToggleRow { id: stale; label: "显示失联接触"; iconName: "warning"; onChanged: value => root.save("online/intel/showStale", value) }
+                SettingsToggleRow { id: manual; label: "显示人工报告"; iconName: "plus"; onChanged: value => root.save("online/intel/showManual", value) }
+                SettingsToggleRow { id: uncertainty; label: "显示不确定范围"; iconName: "scan"; onChanged: value => root.save("online/intel/showUncertainty", value) }
+                RowLayout { Layout.fillWidth: true; spacing: 8
+                    Label { text: "默认历史过滤"; color: AppContext.text; Layout.fillWidth: true }
+                    ComboBox { id: defaultHistory; model: ["全部", "实时", "失联", "归档"]; Layout.preferredWidth: 120
+                        onActivated: root.save("online/intel/defaultHistoryFreshness",
+                            currentIndex === 1 ? "live" : currentIndex === 2 ? "stale"
+                            : currentIndex === 3 ? "archived" : "")
+                    }
+                }
+            }
+            SettingsSection { title: "通知"; iconName: "chat"
+                SettingsToggleRow { id: newNotice; label: "新情报"; iconName: "dot"; onChanged: value => root.save("online/notifications/newIntel", value) }
+                SettingsToggleRow { id: shareNotice; label: "收到共享"; iconName: "send"; onChanged: value => root.save("online/notifications/intelShare", value) }
+            }
+            SettingsSection { title: "联网快捷键"; iconName: "shortcut"
+                ShortcutEditor { id: shortcutEditor; controller: root.controller; definitions: root.onlineDefs; storagePrefix: "shortcuts/online/"; onShortcutChanged: root.load() }
+            }
+            RowLayout { Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                GhostButton { text: "关闭"; iconName: "close"; onClicked: root.close() }
+            }
+        }
+    }
+    onOpened: root.load()
+}

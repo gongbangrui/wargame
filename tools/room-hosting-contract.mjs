@@ -31,6 +31,23 @@ try {
     body: JSON.stringify({ room_id: roomId, name: "托管契约回归房间" }),
   }, token);
   if (created.response.status !== 201) throw new Error(`创建临时房间失败: ${created.response.status}`);
+  if (created.payload.room?.intelStaleAfterSec !== 10
+      || created.payload.room?.intelArchiveAfterSec !== 120) {
+    throw new Error("房间必须返回默认情报时效配置");
+  }
+  const updated = await request(`/api/admin/rooms/${roomId}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      room_id: roomId,
+      name: "托管契约回归房间",
+      intel_stale_after_sec: 12,
+      intel_archive_after_sec: 180,
+    }),
+  }, token);
+  if (updated.payload.room?.intelStaleAfterSec !== 12
+      || updated.payload.room?.intelArchiveAfterSec !== 180) {
+    throw new Error("房间情报时效配置未持久化");
+  }
 
   const action = await request(`/api/admin/rooms/${roomId}/open`, { method: "POST" }, token);
   if (action.response.status !== 409) {

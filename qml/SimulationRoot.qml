@@ -74,7 +74,7 @@ Item {
             var a = ks_actions[i]
             var fallback = root.ks_defaults[a]
             var value = root.controller.loadSetting(namespace + a, undefined)
-            if (value === undefined || value === null || value === "") {
+            if (value === undefined || value === null) {
                 // Migrate the pre-v4 flat namespace on first access.
                 value = root.controller.loadSetting("shortcuts/" + a, fallback)
                 root.controller.saveSetting(namespace + a, value)
@@ -88,10 +88,15 @@ Item {
         var result = ({})
         for (var key in root.online_ks_defaults) {
             var value = root.controller.loadSetting("shortcuts/online/" + key, undefined)
-            result[key] = value === undefined || value === null || value === ""
+            result[key] = value === undefined || value === null
                 ? root.online_ks_defaults[key] : value
         }
         return result
+    }
+
+    function shortcutSequence(sequences, key, fallback) {
+        var value = sequences ? sequences[key] : undefined
+        return value === undefined || value === null ? fallback : value
     }
 
     function reloadAllShortcuts() {
@@ -176,60 +181,60 @@ Item {
     // Online controls use a separate namespace and are enabled only after a
     // room snapshot is authoritative. The Enter action deliberately uses the
     // explicitly selected target; it never falls back to the first list item.
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.nextUnit || "Tab"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "nextUnit", "Tab")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: root.switchActiveUnit(1) }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.prevUnit || "Shift+Tab"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "prevUnit", "Shift+Tab")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: root.switchActiveUnit(-1) }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.locate || "F"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "locate", "F")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: {
             var canvas = root.activeCanvas()
             var id = root.controller.focusedUnitId
             if (root.activePage && root.activePage.shortcutUnitId) id = root.activePage.shortcutUnitId()
             if (canvas && id) canvas.focusOnUnit(id)
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.fitMap || "Ctrl+F"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "fitMap", "Ctrl+F")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: root.fitActivePage() }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.sidebar || "B"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "sidebar", "B")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: if (root.activePage && root.activePage.openTacticalDrawer) root.activePage.openTacticalDrawer() }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.cancel || "Escape"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "cancel", "Escape")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.shortcutBlocked(); onActivated: {
             if (root.activePage && root.activePage.cancelOnlineShortcut) root.activePage.cancelOnlineShortcut()
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.slowDown || "["); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "slowDown", "[")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.controller.isObserver && root.controller.matchPhase === "running" && !root.shortcutBlocked(); onActivated: {
             if (root.activePage && root.activePage.adjustShortcutUnitSpeed)
                 root.activePage.adjustShortcutUnitSpeed(-10)
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.speedUp || "]"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "speedUp", "]")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.controller.isObserver && root.controller.matchPhase === "running" && !root.shortcutBlocked(); onActivated: {
             if (root.activePage && root.activePage.adjustShortcutUnitSpeed)
                 root.activePage.adjustShortcutUnitSpeed(10)
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.countermeasure || "C"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "countermeasure", "C")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
             var id = root.activePage && root.activePage.shortcutUnitId ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
             if (id) root.controller.command("activateCountermeasure", { unitId: id })
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.scan || "S"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "scan", "S")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
             var id = root.activePage && root.activePage.shortcutUnitId ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
             if (id) root.controller.command("activateScan", { unitId: id })
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.repair || "R"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "repair", "R")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
             var id = root.activePage && root.activePage.shortcutUnitId ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
             if (id) root.controller.command("attemptFieldRepair", { unitId: id })
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.halt || "H"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "halt", "H")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
             var id = root.activePage && root.activePage.shortcutUnitId ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
             if (id) root.controller.command("halt", { unitId: id })
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.engage || "Return"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "engage", "Return")); context: Qt.WindowShortcut
         enabled: root.controller.networked && !root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
             if (root.activePage && root.activePage.engageFocusedTarget) root.activePage.engageFocusedTarget()
         } }
-    Shortcut { sequences: root.toSeqList(root.online_ks_seqs.trajectory || "T"); context: Qt.WindowShortcut
+    Shortcut { sequences: root.toSeqList(root.shortcutSequence(root.online_ks_seqs, "trajectory", "T")); context: Qt.WindowShortcut
         enabled: root.controller.networked && root.controller.isObserver && !root.shortcutBlocked(); onActivated: {
             var id = root.activePage && root.activePage.shortcutUnitId
                 ? root.activePage.shortcutUnitId() : root.controller.focusedUnitId
@@ -510,7 +515,7 @@ Item {
                 ToolTip.text: root.controller.networkStatus
             }
             GhostButton {
-                text: "设置"; onClicked: settingsPanel.open()
+                text: "设置"; onClicked: root.settingsPanel.open()
             }
             GhostButton {
                 visible: !root.controller.networked && !root.compactTopBar; text: "加载默认"; onClicked: root.controller.loadDefault()
@@ -728,14 +733,28 @@ Item {
         }
     }
 
-    SettingsPanel {
-        id: settingsPanel
-        controller: root.controller
-        editor: root.editor
-        appWindow: root.appWindow
-        onClosed: { root.applySettings() }
-        onSessionChangeRequested: sessionDialog.open()
+    Loader {
+        id: settingsLoader
+        anchors.fill: parent
+        property var controller: root.controller
+        property var editor: root.editor
+        property var appWindow: root.appWindow
+        sourceComponent: root.controller && root.controller.networked ? onlineSettingsComponent : localSettingsComponent
     }
+    Component { id: localSettingsComponent
+        LocalSettingsPanel {
+            controller: root.controller; editor: root.editor; appWindow: root.appWindow
+            onClosed: root.applySettings()
+            onSessionChangeRequested: sessionDialog.open()
+        }
+    }
+    Component { id: onlineSettingsComponent
+        OnlineSettingsPanel {
+            controller: root.controller; editor: root.editor; appWindow: root.appWindow
+            onSessionChangeRequested: sessionDialog.open()
+        }
+    }
+    property var settingsPanel: settingsLoader.item
 
     SessionDialog { id: sessionDialog; controller: root.controller; editor: root.editor }
     ChatPanel { id: chatPanel; controller: root.controller; editor: root.editor }

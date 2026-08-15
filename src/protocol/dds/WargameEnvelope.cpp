@@ -176,8 +176,9 @@ QJsonObject toJson(const WargameEnvelope& envelope) {
 }
 
 DecodeResult fromJson(const QJsonObject& object) {
-    if (object.value(QStringLiteral("protocolVersion")).toInt() != Protocol::Version
-        || object.value(QStringLiteral("schemaVersion")).toInt() != Protocol::SchemaVersion) {
+    if (!Protocol::isSupportedWireVersion(
+            object.value(QStringLiteral("protocolVersion")).toInt(),
+            object.value(QStringLiteral("schemaVersion")).toInt())) {
         return invalid(QStringLiteral("DDS 协议或模式版本不兼容"));
     }
     if (!validText(object.value(QStringLiteral("messageType")), MaxEnvelopeTypeLength)

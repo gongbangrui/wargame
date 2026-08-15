@@ -91,7 +91,7 @@ TEST(LocalTransportTest, CrossSideBlocked) {
     EXPECT_EQ(blue, 0);
 }
 
-TEST(LocalTransportTest, CpBypassesRange) {
+TEST(LocalTransportTest, CpRespectsRangeWithoutRelay) {
     LocalTransport t;
     t.subscribe("red_cp", [](const Message&) {});
     t.subscribe("red_a1", [](const Message&) {});
@@ -107,7 +107,7 @@ TEST(LocalTransportTest, CpBypassesRange) {
     m.sender = "red_cp";
     m.receiver = "red_a1";
     t.send(m);
-    EXPECT_EQ(hits, 1);
+    EXPECT_EQ(hits, 0);
 }
 
 TEST(LocalTransportTest, EngineUsesLocalTransportByDefault) {

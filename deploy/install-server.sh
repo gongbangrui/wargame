@@ -7,6 +7,7 @@ set -Eeuo pipefail
 INSTALLER_VERSION="2026.08"
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/deploy/release-lib.sh"
 SOURCE_ROOT="$ROOT_DIR"
 SOURCE_INPUT=""
 SOURCE_ARCHIVE=""
@@ -21,7 +22,7 @@ WARGAME_COMPOSE_PROJECT="wargame"
 WARGAME_RUNTIME_ENV_FILE=""
 INSTALL_DIR_SET=0
 COMPOSE_PROJECT_SET=0
-PROJECT_VERSION="$(sed -nE 's/^project\([^)]* VERSION ([0-9][0-9A-Za-z._-]*).*/\1/p' "$ROOT_DIR/CMakeLists.txt" | head -n1)"
+PROJECT_VERSION="$(release_project_version "$ROOT_DIR")"
 INTERNAL_API_KEY=""
 BACKUP_FILE=""
 BIND_ADDRESS="127.0.0.1"
@@ -38,7 +39,7 @@ WEB_SHELL_SESSION_SECONDS="900"
 WEB_SHELL_MAX_SESSIONS="2"
 WEB_SHELL_ALLOWED_ORIGINS=""
 STARTUP_TIMEOUT_SECONDS="90"
-WARGAME_VERSION="${PROJECT_VERSION:-1.0.0}"
+WARGAME_VERSION="${PROJECT_VERSION:-2.0.0}"
 WARGAME_SOURCE_DIGEST="dev"
 WARGAME_RELEASE_ID="${WARGAME_VERSION}-dev"
 WARGAME_DATA_VOLUME="wargame-data"
@@ -64,6 +65,7 @@ FASTDDS_STATIC_PEERS=""
 REUSE_PASSWORD=0
 RESET_ADMIN=1
 NO_BUILD=0
+NO_CACHE=0
 NO_PULL=0
 ASSUME_YES=0
 SKIP_ENVIRONMENT_CHECK=0
@@ -84,6 +86,7 @@ SOURCE_SET=0
 ENV_EXISTED=0
 DATA_VOLUME_SET=0
 ADMIN_PASSWORD_STDIN=0
+WARGAME_VERSION_SET=0
 
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'
@@ -133,6 +136,7 @@ Gbr 兵棋推演联网服务器安装器
   --reset-admin           启动后强制重置现有管理员密码（默认开启）
   --no-reset-admin        启动后保留现有管理员密码
   --no-build              不重新构建镜像，仅启动已有镜像
+  --no-cache              重建镜像时忽略 Docker 构建缓存
   --no-pull               构建时不拉取最新基础镜像
   --skip-environment-check 跳过平台、依赖和端口环境检查
   --yes                   跳过确认提示
@@ -234,6 +238,8 @@ required_source_paths=(
   deploy/install-server.sh
   deploy/account.Dockerfile
   deploy/game-server.Dockerfile
+  deploy/release-lib.sh
+  deploy/release-manifest.env
   map/metadata.json
 )
 
@@ -383,7 +389,7 @@ is_prohibited_source_path() {
   [[ "$path" == "deploy/.env.example" ]] && return 1
 
   case "$path" in
-    .env*|*/.env*|build|build/*|*/build|*/build/*|cache|cache/*|*/cache|*/cache/*|.cache|.cache/*|*/.cache|*/.cache/*|logs|logs/*|*/logs|*/logs/*|backups|backups/*|*/backups|*/backups/*|__pycache__|__pycache__/*|*/__pycache__|*/__pycache__/*|.pytest_cache|.pytest_cache/*|*/.pytest_cache|*/.pytest_cache/*)
+    .env*|*/.env*|build|build/*|*/build|*/build/*|cache|cache/*|*/cache|*/cache/*|.cache|.cache/*|*/.cache|*/.cache/*|logs|logs/*|*/logs|*/logs/*|backups|backups/*|*/backups|*/backups/*|.omo|.omo/*|*/.omo|*/.omo/*|__pycache__|__pycache__/*|*/__pycache__|*/__pycache__/*|.pytest_cache|.pytest_cache/*|*/.pytest_cache|*/.pytest_cache/*)
       return 0
       ;;
   esac
@@ -412,7 +418,7 @@ copy_source_inputs() {
   validate_source_tree "$source"
   mkdir -p -- "$destination"
   for input in CMakeLists.txt Main.qml main.cpp qml cmake src server deploy map/metadata.json \
-      .dockerignore README.md docs; do
+      .dockerignore README.md docs release-identity.txt; do
     [[ -e "$source/$input" ]] || continue
     [[ "$input" != */* ]] || mkdir -p -- "$destination/${input%/*}"
     cp -a --no-preserve=ownership "$source/$input" "$destination/$input"
@@ -436,27 +442,8 @@ stage_source_tree() {
   for input in "${required_source_paths[@]}"; do
     [[ -e "$STAGING_DIR/$input" ]] || die "暂存源码缺少必要输入：$input"
   done
-}
-
-compute_source_digest() {
-  local source="$1"
-  (
-    cd -- "$source"
-    local input
-    local -a digest_inputs=()
-    for input in CMakeLists.txt Main.qml main.cpp qml cmake src server deploy \
-        map/metadata.json .dockerignore README.md docs; do
-      [[ -e "$input" ]] && digest_inputs+=("$input")
-    done
-    find "${digest_inputs[@]}" \
-      -type d \( -name __pycache__ -o -name .pytest_cache \) -prune -o \
-      -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \) -prune -o \
-      -type f -print0 \
-      | LC_ALL=C sort -z \
-      | xargs -0 sha256sum \
-      | sha256sum \
-      | cut -c1-64
-  )
+  release_validate_manifest "$STAGING_DIR/deploy/release-manifest.env" \
+    || die "三端发布清单校验失败"
 }
 
 activate_staged_source() {
@@ -695,7 +682,7 @@ parse_args() {
       --install-dir) INSTALL_ROOT="${2:?缺少 --install-dir 的值}"; INSTALL_DIR_SET=1; shift 2 ;;
       --compose-project) WARGAME_COMPOSE_PROJECT="${2:?缺少 --compose-project 的值}"; COMPOSE_PROJECT_SET=1; shift 2 ;;
       --data-volume) WARGAME_DATA_VOLUME="${2:?缺少 --data-volume 的值}"; DATA_VOLUME_SET=1; shift 2 ;;
-      --wargame-version) WARGAME_VERSION="${2:?缺少 --wargame-version 的值}"; shift 2 ;;
+      --wargame-version) WARGAME_VERSION="${2:?缺少 --wargame-version 的值}"; WARGAME_VERSION_SET=1; shift 2 ;;
       --reuse-admin-password) REUSE_PASSWORD=1; shift ;;
       --session-hours) SESSION_HOURS="${2:?缺少 --session-hours 的值}"; SESSION_HOURS_SET=1; shift 2 ;;
       --shell) WEB_SHELL_ENABLED="true"; WEB_SHELL_ENABLED_SET=1; shift ;;
@@ -707,6 +694,7 @@ parse_args() {
       --reset-admin) RESET_ADMIN=1; shift ;;
       --no-reset-admin) RESET_ADMIN=0; shift ;;
       --no-build) NO_BUILD=1; shift ;;
+      --no-cache) NO_CACHE=1; shift ;;
       --no-pull) NO_PULL=1; shift ;;
       --skip-environment-check) SKIP_ENVIRONMENT_CHECK=1; shift ;;
       --yes) ASSUME_YES=1; shift ;;
@@ -785,12 +773,15 @@ check_platform() {
   step "检查服务器环境"
   [[ "$OSTYPE" == linux* ]] || die "仅支持 Linux 服务器"
   if [[ $EUID -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then die "需要 root 权限或 sudo"; fi
-  require_cmd awk; require_cmd sed
   local free_mb mem_mb
-  free_mb="$(df -Pm "$ROOT_DIR" | awk 'NR==2 {print $4}')"
-  mem_mb="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
-  (( free_mb >= 4096 )) || warn "可用磁盘少于 4 GiB，首次构建 Qt 服务端可能失败（当前 ${free_mb} MiB）"
-  (( mem_mb == 0 || mem_mb >= 2048 )) || warn "可用内存少于 2 GiB，首次构建可能较慢（当前 ${mem_mb} MiB）"
+  if command -v df >/dev/null 2>&1 && command -v awk >/dev/null 2>&1; then
+    free_mb="$(df -Pm "$ROOT_DIR" | awk 'NR==2 {print $4}')"
+    mem_mb="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+    (( free_mb >= 4096 )) || warn "可用磁盘少于 4 GiB，首次构建 Qt 服务端可能失败（当前 ${free_mb} MiB）"
+    (( mem_mb == 0 || mem_mb >= 2048 )) || warn "可用内存少于 2 GiB，首次构建可能较慢（当前 ${mem_mb} MiB）"
+  else
+    warn "缺少 df/awk，跳过磁盘和内存容量提示；依赖安装阶段会补齐基础工具"
+  fi
   ok "Linux、权限、磁盘和内存检查完成"
 }
 
@@ -800,12 +791,16 @@ install_dependencies() {
     log "未检测到 Docker，开始安装"
     if command -v apt-get >/dev/null 2>&1; then
       run_root apt-get update
-      run_root apt-get install -y ca-certificates curl openssl iproute2 docker.io docker-compose-plugin || \
-        run_root apt-get install -y ca-certificates curl openssl iproute2 docker.io docker-compose-v2
+      run_root apt-get install -y ca-certificates curl openssl iproute2 docker.io docker-compose-plugin \
+        coreutils findutils tar gawk || \
+        run_root apt-get install -y ca-certificates curl openssl iproute2 docker.io docker-compose-v2 \
+          coreutils findutils tar gawk
     elif command -v dnf >/dev/null 2>&1; then
-      run_root dnf install -y ca-certificates curl openssl iproute docker docker-compose-plugin
+      run_root dnf install -y ca-certificates curl openssl iproute docker docker-compose-plugin \
+        coreutils findutils tar gawk
     elif command -v yum >/dev/null 2>&1; then
-      run_root yum install -y ca-certificates curl openssl iproute docker docker-compose-plugin
+      run_root yum install -y ca-certificates curl openssl iproute docker docker-compose-plugin \
+        coreutils findutils tar gawk
     else
       die "未找到 apt-get、dnf 或 yum，无法自动安装 Docker"
     fi
@@ -814,17 +809,27 @@ install_dependencies() {
   if ! command -v curl >/dev/null 2>&1 || ! command -v ss >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
       run_root apt-get update
-      run_root apt-get install -y curl iproute2 openssl
+      run_root apt-get install -y curl iproute2 openssl coreutils findutils tar gawk
     elif command -v dnf >/dev/null 2>&1; then
-      run_root dnf install -y curl iproute openssl
+      run_root dnf install -y curl iproute openssl coreutils findutils tar gawk
     elif command -v yum >/dev/null 2>&1; then
-      run_root yum install -y curl iproute openssl
+      run_root yum install -y curl iproute openssl coreutils findutils tar gawk
     fi
   fi
   require_cmd curl; require_cmd ss; require_cmd openssl
   if ! docker_cmd compose version >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then run_root apt-get update && run_root apt-get install -y docker-compose-plugin || true; fi
+    if command -v apt-get >/dev/null 2>&1; then
+      run_root apt-get update
+      run_root apt-get install -y docker-compose-plugin || run_root apt-get install -y docker-compose-v2
+    elif command -v dnf >/dev/null 2>&1; then
+      run_root dnf install -y docker-compose-plugin || run_root dnf install -y docker-compose
+    elif command -v yum >/dev/null 2>&1; then
+      run_root yum install -y docker-compose-plugin || run_root yum install -y docker-compose
+    fi
   fi
+  for bootstrap_cmd in awk sed find tar realpath sha256sum; do
+    require_cmd "$bootstrap_cmd"
+  done
   docker_cmd compose version >/dev/null 2>&1 || die "Docker Compose v2 插件不可用"
   if ! docker_cmd info >/dev/null 2>&1; then
     run_root systemctl enable --now docker 2>/dev/null || run_root service docker start 2>/dev/null || true
@@ -965,11 +970,10 @@ deploy_services() {
     verify_release_images
     compose_cmd up -d --force-recreate --remove-orphans
   else
-    if (( NO_PULL == 1 )); then
-      compose_cmd build
-    else
-      compose_cmd build --pull
-    fi
+    local -a build_args=(build)
+    (( NO_CACHE == 1 )) && build_args+=(--no-cache)
+    (( NO_PULL == 0 )) && build_args+=(--pull)
+    compose_cmd "${build_args[@]}"
     compose_cmd up -d --force-recreate --remove-orphans
   fi
   ok "当前源码的账号网页和权威服务器已更新并启动"
@@ -1097,8 +1101,23 @@ main() {
   parse_args "$@"
   stage_source_tree
   command -v sha256sum >/dev/null 2>&1 || die "缺少命令：sha256sum"
-  WARGAME_SOURCE_DIGEST="$(compute_source_digest "$STAGING_DIR")"
+  WARGAME_SOURCE_DIGEST="$(release_compute_source_digest "$STAGING_DIR")"
   [[ "$WARGAME_SOURCE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die "无法计算源码摘要"
+  if [[ -f "$STAGING_DIR/release-identity.txt" ]]; then
+    local packaged_version
+    packaged_version="$(release_identity_value "$STAGING_DIR/release-identity.txt" wargameVersion 2>/dev/null || true)"
+    [[ "$packaged_version" =~ ^[A-Za-z0-9._-]{1,32}$ ]] \
+      || die "发布包三端身份缺少有效版本"
+    if (( WARGAME_VERSION_SET == 1 )) && [[ "$WARGAME_VERSION" != "$packaged_version" ]]; then
+      die "--wargame-version 与发布包三端身份不一致"
+    fi
+    WARGAME_VERSION="$packaged_version"
+    release_validate_identity "$STAGING_DIR/release-identity.txt" \
+      "$STAGING_DIR/deploy/release-manifest.env" "$WARGAME_VERSION" "$WARGAME_SOURCE_DIGEST" \
+      || die "发布包三端身份校验失败"
+  else
+    warn "发布输入未提供 release-identity.txt；将只校验 v6/schema 6 清单"
+  fi
   WARGAME_RELEASE_ID="${WARGAME_VERSION}-${WARGAME_SOURCE_DIGEST:0:12}"
   migrate_legacy_env
   read_existing_env

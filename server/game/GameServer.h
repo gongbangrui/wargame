@@ -7,7 +7,9 @@
 #include "RulesAi.h"
 #include "OllamaProvider.h"
 #include "RoomPersistence.h"
+#include "IntelLedger.h"
 #include "FastDdsNode.h"
+#include "protocol/Protocol.h"
 
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -76,6 +78,8 @@ private:
         QString connectedAt;
         QString lastSeenAt;
         quint64 sequence = 0;
+        int protocolVersion = Protocol::Version;
+        int schemaVersion = Protocol::SchemaVersion;
         qint64 lastChatAt = 0;
         qint64 rateWindowStartedAt = 0;
         int messagesInRateWindow = 0;
@@ -99,6 +103,7 @@ private:
         bool blueReady = false;
         QJsonArray mapMarks;
         QHash<QString, QSet<QString>> sharedIntel;
+        QJsonObject intelLedger;
         QJsonArray chatHistory;
         quint64 chatSequence = 0;
         QHash<QString, QJsonObject> commandResults;
@@ -179,7 +184,12 @@ private:
     void handleRedeployRequest(QWebSocket* socket);
     void handleRedeploy(QWebSocket* socket, const QJsonObject& payload);
     void handleSetUnitName(QWebSocket* socket, const QJsonObject& payload);
-    void handleShareIntel(QWebSocket* socket, const QJsonObject& payload);
+    void handleShareIntel(QWebSocket* socket, const QJsonObject& payload,
+                          const QString& requestId);
+    void handleCreateIntelReport(QWebSocket* socket, const QJsonObject& payload,
+                                 const QString& requestId);
+    void handleRequestIntelHistory(QWebSocket* socket, const QJsonObject& payload,
+                                   const QString& requestId);
     void handleMapMark(QWebSocket* socket, const QJsonObject& payload);
     void handleSetObserverTrajectories(QWebSocket* socket, const QJsonObject& payload);
     void sendSeatDirectory(QWebSocket* socket);
@@ -207,16 +217,23 @@ private:
     AiKnowledgeState buildAiKnowledge(const QList<AiSeatState>& states, double now,
                                       const AiDifficultyParameters& parameters) const;
 
-    void sendEnvelope(QWebSocket* socket, const QString& type, const QJsonObject& payload);
+    bool sendEnvelope(QWebSocket* socket, const QString& type, const QJsonObject& payload);
     void sendError(QWebSocket* socket, const QString& code, const QString& message,
                    const QString& requestId = QString());
     void sendCommandResult(QWebSocket* socket, const QString& commandId,
                            const CommandResult& result);
+    void sendIntelCommandResult(QWebSocket* socket, const QString& action,
+                                const QString& requestId, const CommandResult& result);
+    void cacheIntelCommandResult(qint64 userId, const QString& action,
+                                 const QString& requestId, const CommandResult& result);
     void closeRoomSessions(const QString& message);
     void broadcastSnapshots(bool forceFull = false);
-    void sendFullSnapshot(QWebSocket* socket);
+    bool sendFullSnapshot(QWebSocket* socket);
     void broadcastEvent(const QJsonObject& event, const QString& side = QString());
     void broadcastChat(const QJsonObject& message);
+    void refreshIntelLedger();
+    QJsonObject projectedIntelState(const ClientSession& session) const;
+    QStringList intelShareTargets(const ClientSession& session) const;
 
     QJsonObject snapshotFor(const ClientSession& session, quint64 projectedRevision = 0) const;
     void sampleObserverTrajectories();
@@ -263,6 +280,7 @@ private:
     FastDdsNode m_fastDds;
     QNetworkAccessManager m_network;
     QHash<QWebSocket*, ClientSession> m_clients;
+    QSet<QWebSocket*> m_ownedSockets;
     SimulationEngine m_engine;
     AuthoritativeRoom m_authoritativeRoom;
     Scenario m_runInitialScenario;
@@ -360,6 +378,7 @@ private:
     };
     QHash<QString, SeatOccupant> m_seats;
     QHash<QString, QSet<QString>> m_sharedIntel;
+    IntelLedger m_intelLedger;
     QHash<qint64, QSet<QString>> m_observerSelectionCache;
     QHash<QString, QJsonArray> m_observerTrajectories;
     double m_nextObserverTrajectorySampleAt = 0.0;

@@ -22,6 +22,7 @@ cp "$ROOT_DIR/deploy/reset-room.sh" "$INSTALL_ROOT/current/deploy/reset-room.sh"
 cp "$ROOT_DIR/deploy/uninstall-server.sh" "$INSTALL_ROOT/current/deploy/uninstall-server.sh"
 cp "$ROOT_DIR/deploy/install-server.sh" "$INSTALL_ROOT/current/deploy/install-server.sh"
 cp "$ROOT_DIR/deploy/install-server-no-check.sh" "$INSTALL_ROOT/current/deploy/install-server-no-check.sh"
+cp "$ROOT_DIR/deploy/release-lib.sh" "$INSTALL_ROOT/current/deploy/release-lib.sh"
 printf 'WARGAME_COMPOSE_PROJECT=fixture\nWARGAME_DATA_VOLUME=fixture-volume\n' >"$INSTALL_ROOT/.env"
 printf 'version=1\n' >"$INSTALL_ROOT/.wargame-install"
 

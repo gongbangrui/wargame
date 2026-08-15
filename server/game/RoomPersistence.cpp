@@ -1,7 +1,6 @@
 #include "RoomPersistence.h"
 
 #include "RulesAi.h"
-
 #include "protocol/Protocol.h"
 
 #include <QDateTime>
@@ -32,8 +31,11 @@ namespace gbr {
 
 namespace {
 
-constexpr int kCheckpointSchemaVersion = 4;
+constexpr int kCheckpointSchemaVersion = 6;
 constexpr int kOldestSupportedCheckpointSchemaVersion = 2;
+constexpr int kLegacyCheckpointProtocolVersion = 4;
+constexpr int kPreviousCheckpointProtocolVersion = 5;
+constexpr int kCurrentCheckpointProtocolVersion = Protocol::Version;
 constexpr qint64 kMaxEventLogBytes = 16 * 1024 * 1024;
 constexpr qint64 kMaxCheckpointBytes = 64 * 1024 * 1024;
 
@@ -339,13 +341,14 @@ bool aiStateFromJson(const QJsonObject& object, AiCheckpointState* state, QStrin
 QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
     QJsonObject object{
         {QStringLiteral("checkpointSchemaVersion"), kCheckpointSchemaVersion},
-        {QStringLiteral("protocolVersion"), Protocol::Version},
+        {QStringLiteral("protocolVersion"), kCurrentCheckpointProtocolVersion},
         {QStringLiteral("savedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
         {QStringLiteral("scenario"), ScenarioIo::toJson(checkpoint.scenario)},
         {QStringLiteral("runInitialScenario"), ScenarioIo::toJson(checkpoint.runInitialScenario)},
         {QStringLiteral("runtimeUnits"), checkpoint.runtimeUnits},
         {QStringLiteral("engineState"), checkpoint.engineState},
         {QStringLiteral("commandHistory"), checkpoint.commandHistory},
+        {QStringLiteral("intelLedger"), checkpoint.intelLedger},
         {QStringLiteral("authoritativeRoom"), checkpoint.authoritativeRoom},
         {QStringLiteral("roomState"),
          QJsonObject{{QStringLiteral("phase"), checkpoint.phase},
@@ -380,9 +383,11 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
         return fail(QStringLiteral("检查点结构版本不兼容"));
     }
     const int storedProtocolVersion = object.value(QStringLiteral("protocolVersion")).toInt();
-    const bool compatibleProtocol = checkpointSchemaVersion >= 4
-        ? storedProtocolVersion == 4
-        : storedProtocolVersion == 3 || storedProtocolVersion == 4;
+    const bool compatibleProtocol = checkpointSchemaVersion >= kCheckpointSchemaVersion
+        ? storedProtocolVersion == kCurrentCheckpointProtocolVersion
+        : checkpointSchemaVersion >= 5
+            ? storedProtocolVersion == kPreviousCheckpointProtocolVersion
+            : storedProtocolVersion == kLegacyCheckpointProtocolVersion;
     if (!compatibleProtocol) {
         return fail(QStringLiteral("检查点协议版本不兼容"));
     }
@@ -392,6 +397,8 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
         || (checkpointSchemaVersion >= 3
             && !object.value(QStringLiteral("engineState")).isObject())
         || !object.value(QStringLiteral("commandHistory")).isArray()
+        || (checkpointSchemaVersion >= 5
+            && !object.value(QStringLiteral("intelLedger")).isObject())
         || !object.value(QStringLiteral("authoritativeRoom")).isObject()
         || !object.value(QStringLiteral("roomState")).isObject()) {
         return fail(QStringLiteral("检查点必需字段类型无效"));
@@ -443,6 +450,8 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
     checkpoint->engineState = checkpointSchemaVersion >= 3
         ? object.value(QStringLiteral("engineState")).toObject() : QJsonObject{};
     checkpoint->commandHistory = object.value(QStringLiteral("commandHistory")).toArray();
+    checkpoint->intelLedger = checkpointSchemaVersion >= 5
+        ? object.value(QStringLiteral("intelLedger")).toObject() : QJsonObject{};
     checkpoint->authoritativeRoom = object.value(QStringLiteral("authoritativeRoom")).toObject();
     checkpoint->phase = phase;
     checkpoint->redReady = room.value(QStringLiteral("redReady")).toBool();
@@ -572,6 +581,14 @@ bool RoomPersistence::saveCheckpoint(const RoomCheckpoint& checkpoint, QString* 
     if (file.write(data) != data.size()) {
         file.cancelWriting();
         if (error) *error = QStringLiteral("检查点原子写入失败: %1").arg(m_checkpointPath);
+        return false;
+    }
+    if (qEnvironmentVariableIntValue("WARGAME_FORCE_CHECKPOINT_FLUSH_FAILURE") != 0) {
+        file.cancelWriting();
+        if (error) {
+            *error = QStringLiteral("检查点同步到磁盘失败（测试注入）: %1")
+                         .arg(m_checkpointPath);
+        }
         return false;
     }
     if (!durableFlush(file, m_checkpointPath, error)) {

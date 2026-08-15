@@ -1,6 +1,7 @@
 #include "StateDelta.h"
 
 #include "Protocol.h"
+#include "IntelProtocol.h"
 
 #include <QHash>
 #include <QJsonArray>
@@ -183,15 +184,20 @@ bool mergeTrajectoryDelta(QJsonObject& candidate, const QJsonObject& delta, QStr
 
 bool canCreate(const QJsonObject& base, const QJsonObject& current) {
     if (base.isEmpty() || current.isEmpty()) return false;
-    if (base.value(QStringLiteral("schemaVersion")).toInt() != Protocol::SchemaVersion
-        || current.value(QStringLiteral("schemaVersion")).toInt() != Protocol::SchemaVersion) {
+    const int schemaVersion = base.value(QStringLiteral("schemaVersion")).toInt();
+    if (!Protocol::isSupportedWireVersion(schemaVersion, schemaVersion)
+        || current.value(QStringLiteral("schemaVersion")).toInt() != schemaVersion) {
         return false;
     }
     if (base.value(QStringLiteral("scenario")) != current.value(QStringLiteral("scenario"))) {
         return false;
     }
-    if (!Protocol::validateSnapshotState(base).valid
-        || !Protocol::validateSnapshotState(current).valid) {
+    if (!Protocol::validateSnapshotState(base, schemaVersion).valid
+        || !Protocol::validateSnapshotState(current, schemaVersion).valid) {
+        return false;
+    }
+    if (current.value(QStringLiteral("stateRevision")).toInteger()
+        <= base.value(QStringLiteral("stateRevision")).toInteger()) {
         return false;
     }
     return unitIds(base.value(QStringLiteral("units")).toArray())
@@ -200,6 +206,7 @@ bool canCreate(const QJsonObject& base, const QJsonObject& current) {
 
 QJsonObject create(const QJsonObject& base, const QJsonObject& current) {
     if (!canCreate(base, current)) return {};
+    const int schemaVersion = base.value(QStringLiteral("schemaVersion")).toInt();
     const auto previousUnits = unitsById(base.value(QStringLiteral("units")).toArray());
     const auto currentUnits = unitsById(current.value(QStringLiteral("units")).toArray());
     QJsonArray changedUnits;
@@ -211,7 +218,7 @@ QJsonObject create(const QJsonObject& base, const QJsonObject& current) {
         }
     }
 
-    QJsonObject delta{{QStringLiteral("schemaVersion"), Protocol::SchemaVersion},
+    QJsonObject delta{{QStringLiteral("schemaVersion"), schemaVersion},
                       {QStringLiteral("baseStateRevision"),
                        base.value(QStringLiteral("stateRevision"))},
                       {QStringLiteral("stateRevision"),
@@ -237,6 +244,19 @@ QJsonObject create(const QJsonObject& base, const QJsonObject& current) {
         const QJsonObject trajectoryDelta = makeTrajectoryDelta(base, current);
         delta[QStringLiteral("observerTrajectoryDelta")] = trajectoryDelta;
     }
+    if (schemaVersion >= Protocol::IntelSchemaVersion
+        && base.value(QStringLiteral("intelState"))
+               != current.value(QStringLiteral("intelState"))) {
+        Protocol::IntelState before;
+        Protocol::IntelState after;
+        if (!Protocol::fromJson(base.value(QStringLiteral("intelState")).toObject(), &before).valid
+            || !Protocol::fromJson(current.value(QStringLiteral("intelState")).toObject(), &after).valid) {
+            return {};
+        }
+        const QJsonObject intelDelta = Protocol::makeIntelDelta(before, after);
+        if (intelDelta.isEmpty()) return {};
+        delta[QStringLiteral("intelDelta")] = intelDelta;
+    }
     return delta;
 }
 
@@ -247,8 +267,20 @@ bool apply(QJsonObject& state, const QJsonObject& delta, QString* error) {
         return false;
     };
     if (state.isEmpty()) return fail(QStringLiteral("尚未收到完整快照"));
-    if (delta.value(QStringLiteral("schemaVersion")).toInt() != Protocol::SchemaVersion) {
+    const int schemaVersion = state.value(QStringLiteral("schemaVersion")).toInt();
+    if (!Protocol::isSupportedWireVersion(schemaVersion, schemaVersion)
+        || delta.value(QStringLiteral("schemaVersion")).toInt() != schemaVersion) {
         return fail(QStringLiteral("增量结构版本不兼容"));
+    }
+    const Protocol::ValidationResult deltaValidation =
+        Protocol::validateServerPayloadForVersion(QStringLiteral("delta"), delta, schemaVersion);
+    if (!deltaValidation.valid) {
+        return fail(deltaValidation.message.isEmpty()
+                        ? QStringLiteral("增量结构无效") : deltaValidation.message);
+    }
+    if (schemaVersion == Protocol::LegacySchemaVersion
+        && delta.contains(QStringLiteral("intelDelta"))) {
+        return fail(QStringLiteral("旧版增量不能包含情报字段"));
     }
     const qint64 expected = state.value(QStringLiteral("stateRevision")).toInteger();
     const qint64 base = delta.value(QStringLiteral("baseStateRevision")).toInteger();
@@ -310,9 +342,20 @@ bool apply(QJsonObject& state, const QJsonObject& delta, QString* error) {
         && !mergeTrajectoryDelta(candidate, delta, error)) {
         return false;
     }
+    if (schemaVersion >= Protocol::IntelSchemaVersion && delta.contains(QStringLiteral("intelDelta"))) {
+        Protocol::IntelState intel;
+        if (!Protocol::fromJson(candidate.value(QStringLiteral("intelState")).toObject(), &intel).valid) {
+            return fail(QStringLiteral("增量缺少有效情报基线"));
+        }
+        const Protocol::ValidationResult intelResult = Protocol::applyIntelDelta(
+            &intel, delta.value(QStringLiteral("intelDelta")).toObject());
+        if (!intelResult.valid) return fail(intelResult.message);
+        candidate[QStringLiteral("intelState")] = Protocol::toJson(intel);
+    }
     candidate[QStringLiteral("stateRevision")] = next;
 
-    const Protocol::ValidationResult validation = Protocol::validateSnapshotState(candidate);
+    const Protocol::ValidationResult validation = Protocol::validateSnapshotState(
+        candidate, schemaVersion);
     if (!validation.valid) {
         return fail(validation.message.isEmpty()
                         ? QStringLiteral("增量合并后状态无效")

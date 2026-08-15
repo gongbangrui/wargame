@@ -20,6 +20,7 @@
 #include <qt6keychain/keychain.h>
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace gbr {
 
@@ -257,9 +258,35 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                     return;
                 }
                 emit intelShareReceived(QVariantMap{{QStringLiteral("senderSeatId"), projection.senderSeatId},
+                                                    {QStringLiteral("intelId"), projection.intelId},
                                                     {QStringLiteral("targetId"), projection.targetId},
                                                     {QStringLiteral("sharedAt"), projection.sharedAt},
                                                     {QStringLiteral("note"), projection.note}});
+            });
+    connect(&m_networkClient, &NetworkClient::intelHistoryPageReceived, this,
+            [this](const QJsonObject& page) {
+                Protocol::IntelHistoryPage projected;
+                const Protocol::ValidationResult validation = Protocol::fromJson(page, &projected);
+                if (!validation.valid) {
+                    m_remoteLastError = validation.message;
+                    emit errorForward(validation.message);
+                    return;
+                }
+                if (!m_onlineIntelHistoryAppendPending) m_onlineIntelHistory.clear();
+                QSet<QString> existingHistoryIds;
+                for (const QVariant& value : m_onlineIntelHistory) {
+                    existingHistoryIds.insert(value.toMap().value(QStringLiteral("historyId"))
+                                                  .toString());
+                }
+                for (const auto& entry : projected.entries) {
+                    if (existingHistoryIds.contains(entry.historyId)) continue;
+                    m_onlineIntelHistory.append(entry.toJson().toVariantMap());
+                    existingHistoryIds.insert(entry.historyId);
+                }
+                m_onlineIntelHistoryAppendPending = false;
+                m_onlineIntelHistoryHasMore = projected.hasMore;
+                m_onlineIntelHistoryCursor = projected.nextCursor;
+                emit onlineIntelHistoryChanged();
             });
     connect(&m_networkClient, &NetworkClient::transferEventReceived, this,
             [this](const QJsonObject& event) {
@@ -395,12 +422,17 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 emit errorForward(message);
             });
     connect(&m_networkClient, &NetworkClient::commandStatusChanged, this,
-            [this](const QString& commandId, const QString&, const QString& status,
-                   const QString&, const QString& message) {
+            [this](const QString& commandId, const QString& action, const QString& status,
+                   const QString& code, const QString& message) {
                 m_lastCommandId = commandId;
                 m_lastCommandStatus = status;
                 m_lastCommandMessage = message;
                 emit commandStatusChanged();
+                if (action == QLatin1String("shareIntel")
+                    || action == QLatin1String("createIntelReport")
+                    || action == QLatin1String("requestIntelHistory")) {
+                    emit onlineIntelCommandStatus(action, commandId, status, code, message);
+                }
             });
 }
 
@@ -1112,6 +1144,36 @@ QVariantList SimulationController::detectedEnemyOptions(const QString& attackerI
     QVariantList out;
     QSet<QString> added;
     const auto allUnits = m_engine.collectAllUnitsSnapshot();
+    if (isNetworked()) {
+        QHash<QString, QJsonObject> unitsById;
+        for (const QJsonValue& value : allUnits) {
+            const QJsonObject unit = value.toObject();
+            unitsById.insert(unit.value(QStringLiteral("id")).toString(), unit);
+        }
+        for (const QVariant& value : m_onlineIntelRecords) {
+            const QVariantMap contact = value.toMap();
+            if (!contact.value(QStringLiteral("actionable")).toBool()
+                || contact.value(QStringLiteral("type")).toString()
+                    != QLatin1String("sensorContact")) {
+                continue;
+            }
+            const QString targetId = contact.value(QStringLiteral("targetId")).toString();
+            const QJsonObject unit = unitsById.value(targetId);
+            if (targetId.isEmpty() || added.contains(targetId) || unit.isEmpty()
+                || !unit.value(QStringLiteral("alive")).toBool()
+                || unit.value(QStringLiteral("side")).toString() != enemySide) {
+                continue;
+            }
+            QVariantMap option;
+            option[QStringLiteral("id")] = targetId;
+            option[QStringLiteral("callsign")] = unit.value(QStringLiteral("callsign")).toVariant();
+            option[QStringLiteral("kind")] = unit.value(QStringLiteral("kind")).toVariant();
+            option[QStringLiteral("side")] = unit.value(QStringLiteral("side")).toVariant();
+            out.append(option);
+            added.insert(targetId);
+        }
+        return out;
+    }
     // gather friendly recon positions
     QVariantList reconList;
     for (const auto& v : allUnits) {
@@ -1284,28 +1346,31 @@ void SimulationController::ensureFocusedConsistent() {
 }
 
 void SimulationController::saveSetting(const QString& key, const QVariant& value) {
-    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    QDir().mkpath(dir);
-    QString path = dir + "/settings.json";
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (!QDir().mkpath(dir)) {
+        emit errorForward(QStringLiteral("保存设置失败: %1").arg(key));
+        return;
+    }
+    const QString path = dir + "/settings.json";
     QJsonObject obj;
-    QFile f(path);
-    if (f.open(QIODevice::ReadOnly)) {
-        obj = QJsonDocument::fromJson(f.readAll()).object();
-        f.close();
+    QFile existing(path);
+    if (existing.open(QIODevice::ReadOnly)) {
+        obj = QJsonDocument::fromJson(existing.readAll()).object();
     }
     if (key == QLatin1String("network/password")) obj.remove(key);
     else obj[key] = QJsonValue::fromVariant(value);
     const QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
-    if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) {
+    QSaveFile output(path);
+    if (!output.open(QIODevice::WriteOnly) || output.write(data) != data.size()
+        || !output.commit()) {
         emit errorForward(QStringLiteral("保存设置失败: %1").arg(key));
         return;
     }
-    // 信号会同步触发 QML 读取；先关闭文件，避免读取到尚未刷新的旧快捷键配置。
-    f.close();
     if (key == QLatin1String("network/password")) {
         emit errorForward(QStringLiteral("密码仅能存储在系统密钥链中"));
         return;
     }
+    emit settingChanged(key);
     if (key.startsWith(QStringLiteral("shortcuts/"))) emit shortcutsChanged();
 }
 
@@ -1386,6 +1451,13 @@ void SimulationController::useLocalMode() {
     m_onlineRooms.clear();
     m_onlineSeats.clear();
     m_onlineMapMarks.clear();
+    m_onlineIntelRecords.clear();
+    m_onlineIntelRevision = 0;
+    m_onlineIntelShareTargets.clear();
+    m_onlineIntelHistory.clear();
+    m_onlineIntelHistoryHasMore = false;
+    m_onlineIntelHistoryCursor.clear();
+    m_onlineIntelHistoryAppendPending = false;
     const bool hadObserverTrajectories = !m_observerTrajectories.isEmpty();
     m_observerTrajectories = {};
     m_pendingSeatTransfers.clear();
@@ -1577,9 +1649,32 @@ void SimulationController::setOnlineUnitName(const QString& unitName) {
     }
 }
 
-void SimulationController::shareOnlineIntel(const QString& targetId, const QStringList& recipientSeatIds,
-                                            const QString& note) {
-    if (isNetworked() && !m_isObserver) m_networkClient.shareIntel(targetId, recipientSeatIds, note);
+QString SimulationController::shareOnlineIntel(const QString& intelId,
+                                               const QStringList& recipientSeatIds,
+                                               const QString& note) {
+    if (isNetworked() && !m_isObserver) {
+        return m_networkClient.shareIntel(intelId, recipientSeatIds, note);
+    }
+    return {};
+}
+
+QString SimulationController::createOnlineIntelReport(const QVariantMap& position,
+                                                      const QString& type,
+                                                      const QString& title,
+                                                      const QString& note) {
+    if (isNetworked() && !m_isObserver) {
+        return m_networkClient.createIntelReport(position, type.trimmed(), title, note);
+    }
+    return {};
+}
+
+QString SimulationController::requestOnlineIntelHistory(const QVariantMap& query) {
+    if (isNetworked() && !m_isObserver) {
+        m_onlineIntelHistoryAppendPending = !query.value(QStringLiteral("cursor"))
+                                                 .toString().trimmed().isEmpty();
+        return m_networkClient.requestIntelHistory(query);
+    }
+    return {};
 }
 
 void SimulationController::markOnlineMap(const QVariantMap& position, const QString& label,
@@ -1679,6 +1774,8 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     emit roomStateChanged();
     emit onlineStateChanged();
     emit mapInfoForward();
+    emit onlineIntelChanged();
+    emit onlineIntelHistoryChanged();
 }
 
 QJsonObject SimulationController::scenarioUnitJson(const ScenarioUnit& unit) const {
@@ -1703,6 +1800,29 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
         emit errorForward(validation.message);
         return;
     }
+    const bool previousObserver = m_isObserver;
+    const QString previousRoomId = m_currentRoomId;
+    const QString previousSeatId = m_currentSeatId;
+    const QString previousSeatType = m_currentSeatType;
+    const QString previousSeatSide = m_currentSeatSide;
+    const QString previousOnlineStage = m_onlineStage;
+    const bool previousSeatReady = m_seatReady;
+    const bool previousReadyForSim = m_remoteReadyForSim;
+    const QString previousCpIssues = m_remoteCpIssues;
+    const QString previousMatchPhase = m_matchPhase;
+    const bool previousRedReady = m_redReady;
+    const bool previousBlueReady = m_blueReady;
+    const QString previousRoomMode = m_roomMode;
+    const QString previousAiDifficulty = m_aiDifficulty;
+    const QString previousAiEffectiveEngine = m_aiEffectiveEngine;
+    const qint64 previousConfigVersion = m_configVersion;
+    const QString previousCommunicationState = m_communicationState;
+    const QVariantList previousMessages = m_remoteMessages;
+    const QVariantList previousMapMarks = m_onlineMapMarks;
+    const QVariantList previousIntelRecords = m_onlineIntelRecords;
+    const qint64 previousIntelRevision = m_onlineIntelRevision;
+    const QStringList previousIntelShareTargets = m_onlineIntelShareTargets;
+    const QVariantList previousSeats = m_onlineSeats;
     const Protocol::RoomLifecycleProjection& room = projection.lifecycle;
     m_isObserver = room.observer;
     if (room.observer) m_observerJoinPending = false;
@@ -1815,7 +1935,33 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
         ? payload.value(QStringLiteral("messages")).toArray().toVariantList() : QVariantList{};
     m_onlineMapMarks = roomSelectionConfirmed
         ? payload.value(QStringLiteral("mapMarks")).toArray().toVariantList() : QVariantList{};
-    emit onlineMapMarksChanged();
+    const QJsonObject intelObject = (!room.observer && roomSelectionConfirmed)
+        ? payload.value(QStringLiteral("intelState")).toObject() : QJsonObject{};
+    Protocol::IntelState intelState;
+    QVariantList nextIntelRecords = m_onlineIntelRecords;
+    qint64 nextIntelRevision = m_onlineIntelRevision;
+    QStringList nextIntelShareTargets = m_onlineIntelShareTargets;
+    if (!intelObject.isEmpty() && Protocol::fromJson(intelObject, &intelState).valid) {
+        nextIntelRecords.clear();
+        for (const auto& record : intelState.records) {
+            nextIntelRecords.append(record.toJson().toVariantMap());
+        }
+        nextIntelRevision = intelState.revision;
+        nextIntelShareTargets = intelState.shareTargets;
+    } else if (room.observer || !roomSelectionConfirmed) {
+        nextIntelRecords.clear();
+        nextIntelRevision = 0;
+        nextIntelShareTargets.clear();
+    }
+    const bool intelChanged = nextIntelRecords != previousIntelRecords
+        || nextIntelRevision != previousIntelRevision
+        || nextIntelShareTargets != previousIntelShareTargets;
+    if (intelChanged) {
+        m_onlineIntelRecords = std::move(nextIntelRecords);
+        m_onlineIntelRevision = nextIntelRevision;
+        m_onlineIntelShareTargets = std::move(nextIntelShareTargets);
+        emit onlineIntelChanged();
+    }
     const QJsonObject incomingTrajectories = room.observer
         ? payload.value(QStringLiteral("observerTrajectories")).toObject()
         : QJsonObject{};
@@ -1847,12 +1993,27 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
                                      partialRuntime);
     invalidateCaches();
     ensureFocusedConsistent();
-    emit messagesForward();
-    emit readyForSimForward();
-    emit roomStateChanged();
-    emit onlineSeatsChanged();
-    emit onlineStateChanged();
-    emit mapInfoForward();
+    if (m_remoteMessages != previousMessages) emit messagesForward();
+    if (m_onlineMapMarks != previousMapMarks) emit onlineMapMarksChanged();
+    if (m_onlineSeats != previousSeats) emit onlineSeatsChanged();
+    if (m_remoteReadyForSim != previousReadyForSim
+        || m_remoteCpIssues != previousCpIssues) {
+        emit readyForSimForward();
+    }
+    if (m_matchPhase != previousMatchPhase || m_redReady != previousRedReady
+        || m_blueReady != previousBlueReady || m_roomMode != previousRoomMode
+        || m_aiDifficulty != previousAiDifficulty
+        || m_aiEffectiveEngine != previousAiEffectiveEngine
+        || m_configVersion != previousConfigVersion
+        || m_communicationState != previousCommunicationState) {
+        emit roomStateChanged();
+    }
+    if (m_isObserver != previousObserver || m_currentRoomId != previousRoomId
+        || m_currentSeatId != previousSeatId || m_currentSeatType != previousSeatType
+        || m_currentSeatSide != previousSeatSide
+        || m_onlineStage != previousOnlineStage || m_seatReady != previousSeatReady) {
+        emit onlineStateChanged();
+    }
 }
 
 QJsonObject SimulationController::allSettings() const {

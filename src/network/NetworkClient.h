@@ -44,8 +44,11 @@ public:
     void requestRedeploy();
     void redeploy(const QString& seatId);
     void sendUnitName(const QString& unitName);
-    void shareIntel(const QString& targetId, const QStringList& recipientSeatIds,
-                    const QString& note = QString());
+    QString shareIntel(const QString& intelId, const QStringList& recipientSeatIds,
+                       const QString& note = QString());
+    QString createIntelReport(const QVariantMap& position, const QString& type,
+                              const QString& title, const QString& note);
+    QString requestIntelHistory(const QVariantMap& query = {});
     void sendMapMark(const QVariantMap& position, const QString& label,
                      const QStringList& recipientSeatIds = {});
     void setObserverTrajectories(const QStringList& unitIds);
@@ -69,6 +72,7 @@ signals:
     void seatStateReceived(const QJsonObject& state);
     void deploymentPromptReceived(const QJsonObject& prompt);
     void intelShareReceived(const QJsonObject& share);
+    void intelHistoryPageReceived(const QJsonObject& page);
     void transferEventReceived(const QJsonObject& event);
     void snapshotReceived(const QJsonObject& payload);
     void deltaSnapshotReceived(const QJsonObject& payload,
@@ -91,7 +95,12 @@ private:
     void onWebSocketConnected();
     void onWebSocketDisconnected();
     void onTextMessage(const QString& text);
+    void fallbackToLegacyProtocol();
+    void reconnectWithWireVersion(int protocolVersion, int schemaVersion,
+                                  const QString& message);
     bool sendEnvelope(const QString& type, const QJsonObject& payload);
+    bool sendEnvelope(const QString& type, const QJsonObject& payload,
+                      const QString& messageId);
     void scheduleReconnect();
     void publishDiagnostics();
     void sendLatencyProbe();
@@ -99,13 +108,27 @@ private:
     void processPendingCommands();
     void sendPendingCommand(const QString& commandId, bool retry);
     void retransmitPendingCommands();
+    void processPendingIntelRequests();
+    void sendPendingIntelRequest(const QString& requestId, bool retry);
+    void retransmitPendingIntelRequests();
     void clearPendingCommands(const QString& status, const QString& message);
     void sendSimple(const QString& type, const QJsonObject& payload);
+    QString sendIntelRequest(const QString& type, const QString& action,
+                             const QJsonObject& payload);
     QUrl normalizeAccountServer(const QString& input) const;
 
     struct PendingCommand {
         QString action;
         QJsonObject args;
+        qint64 lastSentAtMs = -1;
+        int onlineWaitMs = 0;
+        int attempts = 0;
+    };
+
+    struct PendingIntelRequest {
+        QString type;
+        QString action;
+        QJsonObject payload;
         qint64 lastSentAtMs = -1;
         int onlineWaitMs = 0;
         int attempts = 0;
@@ -131,6 +154,7 @@ private:
     int m_reconnectAttempt = 0;
     ClientStateStore m_stateStore;
     QHash<QString, PendingCommand> m_pendingCommands;
+    QHash<QString, PendingIntelRequest> m_pendingIntelRequests;
     QJsonObject m_welcomePayload;
     FastDdsTransport m_dataPlane;
     quint64 m_loginGeneration = 0;
@@ -144,6 +168,9 @@ private:
     qint64 m_pingSentAtMs = 0;
     bool m_pingPending = false;
     quint64 m_diagnosticGeneration = 0;
+    int m_protocolVersion = Protocol::Version;
+    int m_schemaVersion = Protocol::SchemaVersion;
+    bool m_legacyFallbackAttempted = false;
 };
 
 } // namespace gbr

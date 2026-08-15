@@ -83,7 +83,7 @@ Qt 桌面客户端
 - 服务器是唯一权威仿真节点。
 - 客户端发送“意图”，例如移动、攻击、暂停，不发送最终坐标或 HP。
 - 客户端不推进仿真，不参与服务器锁步，也不能因断线让服务器停钟。
-- `MessageBus` 继续表达仿真域内通信规则，例如距离、ECM、CP 旁路。
+- `MessageBus` 继续表达仿真域内通信规则，例如定向距离、中继、ECM 和存活状态。
 - WebSocket 表达账号认证、房间控制、实时快照和战位消息，服务端统一执行权限与视野裁剪。
 - 红蓝视野裁剪发生在服务器序列化之前，不能把全图发给客户端再由 QML 隐藏。
 - 网页管理员负责房间生命周期，战位命令和情报共享由服务器校验，不能信任客户端传来的 `seatId` 或 `side`。
@@ -152,8 +152,8 @@ wargame_integration_tests
 
 ```json
 {
-  "protocolVersion": 2,
-  "schemaVersion": 1,
+  "protocolVersion": 6,
+  "schemaVersion": 6,
   "type": "command",
   "sessionId": "01J...",
   "clientId": "01J...",
@@ -165,6 +165,10 @@ wargame_integration_tests
   "payload": {}
 }
 ```
+
+当前发布默认使用 v6/schema 6；服务端可在协商阶段兼容 v5/v4，但同一连接内不得混用
+不同 wire/schema 版本。场景、AI 计划和地图元数据中的局部 `schemaVersion` 属于各自
+子格式版本，不与联网 envelope 的 schema 版本混淆。
 
 客户端上传的 `seatId`、`side` 只能作为显示信息，服务器必须以登录会话和房间分配结果为准。
 

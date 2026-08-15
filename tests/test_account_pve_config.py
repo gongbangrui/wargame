@@ -96,6 +96,16 @@ class AccountPveConfigTest(unittest.TestCase):
         self.assertEqual(updated["room"]["aiDifficulty"], "hard")
         self.assertEqual(updated["room"]["configVersion"], 1)
 
+    def test_legacy_put_without_intel_fields_preserves_custom_windows(self) -> None:
+        self.app.create_room(
+            self._room_body(intel_stale_after_sec=25.0, intel_archive_after_sec=300.0),
+            self.admin,
+        )
+        updated = self.app.update_room("pve-room", self._room_body(name="Renamed"), self.admin)
+
+        self.assertEqual(updated["room"]["intelStaleAfterSec"], 25.0)
+        self.assertEqual(updated["room"]["intelArchiveAfterSec"], 300.0)
+
     def test_running_room_rejects_mode_or_difficulty_change(self) -> None:
         self.app.create_room(
             self._room_body(mode="pve", ai_difficulty="normal"), self.admin

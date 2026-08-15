@@ -1,7 +1,26 @@
 # 发布流程
 
+联网协议当前为 v6/schema 6。客户端和权威 `game-server` 优先使用 v6；服务端仍支持 v5/v4
+降级协商。升级前先停止写入、备份账号数据库以及房间 `room-checkpoint.json`、`room-commands.jsonl`
+和全部轮转日志，确认备份可在隔离卷恢复后再替换服务。
+
 本流程适用于桌面客户端和 Docker 联网服务的同一版本发布。发布前先将
 `WARGAME_VERSION` 更新为目标语义版本，保证 CMake 服务端、Docker 镜像标签和部署配置一致。
+`deploy/release-manifest.env` 固定 v6/schema 6、`appindex`、`account-web`、`game-server` 和
+WebSocket 权威数据面；`release-identity.txt` 保存一次计算的版本、源码摘要和协议身份。
+
+### 三端统一构建
+
+在具备 Qt 6.10（根项目）和 Qt 6.4（独立 `server/`）的构建机上执行：
+
+```bash
+WARGAME_VERSION=2.0.0 ./tools/build-release.sh --clean
+sha256sum -c dist/release-2.0.0/SHA256SUMS
+```
+
+输出目录同时包含桌面 `appindex`、根项目服务端、Qt 6.4 独立服务端和发布身份文件。
+服务器发布包仍由 `deploy/package-one-click.sh` 生成；它会携带同一身份并在安装时拒绝摘要或
+协议不一致的归档。
 
 ## 自动化门禁
 
@@ -32,8 +51,8 @@ cmake --preset sanitizers
 cmake --build --preset debug
 cmake --build --preset sanitizers
 ./tools/verify-test-baseline.sh build/debug build/sanitizers
-ctest --preset debug
-ctest --preset sanitizers
+ctest --test-dir build/debug --output-on-failure
+ctest --test-dir build/sanitizers --output-on-failure
 cmake --build build/debug --target all_qmllint
 ./tools/check-source-format.sh
 ./tools/verify-docker-recovery.sh
@@ -63,7 +82,7 @@ Docker 演练会验证联网认证、权限、消息幂等、优雅停止最终�
 
 以下项目不可由 CI 可靠替代，必须在候选版本上记录结果：
 
-- 1100x720、1360x860 和高 DPI/字体缩放下的四席位与账号管理界面。
+- 900x620、1360x860 和高 DPI/字体缩放下的四席位、情报工作区、双设置面板与账号管理界面。
 - 断网 30 秒、服务端重启、丢失 delta 与自动重连后的状态恢复。
 - 32 个连接、500 单元的压力测试；记录 tick 耗时、内存、发送队列和重连率。
 - 管理员登录、账号单客户端约束、战位权限、敌方视野裁剪和检查点恢复。
@@ -75,7 +94,7 @@ Docker 演练会验证联网认证、权限、消息幂等、优雅停止最终�
 1. 记录目标 commit、`WARGAME_VERSION`、CI 链接和人工验收结果。
 2. 在 staging 使用与生产相同的 `.env` 字段和持久卷配置部署候选镜像。
 3. 对生产数据卷执行归档备份，验证归档可还原到隔离卷。
-4. 更新生产 `.env` 的 `WARGAME_VERSION` 并执行
+4. 确认桌面客户端已切换到 v6，再更新生产 `.env` 的 `WARGAME_VERSION` 并执行
    `docker compose --project-name wargame --env-file /path/to/.env -f /path/to/current/deploy/compose.yml up -d --build`。
 5. 通过管理员“服务器监控”确认 game-server 状态为 `healthy`，再执行联网冒烟验证。
 6. 出现回归时，停止服务但保留卷，将 `WARGAME_VERSION` 回退到上一已验证版本并重新部署。

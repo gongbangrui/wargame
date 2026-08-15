@@ -111,8 +111,7 @@ TEST(AttackPower, AttackUavAppliesConfiguredDamage) {
 
     double hpBefore = tgt->hp();
     atk->setPosition(tgt->pos());
-    engine.command("engageTarget", QVariantMap{{"attackerId", "red_a1"},
-                                                {"targetId", "blue_r1"}});
+    atk->fireOnTarget(QStringLiteral("blue_r1"));
 
     engine.stepOnce(2.0);
     EXPECT_LT(tgt->hp(), hpBefore);
@@ -171,11 +170,12 @@ TEST(AttackPower, AttackUavZeroPowerDoesNoDamage) {
     UnitBase::Params p = atk->params();
     p.attackPower = 0;
     atk->setParams(p);
+    atk->clearSchedule();
+    tgt->clearSchedule();
 
     double hpBefore = tgt->hp();
     atk->setPosition(tgt->pos());
-    engine.command("engageTarget", QVariantMap{{"attackerId", "red_a1"},
-                                                {"targetId", "blue_r1"}});
+    atk->fireOnTarget(QStringLiteral("blue_r1"));
     engine.stepOnce(2.0);
     EXPECT_DOUBLE_EQ(tgt->hp(), hpBefore);
 }
@@ -202,10 +202,7 @@ TEST(AttackPower, ReloadCompletesWithoutAutomaticFollowUpShot) {
     ASSERT_NE(attacker, nullptr);
     ASSERT_NE(target, nullptr);
     attacker->setPosition(target->pos());
-    ASSERT_TRUE(engine.executeCommand(
-        QStringLiteral("engageTarget"),
-        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
-                    {QStringLiteral("targetId"), QStringLiteral("blue_cp")}}).accepted);
+    attacker->fireOnTarget(QStringLiteral("blue_cp"));
 
     engine.stepOnce(0.1);
     EXPECT_EQ(attacker->ammoRemaining(), 2);
@@ -220,10 +217,7 @@ TEST(AttackPower, ReloadCompletesWithoutAutomaticFollowUpShot) {
     EXPECT_EQ(attacker->ammoRemaining(), 2);
     EXPECT_DOUBLE_EQ(target->hp(), 480.0);
 
-    ASSERT_TRUE(engine.executeCommand(
-        QStringLiteral("engageTarget"),
-        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
-                    {QStringLiteral("targetId"), QStringLiteral("blue_cp")}}).accepted);
+    attacker->fireOnTarget(QStringLiteral("blue_cp"));
     engine.stepOnce(0.1);
     EXPECT_EQ(attacker->ammoRemaining(), 1);
     EXPECT_DOUBLE_EQ(target->hp(), 460.0);
@@ -248,10 +242,7 @@ TEST(AttackPower, GeometryContactCanMissAccordingToHitProbability) {
     ASSERT_NE(attacker, nullptr);
     ASSERT_NE(target, nullptr);
     attacker->setPosition(target->pos());
-    ASSERT_TRUE(engine.executeCommand(
-        QStringLiteral("engageTarget"),
-        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
-                    {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
+    attacker->fireOnTarget(QStringLiteral("blue_r1"));
 
     engine.stepOnce(0.1);
     EXPECT_EQ(attacker->ammoRemaining(), 1);
@@ -398,10 +389,7 @@ TEST(AttackPower, WeaponReconfigurationPreservesShotSequence) {
     ASSERT_NE(attacker, nullptr);
     ASSERT_NE(target, nullptr);
     attacker->setPosition(target->pos());
-    ASSERT_TRUE(engine.executeCommand(
-                    QStringLiteral("engageTarget"),
-                    QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
-                                {QStringLiteral("targetId"), QStringLiteral("blue_r1")}}).accepted);
+    attacker->fireOnTarget(QStringLiteral("blue_r1"));
     engine.stepOnce(0.05);
     ASSERT_GT(attacker->shotSequence(), 0U);
     const quint64 sequence = attacker->shotSequence();

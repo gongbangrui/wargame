@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required(VERSION 3.25)
 
-project(index VERSION 1.0.0 LANGUAGES CXX)
+project(index VERSION 2.0.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 
 set(WARGAME_VERSION "${PROJECT_VERSION}" CACHE STRING
@@ -153,6 +153,12 @@ qt_add_qml_module(appindex
         qml/components/RoutePlannerDialog.qml
         qml/components/Minimap.qml
         qml/components/SettingsPanel.qml
+        qml/components/SettingsSection.qml
+        qml/components/SettingsToggleRow.qml
+        qml/components/ShortcutEditor.qml
+        qml/components/LocalSettingsPanel.qml
+        qml/components/OnlineSettingsPanel.qml
+        qml/components/OnlineIntelWorkspace.qml
         qml/components/SessionDialog.qml
         qml/components/ChatPanel.qml
         qml/components/BattleReportDialog.qml
@@ -281,6 +287,7 @@ if(BUILD_TESTING)
     if(TARGET wargame_serverlib)
         target_sources(wargame_tests PRIVATE
             tests/test_room_persistence.cpp
+            tests/test_intel_ledger.cpp
             tests/test_state_projector.cpp
             tests/test_rules_ai.cpp
             tests/test_ollama_conversation_store.cpp

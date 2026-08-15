@@ -3,6 +3,7 @@
 #include "AuthoritativeRoom.h"
 #include "core/UnitBase.h"
 #include "protocol/Protocol.h"
+#include "protocol/StateDelta.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -381,6 +382,148 @@ TEST(GameServerSnapshotTest, ChangedProjectionCarriesAdvancedRevisionAndIdleKeep
                   .value(QStringLiteral("stateRevision")).toInteger(),
               static_cast<qint64>(server.m_stateRevision));
     EXPECT_EQ(session.lastSnapshot, changedSnapshot);
+
+    client.close();
+    EXPECT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
+}
+
+TEST(GameServerSnapshotTest, LegacySessionReceivesV4SnapshotsAndDeltasWithoutIntelFields) {
+    int argc = 1;
+    char applicationName[] = "legacy_snapshot_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_server.listen(QHostAddress::LocalHost, 0));
+    QList<QJsonObject> messages;
+    QWebSocket client;
+    QObject::connect(&client, &QWebSocket::textMessageReceived, [&messages](const QString& text) {
+        messages.append(QJsonDocument::fromJson(text.toUtf8()).object());
+    });
+    client.open(QUrl(QStringLiteral("ws://127.0.0.1:%1")
+                         .arg(server.m_server.serverPort())));
+    ASSERT_TRUE(waitFor([&server]() { return server.m_clients.size() == 1; }));
+    QWebSocket* serverSocket = server.m_clients.keys().constFirst();
+    auto& session = server.m_clients[serverSocket];
+    session.authenticated = true;
+    session.roomId = server.m_roomId;
+    session.protocolVersion = Protocol::LegacyVersion;
+    session.schemaVersion = Protocol::LegacySchemaVersion;
+
+    server.broadcastSnapshots();
+    ASSERT_TRUE(waitFor([&messages]() { return messages.size() == 1; }));
+    const QJsonObject first = messages.constFirst();
+    EXPECT_EQ(first.value(QStringLiteral("protocolVersion")).toInteger(),
+              Protocol::LegacyVersion);
+    EXPECT_EQ(first.value(QStringLiteral("schemaVersion")).toInteger(),
+              Protocol::LegacySchemaVersion);
+    const QJsonObject firstPayload = first.value(QStringLiteral("payload")).toObject();
+    EXPECT_EQ(firstPayload.value(QStringLiteral("schemaVersion")).toInteger(),
+              Protocol::LegacySchemaVersion);
+    EXPECT_FALSE(firstPayload.contains(QStringLiteral("intelState")));
+    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(first).valid);
+
+    QJsonObject newerPayload = firstPayload;
+    newerPayload[QStringLiteral("intelState")] =
+        QJsonObject{{QStringLiteral("revision"), 1},
+                    {QStringLiteral("records"), QJsonArray{}},
+                    {QStringLiteral("shareTargets"), QJsonArray{}}};
+    server.sendEnvelope(serverSocket, QStringLiteral("snapshot"), newerPayload);
+    ASSERT_TRUE(waitFor([&messages]() { return messages.size() == 2; }));
+    EXPECT_FALSE(messages.at(1).value(QStringLiteral("payload")).toObject()
+                     .contains(QStringLiteral("intelState")));
+    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(messages.at(1)).valid);
+
+    server.m_roomName = QStringLiteral("Legacy delta regression");
+    server.broadcastSnapshots();
+    ASSERT_TRUE(waitFor([&messages]() { return messages.size() == 3; }));
+    EXPECT_EQ(messages.at(2).value(QStringLiteral("type")).toString(), QLatin1String("delta"));
+    EXPECT_EQ(messages.at(2).value(QStringLiteral("schemaVersion")).toInteger(),
+              Protocol::LegacySchemaVersion);
+    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(messages.at(2)).valid);
+    EXPECT_FALSE(messages.at(2).value(QStringLiteral("payload")).toObject()
+                     .contains(QStringLiteral("intelDelta")));
+
+    client.close();
+    EXPECT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
+}
+
+TEST(GameServerSnapshotTest, V5IntelSnapshotAndDeltaRemainClientCompatible) {
+    int argc = 1;
+    char applicationName[] = "v5_intel_snapshot_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_server.listen(QHostAddress::LocalHost, 0));
+    QList<QJsonObject> messages;
+    QWebSocket client;
+    QObject::connect(&client, &QWebSocket::textMessageReceived, [&messages](const QString& text) {
+        messages.append(QJsonDocument::fromJson(text.toUtf8()).object());
+    });
+    client.open(QUrl(QStringLiteral("ws://127.0.0.1:%1")
+                         .arg(server.m_server.serverPort())));
+    ASSERT_TRUE(waitFor([&server]() { return server.m_clients.size() == 1; }));
+
+    QWebSocket* serverSocket = server.m_clients.keys().constFirst();
+    auto& session = server.m_clients[serverSocket];
+    session.authenticated = true;
+    session.roomId = server.m_roomId;
+    session.seatId = QStringLiteral("red_commander");
+    session.seatType = QStringLiteral("commander");
+    session.side = QStringLiteral("red");
+    session.protocolVersion = Protocol::Version;
+    session.schemaVersion = Protocol::SchemaVersion;
+
+    const QJsonObject position{{QStringLiteral("x"), 100.0},
+                               {QStringLiteral("y"), 200.0},
+                               {QStringLiteral("alt"), 0.0}};
+    ASSERT_TRUE(server.m_intelLedger
+                    .createManualReport(QStringLiteral("red_commander"),
+                                        QStringLiteral("contact"), QStringLiteral("first"),
+                                        position, QStringLiteral("first report"),
+                                        QDateTime::currentDateTimeUtc())
+                    .ok);
+    server.broadcastSnapshots();
+    ASSERT_TRUE(waitFor([&messages]() { return messages.size() == 1; }));
+
+    QJsonObject reconstructed = messages.constFirst().value(QStringLiteral("payload")).toObject();
+    EXPECT_TRUE(reconstructed.contains(QStringLiteral("intelState")));
+    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(messages.constFirst()).valid);
+
+    ASSERT_TRUE(server.m_intelLedger
+                    .createManualReport(QStringLiteral("red_commander"),
+                                        QStringLiteral("contact"), QStringLiteral("second"),
+                                        QJsonObject{{QStringLiteral("x"), 120.0},
+                                                    {QStringLiteral("y"), 220.0},
+                                                    {QStringLiteral("alt"), 0.0}},
+                                        QStringLiteral("second report"),
+                                        QDateTime::currentDateTimeUtc())
+                    .ok);
+    server.broadcastSnapshots();
+    ASSERT_TRUE(waitFor([&messages]() { return messages.size() == 2; }));
+    ASSERT_EQ(messages.at(1).value(QStringLiteral("type")).toString(), QLatin1String("delta"));
+    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(messages.at(1)).valid);
+    EXPECT_TRUE(messages.at(1).value(QStringLiteral("payload")).toObject()
+                    .contains(QStringLiteral("intelDelta")));
+    QString error;
+    ASSERT_TRUE(StateDelta::apply(
+                    reconstructed, messages.at(1).value(QStringLiteral("payload")).toObject(),
+                    &error))
+        << error.toStdString();
+    EXPECT_EQ(reconstructed, server.snapshotFor(server.m_clients.value(serverSocket)));
 
     client.close();
     EXPECT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
@@ -967,6 +1110,200 @@ TEST(GameServerCommandTest, FutureCommandResultIsStableForDuplicateCommandId) {
     EXPECT_EQ(server.m_commandResultOrder.count(cacheKey), 1);
 }
 
+TEST(GameServerIntelPersistenceTest,
+     CommittedReportRemainsAcceptedAndReplaysWhenCheckpointIsDeferred) {
+    int argc = 1;
+    char applicationName[] = "intel_checkpoint_deferred_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    constexpr auto requestId = "report-checkpoint-1";
+    const QString cacheKey = QStringLiteral("1:intel:createIntelReport:%1")
+                                 .arg(QLatin1String(requestId));
+    quint64 committedSequence = 0;
+    {
+        GameServer server;
+        ASSERT_TRUE(server.m_recoveryError.isEmpty())
+            << server.m_recoveryError.toStdString();
+        server.m_checkpointTimer.stop();
+        server.m_roomStatus = QStringLiteral("preparing");
+        ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+                        1, QStringLiteral("red-player"),
+                        QStringLiteral("red_commander"),
+                        QStringLiteral("commandpost")).ok);
+        server.syncAuthoritativeSeats();
+        QString baselineError;
+        ASSERT_TRUE(server.persistRoomState(&baselineError))
+            << baselineError.toStdString();
+        const quint64 baselineSequence = server.m_eventSequence;
+
+        QWebSocket socket;
+        auto& session = server.m_clients[&socket];
+        session.authenticated = true;
+        session.userId = 1;
+        session.username = QStringLiteral("red-player");
+        session.roomId = server.m_roomId;
+        session.seatId = QStringLiteral("red_commander");
+        session.seatType = QStringLiteral("commander");
+        session.side = QStringLiteral("red");
+        const QJsonObject envelope = Protocol::makeClientEnvelope(
+            QStringLiteral("createIntelReport"), QLatin1String(requestId),
+            QJsonObject{{QStringLiteral("position"),
+                         QJsonObject{{QStringLiteral("x"), 100.0},
+                                     {QStringLiteral("y"), 200.0}}},
+                        {QStringLiteral("type"), QStringLiteral("obstacle")},
+                        {QStringLiteral("title"), QStringLiteral("bridge")},
+                        {QStringLiteral("note"), QStringLiteral("blocked")}});
+        const QString encoded = QString::fromUtf8(
+            QJsonDocument(envelope).toJson(QJsonDocument::Compact));
+
+        qputenv("WARGAME_FORCE_CHECKPOINT_FLUSH_FAILURE", QByteArray("1"));
+        server.onTextMessage(&socket, encoded);
+        server.onTextMessage(&socket, encoded);
+        qunsetenv("WARGAME_FORCE_CHECKPOINT_FLUSH_FAILURE");
+
+        committedSequence = server.m_eventSequence;
+        EXPECT_EQ(committedSequence, baselineSequence + 1);
+        ASSERT_TRUE(server.m_commandResults.contains(cacheKey));
+        EXPECT_TRUE(server.m_commandResults.value(cacheKey)
+                        .value(QStringLiteral("accepted")).toBool());
+        EXPECT_EQ(server.m_commandResultOrder.count(cacheKey), 1);
+        EXPECT_EQ(server.m_intelLedger.state(QStringLiteral("red_commander"))
+                      .records.size(), 1);
+        QFile monitor(temporary.filePath(QStringLiteral("monitor.jsonl")));
+        ASSERT_TRUE(monitor.open(QIODevice::ReadOnly));
+        EXPECT_TRUE(monitor.readAll().contains("intelCheckpointDeferred"));
+    }
+
+    GameServer restored;
+    ASSERT_TRUE(restored.m_recoveryError.isEmpty())
+        << restored.m_recoveryError.toStdString();
+    EXPECT_EQ(restored.m_eventSequence, committedSequence);
+    ASSERT_TRUE(restored.m_commandResults.contains(cacheKey));
+    EXPECT_TRUE(restored.m_commandResults.value(cacheKey)
+                    .value(QStringLiteral("accepted")).toBool());
+    ASSERT_EQ(restored.m_intelLedger.state(QStringLiteral("red_commander"))
+                  .records.size(), 1);
+    EXPECT_EQ(restored.m_intelLedger.state(QStringLiteral("red_commander"))
+                  .records.constFirst().knownAttributes.value(QStringLiteral("title")).toString(),
+              QStringLiteral("bridge"));
+}
+
+TEST(GameServerIntelPersistenceTest,
+     CommittedShareRemainsAcceptedAndReplaysWhenCheckpointIsDeferred) {
+    int argc = 1;
+    char applicationName[] = "intel_share_checkpoint_deferred_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    constexpr auto requestId = "share-checkpoint-1";
+    const QString cacheKey = QStringLiteral("1:intel:shareIntel:%1")
+                                 .arg(QLatin1String(requestId));
+    quint64 committedSequence = 0;
+    {
+        GameServer server;
+        ASSERT_TRUE(server.m_recoveryError.isEmpty())
+            << server.m_recoveryError.toStdString();
+        server.m_checkpointTimer.stop();
+        server.m_roomStatus = QStringLiteral("preparing");
+        ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+                        1, QStringLiteral("red-commander"),
+                        QStringLiteral("red_commander"),
+                        QStringLiteral("commandpost")).ok);
+        ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+                        3, QStringLiteral("blue-commander"),
+                        QStringLiteral("blue_commander"),
+                        QStringLiteral("commandpost")).ok);
+        ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+                        2, QStringLiteral("red-attack"),
+                        QStringLiteral("red_attack_1"),
+                        QStringLiteral("attackuav")).ok);
+        ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+                        1, QStringLiteral("red_commander"),
+                        GeoPos{1000.0, 1000.0, 0.0}).ok);
+        ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+                        3, QStringLiteral("blue_commander"),
+                        GeoPos{19000.0, 1000.0, 0.0}).ok);
+        ASSERT_TRUE(server.m_authoritativeRoom.deploy(
+                        1, QStringLiteral("red_attack_1"),
+                        GeoPos{1050.0, 1000.0, 20.0}).ok);
+        ASSERT_TRUE(server.applyDeployedScenario());
+        server.syncAuthoritativeSeats();
+        const IntelLedger::Result report = server.m_intelLedger.createManualReport(
+            QStringLiteral("red_commander"), QStringLiteral("obstacle"),
+            QStringLiteral("bridge"),
+            QJsonObject{{QStringLiteral("x"), 1200.0},
+                        {QStringLiteral("y"), 1100.0}},
+            QStringLiteral("blocked"), QDateTime::currentDateTimeUtc());
+        ASSERT_TRUE(report.ok);
+        QString baselineError;
+        ASSERT_TRUE(server.persistRoomState(&baselineError))
+            << baselineError.toStdString();
+        const quint64 baselineSequence = server.m_eventSequence;
+
+        QWebSocket senderSocket;
+        auto& sender = server.m_clients[&senderSocket];
+        sender.authenticated = true;
+        sender.userId = 1;
+        sender.username = QStringLiteral("red-commander");
+        sender.roomId = server.m_roomId;
+        sender.seatId = QStringLiteral("red_commander");
+        sender.seatType = QStringLiteral("commander");
+        sender.side = QStringLiteral("red");
+        const QJsonObject envelope = Protocol::makeClientEnvelope(
+            QStringLiteral("shareIntel"), QLatin1String(requestId),
+            QJsonObject{{QStringLiteral("intelId"), report.intelId},
+                        {QStringLiteral("recipientSeatIds"),
+                         QJsonArray{QStringLiteral("red_attack_1")}},
+                        {QStringLiteral("note"), QStringLiteral("handoff")}});
+        const QString encoded = QString::fromUtf8(
+            QJsonDocument(envelope).toJson(QJsonDocument::Compact));
+
+        qputenv("WARGAME_FORCE_CHECKPOINT_FLUSH_FAILURE", QByteArray("1"));
+        server.onTextMessage(&senderSocket, encoded);
+        server.onTextMessage(&senderSocket, encoded);
+        qunsetenv("WARGAME_FORCE_CHECKPOINT_FLUSH_FAILURE");
+
+        committedSequence = server.m_eventSequence;
+        EXPECT_EQ(committedSequence, baselineSequence + 1);
+        ASSERT_TRUE(server.m_commandResults.contains(cacheKey));
+        EXPECT_TRUE(server.m_commandResults.value(cacheKey)
+                        .value(QStringLiteral("accepted")).toBool());
+        EXPECT_EQ(server.m_commandResultOrder.count(cacheKey), 1);
+        EXPECT_EQ(server.m_intelLedger.state(QStringLiteral("red_attack_1"))
+                      .records.size(), 1);
+        EXPECT_EQ(server.m_intelLedger.history(QStringLiteral("red_commander")).size(), 2);
+        EXPECT_EQ(server.m_intelLedger.history(QStringLiteral("red_attack_1")).size(), 1);
+    }
+
+    GameServer restored;
+    ASSERT_TRUE(restored.m_recoveryError.isEmpty())
+        << restored.m_recoveryError.toStdString();
+    EXPECT_EQ(restored.m_eventSequence, committedSequence);
+    ASSERT_TRUE(restored.m_commandResults.contains(cacheKey));
+    EXPECT_TRUE(restored.m_commandResults.value(cacheKey)
+                    .value(QStringLiteral("accepted")).toBool());
+    ASSERT_EQ(restored.m_intelLedger.state(QStringLiteral("red_attack_1"))
+                  .records.size(), 1);
+    EXPECT_EQ(restored.m_intelLedger.state(QStringLiteral("red_attack_1"))
+                  .records.constFirst().note,
+              QStringLiteral("handoff"));
+    EXPECT_EQ(restored.m_intelLedger.history(QStringLiteral("red_commander")).size(), 2);
+    EXPECT_EQ(restored.m_intelLedger.history(QStringLiteral("red_attack_1")).size(), 1);
+}
+
 TEST(GameServerCommandTest, SharedUnitSpeedLimitIsEnforcedByAuthority) {
     int argc = 1;
     char applicationName[] = "authoritative_speed_limit_tests";
@@ -1100,7 +1437,7 @@ TEST(GameServerCommandTest, AbilityAndServiceAuthorizationMatchesRuntimeState) {
     EXPECT_FALSE(server.validateCommandOwnership(
         commander, QStringLiteral("activateScan"),
         QVariantMap{{QStringLiteral("unitId"), commandPostId}}, &code, &reason));
-    EXPECT_EQ(code, QStringLiteral("UNIT_NOT_MOVABLE"));
+    EXPECT_EQ(code, QStringLiteral("INVALID_UNIT_KIND"));
 
     EXPECT_FALSE(server.validateCommandOwnership(
         commander, QStringLiteral("attemptFieldRepair"),
@@ -3456,9 +3793,12 @@ TEST(GameServerAiExecutionTest, AttackBudgetKeepsGeneratedMovementInAuthoritativ
     server.m_engine.stepOnce(0.01);
 
     QList<AiSeatState> states = server.aiSeatStates();
-    ASSERT_EQ(states.size(), 4);
+    ASSERT_EQ(states.size(), 5);
     EXPECT_TRUE(std::all_of(states.cbegin(), states.cend(), [](const AiSeatState& state) {
-        return state.alive && state.movable && state.unitId != QLatin1String("blue_cp");
+        return state.alive && state.movable;
+    }));
+    EXPECT_TRUE(std::any_of(states.cbegin(), states.cend(), [](const AiSeatState& state) {
+        return state.kind == QLatin1String("commandpost");
     }));
     const QString firstTarget = server.m_authoritativeRoom
         .seat(QStringLiteral("red_attack_1")).unitId;

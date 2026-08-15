@@ -18,8 +18,11 @@ tar -xzf "$archive" -C "$release_dir" --no-same-owner --no-same-permissions
 cd "$release_dir/wargame-server-<version>"
 ```
 
-The package contains the source and Docker files for both `account-web` and
-the authority `game-server`; the installer builds both services locally.
+The package contains the source and Docker files for the desktop protocol
+client contract, `account-web`, and the authority `game-server`; the installer
+builds both server services locally. The included `deploy/release-manifest.env`
+locks the package to protocol v6/schema 6 and the WebSocket authoritative data
+plane.
 
 The game-server image disables the optional Fast DDS adapter by default. The
 installer persists `WARGAME_ENABLE_FASTDDS`, `WARGAME_FASTDDS_MODE`,
@@ -57,6 +60,10 @@ sudo ./deploy/install-server.sh \
 
 When the existing images are sufficient and only container recreation is
 needed, include `--no-build` in the same command.
+
+To force a clean rebuild after applying a source update, include `--no-cache`.
+This rebuilds both server images with the same staged source digest; do not
+rebuild only one service when changing protocol or projection code.
 
 Inspect the installed configuration without printing credentials, validate the
 Compose file, and check service health from any directory:

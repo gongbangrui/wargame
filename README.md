@@ -11,7 +11,7 @@
 - 本地模式保留编辑、红方、蓝方和导演视图；联网模式使用独立战位视角。
 - 五种单位：指挥所、侦察无人机、攻击无人机、地面侦察单位、干扰无人机。
 - 移动单位 FSM：待机、移动、巡逻、撤退。
-- 50 ms 固定仿真 tick、单位探测、通信距离、指挥所通信旁路和 ECM 干扰。
+- 50 ms 固定仿真 tick、单位探测、定向通信距离/中继和 ECM 干扰。
 - 本地模式与账号认证后的联网推演模式。
 - 权威服务器、账号管理、房间生命周期、战位分配、独立视野、定向情报共享和断线重连。
 - WebSocket 权威数据面：按房间和战位隔离会话，协议和权限模型由游戏服务统一执行。
@@ -64,6 +64,8 @@ cmake --preset debug
 cmake --preset sanitizers
 cmake --build --preset debug
 cmake --build --preset sanitizers
+ctest --test-dir build/debug --output-on-failure
+ctest --test-dir build/sanitizers --output-on-failure
 cmake --build build/debug --target all_qmllint
 ./tools/check-source-format.sh
 ./tools/verify-docker-recovery.sh
@@ -80,6 +82,11 @@ cmake --build build/debug --target all_qmllint
 
 - `account-web`：账号管理、管理员认证、房间配置和 SQLite 数据。
 - `game-server`：权威 `SimulationEngine`、房间/战位管理、视野裁剪和 WebSocket 数据面节点。
+
+发布时使用 `WARGAME_VERSION=2.0.0 ./tools/build-release.sh --clean` 生成统一的桌面客户端、
+根项目服务端和 Qt 6.4 独立服务端身份；服务器一键包随后由
+`WARGAME_VERSION=2.0.0 DIST_DIR=dist ./deploy/package-one-click.sh` 生成。包内身份文件会在
+全新主机安装前校验 v6/schema 6 和源码摘要，避免客户端与两个服务端错配。
 
 ### 下载发布包部署
 

@@ -29,11 +29,15 @@ struct ScenarioUnit {
     GeoPos pos;
     double detectRange = 5000;
     double attackRange = 1500;
-    double commRange = 20000;
+    double commRange = 7000;
     // A zero default is safe for an incompletely filled editor fixture. The
     // scenario loader supplies the type-specific cruise default when speed is
     // omitted from JSON.
     double speed = 0.0;
+    /// Horizontal collision footprint in meters.
+    double collisionRadius = 0.0;
+    /// Vertical half-height used by the 2.5D collision test.
+    double collisionHalfHeight = 0.0;
     double maxHp = 100;
     /// Fraction of incoming hull damage absorbed, in [0, 0.9].
     double armor = 0.0;
@@ -78,7 +82,7 @@ struct Scenario {
 class ScenarioIo : public QObject {
     Q_OBJECT
 public:
-    static constexpr int SchemaVersion = 3;
+    static constexpr int SchemaVersion = 4;
     static Scenario loadFromFile(const QString& path, QString* err = nullptr);
     static bool saveToFile(const Scenario& s, const QString& path, QString* err = nullptr);
     static QJsonObject toJson(const Scenario& s);

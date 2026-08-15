@@ -226,7 +226,7 @@ QList<ValidMessage> observerWriteMessages() {
         {QStringLiteral("redeploy"),
          QJsonObject{{QStringLiteral("seatId"), QStringLiteral("red_commander")}}},
         {QStringLiteral("shareIntel"),
-         QJsonObject{{QStringLiteral("targetId"), QStringLiteral("blue_cp")},
+         QJsonObject{{QStringLiteral("intelId"), QStringLiteral("sensor_red_recon_blue_cp")},
                      {QStringLiteral("recipientSeatIds"),
                       QJsonArray{QStringLiteral("red_commander")}}}},
         {QStringLiteral("mapMark"),

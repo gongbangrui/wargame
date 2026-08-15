@@ -29,7 +29,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.websockets import WebSocketState
 
 _ACCOUNT_SERVICE_DIR = str(Path(__file__).resolve().parent)
@@ -306,6 +306,14 @@ class RoomBody(BaseModel):
     # preserves the stored values when an existing room is updated.
     ai_provider: Literal["rules", "ollama"] | None = None
     ai_model: str | None = Field(default=None, max_length=128)
+    intel_stale_after_sec: float = Field(default=10.0, gt=0.0, le=86400.0)
+    intel_archive_after_sec: float = Field(default=120.0, gt=0.0, le=604800.0)
+
+    @model_validator(mode="after")
+    def validate_intel_windows(self) -> "RoomBody":
+        if self.intel_archive_after_sec <= self.intel_stale_after_sec:
+            raise ValueError("情报归档阈值必须大于失联阈值")
+        return self
 
     @field_validator("room_id", "name", "description", "scenario_id", mode="before")
     @classmethod
@@ -533,6 +541,8 @@ def initialize_database() -> None:
                 ai_model TEXT NOT NULL DEFAULT '',
                 ai_resolved_model TEXT NOT NULL DEFAULT '',
                 config_version INTEGER NOT NULL DEFAULT 1,
+                intel_stale_after_sec REAL NOT NULL DEFAULT 10.0,
+                intel_archive_after_sec REAL NOT NULL DEFAULT 120.0,
                 status TEXT NOT NULL DEFAULT 'stopped',
                 winner TEXT NOT NULL DEFAULT '',
                 status_reason TEXT NOT NULL DEFAULT '',
@@ -649,6 +659,8 @@ def initialize_database() -> None:
             ("ai_model", "TEXT NOT NULL DEFAULT ''"),
             ("ai_resolved_model", "TEXT NOT NULL DEFAULT ''"),
             ("config_version", "INTEGER NOT NULL DEFAULT 1"),
+            ("intel_stale_after_sec", "REAL NOT NULL DEFAULT 10.0"),
+            ("intel_archive_after_sec", "REAL NOT NULL DEFAULT 120.0"),
         ):
             if name not in room_columns:
                 db.execute(f"ALTER TABLE rooms ADD COLUMN {name} {declaration}")
@@ -661,6 +673,14 @@ def initialize_database() -> None:
             "WHERE ai_difficulty NOT IN ('easy', 'normal', 'hard') OR ai_difficulty IS NULL"
         )
         db.execute("UPDATE rooms SET config_version=1 WHERE config_version IS NULL OR config_version < 1")
+        db.execute(
+            "UPDATE rooms SET intel_stale_after_sec=10.0 "
+            "WHERE intel_stale_after_sec IS NULL OR intel_stale_after_sec <= 0"
+        )
+        db.execute(
+            "UPDATE rooms SET intel_archive_after_sec=120.0 "
+            "WHERE intel_archive_after_sec IS NULL OR intel_archive_after_sec <= intel_stale_after_sec"
+        )
         db.execute(
             "UPDATE rooms SET ai_provider='rules' "
             "WHERE ai_provider NOT IN ('rules', 'ollama') OR ai_provider IS NULL"
@@ -734,12 +754,12 @@ def initialize_database() -> None:
         if db.execute("SELECT 1 FROM rooms WHERE room_id=?", (ACTIVE_GAME_ROOM_ID,)).fetchone() is None:
             now = iso_time(utc_now())
             db.execute(
-                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,status,enabled,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,intel_stale_after_sec,intel_archive_after_sec,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ACTIVE_GAME_ROOM_ID, "主推演室", "默认联网推演房间", "default",
                  json.dumps(DEFAULT_SEAT_LIMITS, ensure_ascii=False),
                  json.dumps({}, ensure_ascii=False), "pvp", "normal", "rules", "", "", 1,
-                 "stopped", 1, now, now),
+                 10.0, 120.0, "stopped", 1, now, now),
             )
         ai_config_row = db.execute(
             "SELECT provider, base_url, model, config_version FROM ai_config WHERE config_id=1"
@@ -1205,6 +1225,8 @@ def public_room(row: sqlite3.Row) -> dict:
         "aiModel": room_ai_model(row["ai_model"]),
         "aiResolvedModel": room_ai_model(row["ai_resolved_model"]),
         "configVersion": int(row["config_version"]),
+        "intelStaleAfterSec": float(row["intel_stale_after_sec"]),
+        "intelArchiveAfterSec": float(row["intel_archive_after_sec"]),
         "status": row["status"],
         "winner": row["winner"],
         "statusReason": row["status_reason"],
@@ -2105,6 +2127,8 @@ def kick_room_occupant(
 @app.post("/api/admin/rooms", status_code=201)
 def create_room(body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict:
     now = iso_time(utc_now())
+    if body.intel_archive_after_sec <= body.intel_stale_after_sec:
+        raise HTTPException(status_code=422, detail="情报归档阈值必须大于失联阈值")
     try:
         with database() as db:
             global_ai = db.execute(
@@ -2124,12 +2148,13 @@ def create_room(body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict
                 # never make a rules-only room depend on Ollama.
                 ai_model = ai_model or ""
             db.execute(
-                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,status,enabled,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,intel_stale_after_sec,intel_archive_after_sec,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (body.room_id, body.name, body.description, body.scenario_id,
                  json.dumps(body.seat_limits, ensure_ascii=False),
                  json.dumps(body.seat_parameters, ensure_ascii=False), body.mode,
-                 body.ai_difficulty, ai_provider, ai_model, "", 1, "stopped",
+                 body.ai_difficulty, ai_provider, ai_model, "", 1,
+                 body.intel_stale_after_sec, body.intel_archive_after_sec, "stopped",
                  int(body.enabled), now, now),
             )
             row = db.execute("SELECT * FROM rooms WHERE room_id=?", (body.room_id,)).fetchone()
@@ -2146,6 +2171,18 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
         existing = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
         if existing is None:
             raise HTTPException(status_code=404, detail="房间不存在")
+        intel_stale_after_sec = (
+            body.intel_stale_after_sec
+            if "intel_stale_after_sec" in body.model_fields_set
+            else float(existing["intel_stale_after_sec"])
+        )
+        intel_archive_after_sec = (
+            body.intel_archive_after_sec
+            if "intel_archive_after_sec" in body.model_fields_set
+            else float(existing["intel_archive_after_sec"])
+        )
+        if intel_archive_after_sec <= intel_stale_after_sec:
+            raise HTTPException(status_code=422, detail="情报归档阈值必须大于失联阈值")
         mode_changed = "mode" in body.model_fields_set and body.mode != existing["mode"]
         difficulty_changed = (
             "ai_difficulty" in body.model_fields_set
@@ -2194,17 +2231,20 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
             or ai_difficulty != existing["ai_difficulty"]
             or provider != room_ai_provider(existing["ai_provider"], existing["mode"])
             or model != room_ai_model(existing["ai_model"])
+            or intel_stale_after_sec != float(existing["intel_stale_after_sec"])
+            or intel_archive_after_sec != float(existing["intel_archive_after_sec"])
         )
         if changed:
             config_version += 1
         now = iso_time(utc_now())
         db.execute(
-            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,mode=?,ai_difficulty=?,ai_provider=?,ai_model=?,ai_resolved_model=?,config_version=?,enabled=?,updated_at=? WHERE room_id=?",
+            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,mode=?,ai_difficulty=?,ai_provider=?,ai_model=?,ai_resolved_model=?,config_version=?,intel_stale_after_sec=?,intel_archive_after_sec=?,enabled=?,updated_at=? WHERE room_id=?",
             (body.name, body.description, body.scenario_id,
              json.dumps(body.seat_limits, ensure_ascii=False),
              json.dumps(body.seat_parameters, ensure_ascii=False), mode, ai_difficulty,
              provider, model, "" if ai_changed or mode_changed else existing["ai_resolved_model"],
-             config_version, int(body.enabled), now, room_id),
+             config_version, intel_stale_after_sec, intel_archive_after_sec,
+             int(body.enabled), now, room_id),
         )
         row = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
     return {"room": public_room(row)}

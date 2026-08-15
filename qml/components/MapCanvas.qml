@@ -102,6 +102,11 @@ Item {
     property int mapRevision: 0
     property var routes: []
     property var mapMarkers: []
+    property var intelRecords: []
+    property bool showIntelLive: true
+    property bool showIntelStale: true
+    property bool showIntelManual: true
+    property bool showIntelUncertainty: true
     property string selectedMapMarkerId: ""
     property var abilityCooldownByUnit: ({})
     property var abilityEffects: []
@@ -265,6 +270,11 @@ Item {
     onCenterChanged: refresh()
     onMapSizeChanged: refresh()
     onMapMarkersChanged: refresh()
+    onIntelRecordsChanged: refresh()
+    onShowIntelLiveChanged: refresh()
+    onShowIntelStaleChanged: refresh()
+    onShowIntelManualChanged: refresh()
+    onShowIntelUncertaintyChanged: refresh()
     onSelectedMapMarkerIdChanged: refresh()
 
     Connections {
@@ -312,7 +322,10 @@ Item {
 
     function logicalFromPixel(px, py) {
         var point = tileMap.screenToSim(px, py)
-        return { x: Number(point.x), y: Number(point.y) }
+        var x = Number(point.x)
+        var y = Number(point.y)
+        return { x: Math.max(0, Math.min(root.mapSize.w, isFinite(x) ? x : 0)),
+                 y: Math.max(0, Math.min(root.mapSize.h, isFinite(y) ? y : 0)) }
     }
     function toPixel(lx, ly) {
         return tileMap.simToScreen(lx, ly)
@@ -333,6 +346,29 @@ Item {
             if (dx * dx + dy * dy <= 24 * 24) return marker
         }
         return null
+    }
+    function unitHitRadiusPx(unit) {
+        var radius = Number(unit && unit.collisionRadius || 0) * Math.max(0.05, root.zoom)
+        return Math.max(14, Math.min(44, isFinite(radius) ? radius : 14))
+    }
+    function unitAtPixel(px, py, includeInvisible) {
+        var selected = null
+        var bestDistance = Number.POSITIVE_INFINITY
+        for (var i = 0; i < innerCanvas.units.length; i++) {
+            var unit = innerCanvas.units[i]
+            if (!unit || !unit.position || unit.position.length < 2
+                    || (!includeInvisible && (!unit.alive || !root.isVisible(unit)))) continue
+            var point = root.toPixel(unit.position[0], unit.position[1])
+            var dx = px - point.x
+            var dy = py - point.y
+            var distanceSquared = dx * dx + dy * dy
+            var radius = root.unitHitRadiusPx(unit)
+            if (distanceSquared <= radius * radius && distanceSquared < bestDistance) {
+                selected = unit
+                bestDistance = distanceSquared
+            }
+        }
+        return selected
     }
     function isVisible(u) {
         if (!u) return false
@@ -576,7 +612,73 @@ Item {
                 }
             }
 
-            // 手动情报标记：只由服务器投影到当前阵营/战位，绝不自动传播。
+            // 情报图层使用形状区分来源和鲜度；只绘制服务器投影到当前
+            // 战位的当前记录，归档记录仍留在台账但默认不画在地图上。
+            var intelRecords = root.intelRecords || []
+            for (var ii = 0; ii < intelRecords.length; ii++) {
+                var intel = intelRecords[ii]
+                if (!intel || String(intel.freshness || "") === "archived") continue
+                var manualIntel = String(intel.type || "") === "manualReport"
+                var freshness = String(intel.freshness || "")
+                if (manualIntel && !root.showIntelManual) continue
+                if (!manualIntel && freshness === "live" && !root.showIntelLive) continue
+                if (!manualIntel && freshness === "stale" && !root.showIntelStale) continue
+                var intelPos = intel.lastPosition || ({})
+                var intelX = Number(intelPos.x)
+                var intelY = Number(intelPos.y)
+                if (!isFinite(intelX) || !isFinite(intelY)) continue
+                var intelPixel = root.toPixel(intelX, intelY)
+                var intelColor = manualIntel ? t.markerManeuver
+                    : freshness === "live" ? t.detect : t.alertBg
+                ctx.save()
+                ctx.fillStyle = intelColor
+                ctx.strokeStyle = "#081219"
+                ctx.lineWidth = 2
+                ctx.beginPath()
+                if (manualIntel) {
+                    ctx.rect(intelPixel.x - 7, intelPixel.y - 7, 14, 14)
+                } else {
+                    ctx.moveTo(intelPixel.x, intelPixel.y - 10)
+                    ctx.lineTo(intelPixel.x + 10, intelPixel.y)
+                    ctx.lineTo(intelPixel.x, intelPixel.y + 10)
+                    ctx.lineTo(intelPixel.x - 10, intelPixel.y)
+                    ctx.closePath()
+                }
+                ctx.fill(); ctx.stroke()
+                ctx.strokeStyle = "#ffffff"
+                ctx.lineWidth = 1.5
+                ctx.beginPath()
+                if (manualIntel) {
+                    ctx.moveTo(intelPixel.x - 4, intelPixel.y)
+                    ctx.lineTo(intelPixel.x + 4, intelPixel.y)
+                    ctx.moveTo(intelPixel.x, intelPixel.y - 4)
+                    ctx.lineTo(intelPixel.x, intelPixel.y + 4)
+                } else {
+                    ctx.moveTo(intelPixel.x - 5, intelPixel.y)
+                    ctx.lineTo(intelPixel.x + 5, intelPixel.y)
+                    ctx.moveTo(intelPixel.x, intelPixel.y - 5)
+                    ctx.lineTo(intelPixel.x, intelPixel.y + 5)
+                }
+                ctx.stroke()
+                if (!manualIntel && freshness === "stale" && root.showIntelUncertainty) {
+                    var uncertainty = Number(intelPos.uncertaintyRadius)
+                    if (!isFinite(uncertainty) || uncertainty <= 0) uncertainty = 250
+                    var uncertaintyPixel = root.toPixel(intelX + uncertainty, intelY)
+                    var uncertaintyRadius = Math.max(8, Math.abs(uncertaintyPixel.x - intelPixel.x))
+                    ctx.setLineDash([5, 4])
+                    ctx.strokeStyle = intelColor
+                    ctx.lineWidth = 1.5
+                    ctx.beginPath(); ctx.arc(intelPixel.x, intelPixel.y, uncertaintyRadius, 0, Math.PI * 2); ctx.stroke()
+                    ctx.setLineDash([])
+                }
+                ctx.fillStyle = t.markerText
+                ctx.font = "9px sans-serif"
+                ctx.fillText(manualIntel ? "人工" : (freshness === "live" ? "实时" : "失联"),
+                             intelPixel.x + 12, intelPixel.y - 8)
+                ctx.restore()
+            }
+
+            // 手动战术标记：只由服务器投影到当前阵营/战位，绝不自动传播。
             var markers = root.mapMarkers || []
             for (var mi = 0; mi < markers.length; mi++) {
                 var marker = markers[mi]
@@ -1403,14 +1505,7 @@ Item {
                             return
                         }
                     }
-                    var hit = null
-                    for (var i = 0; i < innerCanvas.units.length; i++) {
-                        var u = innerCanvas.units[i]
-                        if (!u || !u.alive || !root.isVisible(u)) continue
-                        var p = root.toPixel(u.position[0], u.position[1])
-                        var dx = mouse.x - p.x, dy = mouse.y - p.y
-                        if (dx*dx + dy*dy < 14*14) { hit = u; break }
-                    }
+                    var hit = root.unitAtPixel(mouse.x, mouse.y, false)
                     if (hit) {
                         if (mouse.button === Qt.RightButton) {
                             _dragJustEnded = true
@@ -1456,7 +1551,7 @@ Item {
                         if (gfu.kind === "commandpost") continue
                         var gfp = root.toPixel(gfu.position[0], gfu.position[1])
                         var gfdx = mouse.x - gfp.x, gfdy = mouse.y - gfp.y
-                        if (gfdx*gfdx + gfdy*gfdy < 14*14) {
+                        if (gfdx*gfdx + gfdy*gfdy < root.unitHitRadiusPx(gfu) * root.unitHitRadiusPx(gfu)) {
                             root.guideSourceUnitId = gfu.id
                             root.controller.setFocusedUnitId(gfu.id)
                             root.guideSourceChanged(gfu.id)
@@ -1474,7 +1569,7 @@ Item {
                         if (gu.side === root.sideFilter) continue
                         var gp = root.toPixel(gu.position[0], gu.position[1])
                         var gdx = mouse.x - gp.x, gdy = mouse.y - gp.y
-                        if (gdx*gdx + gdy*gdy < 14*14) {
+                        if (gdx*gdx + gdy*gdy < root.unitHitRadiusPx(gu) * root.unitHitRadiusPx(gu)) {
                             pickedPos = { x: gu.position[0], y: gu.position[1] }
                             pickedTarget = gu.id
                             break
@@ -1487,14 +1582,7 @@ Item {
                 // 区分"点击"与"拖拽后释放"：鼠标按下与释放位置接近 → 视为点击
                 // onReleased 已经处理拖拽；这里只处理未发生平移的情况
                 if (_panning) return
-                var hit = null
-                for (var ci = 0; ci < innerCanvas.units.length; ci++) {
-                    var cu = innerCanvas.units[ci]
-                    if (!cu || !cu.alive || !root.isVisible(cu)) continue
-                    var cp = root.toPixel(cu.position[0], cu.position[1])
-                    var cdx = mouse.x - cp.x, cdy = mouse.y - cp.y
-                    if (cdx*cdx + cdy*cdy < 14*14) { hit = cu; break }
-                }
+                var hit = root.unitAtPixel(mouse.x, mouse.y, false)
                 if (mouse.button === Qt.RightButton) {
                     if (root.allowRightClickActions) {
                         if (hit) root.unitClicked(hit.id, "right", mouse.modifiers)
@@ -1506,14 +1594,7 @@ Item {
                 }
             }
             onDoubleClicked: function(mouse) {
-                var hit = null
-                for (var i = 0; i < innerCanvas.units.length; i++) {
-                    var u = innerCanvas.units[i]
-                    if (!u || !u.alive || !root.isVisible(u)) continue
-                    var p = root.toPixel(u.position[0], u.position[1])
-                    var dx = mouse.x - p.x, dy = mouse.y - p.y
-                    if (dx*dx + dy*dy < 14*14) { hit = u; break }
-                }
+                var hit = root.unitAtPixel(mouse.x, mouse.y, false)
                 if (hit) root.doubleClickedUnit(hit.id)
                 else root.doubleClickedMap(root.logicalFromPixel(mouse.x, mouse.y))
             }

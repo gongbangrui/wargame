@@ -57,7 +57,7 @@ bool parseObjective(const QJsonValue& value, AiObjectiveV1* objective) {
     const QString action = object.value(QStringLiteral("action")).toString();
     const bool movementAction = action == QLatin1String("search")
         || action == QLatin1String("patrol") || action == QLatin1String("guard")
-        || action == QLatin1String("jam");
+        || action == QLatin1String("jam") || action == QLatin1String("relocate");
     if (movementAction && (!object.contains(QStringLiteral("region"))
                            || !object.value(QStringLiteral("region")).isObject())) {
         return false;
@@ -93,7 +93,7 @@ bool isAiObjectiveAction(const QString& action) {
     return action == QLatin1String("defend") || action == QLatin1String("withdraw")
         || action == QLatin1String("search") || action == QLatin1String("attack")
         || action == QLatin1String("guard") || action == QLatin1String("jam")
-        || action == QLatin1String("patrol");
+        || action == QLatin1String("patrol") || action == QLatin1String("relocate");
 }
 
 QJsonObject AiPlanV1::toJson() const {

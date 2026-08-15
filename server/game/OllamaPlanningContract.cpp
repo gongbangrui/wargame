@@ -25,7 +25,8 @@ QStringList sortedUnique(QStringList values) {
 
 bool movementAction(const QString& action) {
     return action == QLatin1String("search") || action == QLatin1String("patrol")
-        || action == QLatin1String("guard") || action == QLatin1String("jam");
+        || action == QLatin1String("guard") || action == QLatin1String("jam")
+        || action == QLatin1String("relocate");
 }
 
 QJsonObject metadataProperty(const QString& type, const QJsonValue& value) {
@@ -46,6 +47,8 @@ QStringList OllamaPlanningContract::actionsFor(const OllamaSeatConstraint& seat)
         actions.append(QStringLiteral("jam"));
     } else if (seat.kind == QLatin1String("groundscout")) {
         actions.append(QStringLiteral("guard"));
+    } else if (seat.kind == QLatin1String("commandpost")) {
+        actions.append(QStringLiteral("relocate"));
     }
     return sortedUnique(actions);
 }

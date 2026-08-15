@@ -11,7 +11,7 @@ COPY server/account /app
 RUN mkdir -p /data && useradd --system --uid 10001 --home /app wargame && chown -R wargame:wargame /app /data
 USER wargame
 
-ARG WARGAME_VERSION=1.0.0
+ARG WARGAME_VERSION=2.0.0
 ARG WARGAME_SOURCE_DIGEST=dev
 ENV WARGAME_VERSION=${WARGAME_VERSION} \
     WARGAME_SOURCE_DIGEST=${WARGAME_SOURCE_DIGEST}

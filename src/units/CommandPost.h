@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-#include "../core/UnitBase.h"
+#include "MobileUnitBase.h"
 #include <QObject>
 #include <QString>
 #include <QJsonObject>
@@ -8,7 +8,7 @@
 
 namespace gbr {
 
-class CommandPost : public UnitBase {
+class CommandPost : public MobileUnitBase {
     Q_OBJECT
 public:
     explicit CommandPost(const QString& id, Side side, MessageBus* bus, QObject* parent = nullptr);

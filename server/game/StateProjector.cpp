@@ -136,7 +136,12 @@ bool directedReachable(const SimulationEngine& engine, const QString& senderId,
     if (!sender || !recipient || sender->side() != recipient->side()) return false;
     const quint64 fingerprint = topologyFingerprint(engine);
     const quintptr engineKey = reinterpret_cast<quintptr>(&engine);
-    const QString cacheKey = sender->sideStr() + QLatin1Char('\x1f') + projectionKey;
+    // Each graph stores reachability for every source on this side. A role or
+    // owned-unit-specific cache key would rebuild the same graph once per
+    // seat during every broadcast. Keep the parameter for call-site clarity;
+    // it is not part of the graph's identity.
+    Q_UNUSED(projectionKey);
+    const QString cacheKey = sender->sideStr();
     QMutexLocker locker(&reachabilityCacheMutex);
     reachabilityEngineOrder.removeAll(engineKey);
     reachabilityEngineOrder.append(engineKey);
@@ -566,7 +571,8 @@ QSet<QString> scanVisibleTargetIds(const SimulationEngine& engine, const QString
 }
 
 QSet<QString> visibleUnitIdsImpl(const SimulationEngine& engine, const QString& role,
-                                 const QString& ownedUnitId, quint64 stateRevision) {
+                                 const QString& ownedUnitId, quint64 stateRevision,
+                                 bool includeActiveScan) {
     QSet<QString> ids = friendlyVisibleUnitIdsImpl(engine, role, ownedUnitId, stateRevision);
     if (hasFullVisibility(role)) return ids;
     const QString side = StateProjector::sideForRole(role);
@@ -586,7 +592,9 @@ QSet<QString> visibleUnitIdsImpl(const SimulationEngine& engine, const QString& 
             if (!targetId.isEmpty() && engine.unit(targetId)) ids.insert(targetId);
         }
     }
-    ids.unite(scanVisibleTargetIds(engine, role, ownedUnitId, stateRevision));
+    if (includeActiveScan) {
+        ids.unite(scanVisibleTargetIds(engine, role, ownedUnitId, stateRevision));
+    }
     return ids;
 }
 
@@ -660,7 +668,7 @@ QSet<QString> StateProjector::visibleUnitIds(const SimulationEngine& engine,
 QSet<QString> StateProjector::visibleUnitIds(const SimulationEngine& engine,
                                              const QString& role,
                                              const QString& ownedUnitId) {
-    return visibleUnitIdsImpl(engine, role, ownedUnitId, 0);
+    return visibleUnitIdsImpl(engine, role, ownedUnitId, 0, true);
 }
 
 QSet<QString> StateProjector::visibleUnitIds(const SimulationEngine& engine,
@@ -672,6 +680,12 @@ QSet<QString> StateProjector::visibleUnitIds(const SimulationEngine& engine,
         if (engine.unit(id)) ids.insert(id);
     }
     return ids;
+}
+
+QSet<QString> StateProjector::sensorVisibleUnitIds(const SimulationEngine& engine,
+                                                   const QString& role,
+                                                   const QString& ownedUnitId) {
+    return visibleUnitIdsImpl(engine, role, ownedUnitId, 0, false);
 }
 
 namespace {
@@ -803,7 +817,7 @@ QJsonObject StateProjector::snapshotFor(const SimulationEngine& engine, const QS
         }
         return snapshot;
     }
-    QSet<QString> visibleIds = visibleUnitIdsImpl(engine, role, ownedUnitId, stateRevision);
+    QSet<QString> visibleIds = visibleUnitIdsImpl(engine, role, ownedUnitId, stateRevision, true);
     for (const QString& id : explicitlyShared) {
         if (engine.unit(id)) visibleIds.insert(id);
     }

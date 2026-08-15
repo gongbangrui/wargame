@@ -19,6 +19,8 @@ constexpr double kSpeedSettlingSeconds = 8.0;
 constexpr double kImmediateThreatSeconds = 8.0;
 constexpr double kFuelReturnSafetyFactor = 1.25;
 constexpr double kFuelServiceRatio = 0.40;
+constexpr double kCommandPostRelocationDistance = 1200.0;
+constexpr double kCollisionClearance = 40.0;
 
 double clampCoordinate(double value, double extent) {
     if (!std::isfinite(value)) return 0.0;
@@ -63,6 +65,76 @@ double distance(double ax, double ay, double bx, double by) {
     return std::sqrt(distance2(ax, ay, bx, by));
 }
 
+double collisionRadiusFor(const gbr::AiSeatState& seat) {
+    if (std::isfinite(seat.collisionRadius) && seat.collisionRadius > 0.0) {
+        return seat.collisionRadius;
+    }
+    return gbr::UnitBase::defaultCollisionRadiusM(gbr::kindFromName(seat.kind));
+}
+
+QPair<double, double> collisionSafeDestination(const gbr::AiSeatState& seat,
+                                               double x, double y,
+                                               const QList<gbr::AiSeatState>& seats,
+                                               const QList<QPair<double, double>>& reserved,
+                                               double mapWidth, double mapHeight) {
+    const double radius = collisionRadiusFor(seat) + kCollisionClearance;
+    x = std::clamp(x, radius, std::max(radius, mapWidth - radius));
+    y = std::clamp(y, radius, std::max(radius, mapHeight - radius));
+    auto separateFrom = [&](double otherX, double otherY, double otherRadius) {
+        double dx = x - otherX;
+        double dy = y - otherY;
+        double length = std::hypot(dx, dy);
+        const double minimum = radius + otherRadius;
+        if (length >= minimum || minimum <= 0.0) return;
+        if (length <= 1e-9) {
+            const quint64 hash = stableHash(seat.seatId);
+            const double angle = static_cast<double>(hash % 6283ULL) / 1000.0;
+            dx = std::cos(angle);
+            dy = std::sin(angle);
+            length = 1.0;
+        }
+        x += dx / length * (minimum - length);
+        y += dy / length * (minimum - length);
+    };
+    for (const gbr::AiSeatState& other : seats) {
+        if (!other.alive || other.seatId == seat.seatId) continue;
+        separateFrom(other.x, other.y, collisionRadiusFor(other));
+    }
+    for (const auto& point : reserved) separateFrom(point.first, point.second, radius);
+    x = std::clamp(x, radius, std::max(radius, mapWidth - radius));
+    y = std::clamp(y, radius, std::max(radius, mapHeight - radius));
+    return {x, y};
+}
+
+QPair<double, double> commandPostSafePosition(const gbr::AiSeatState& seat,
+                                              const gbr::AiKnowledgeState& knowledge,
+                                              double mapWidth, double mapHeight) {
+    const gbr::AiObservedTarget* nearest = nullptr;
+    double nearestDistance = std::numeric_limits<double>::infinity();
+    for (const gbr::AiObservedTarget& contact : knowledge.contacts) {
+        if (contact.commandPost || contact.targetKind == QLatin1String("commandpost")) continue;
+        const double current = distance(seat.x, seat.y, contact.x, contact.y);
+        if (current < nearestDistance) {
+            nearestDistance = current;
+            nearest = &contact;
+        }
+    }
+    double dx = nearest ? seat.x - nearest->x : seat.x - mapWidth * 0.5;
+    double dy = nearest ? seat.y - nearest->y : seat.y - mapHeight * 0.5;
+    double length = std::hypot(dx, dy);
+    if (length <= 1e-9) {
+        const quint64 hash = stableHash(seat.seatId);
+        const double angle = static_cast<double>(hash % 6283ULL) / 1000.0;
+        dx = std::cos(angle);
+        dy = std::sin(angle);
+        length = 1.0;
+    }
+    const double displacement = std::max(kCommandPostRelocationDistance,
+                                         std::min(mapWidth, mapHeight) * 0.04);
+    return {clampCoordinate(seat.x + dx / length * displacement, mapWidth),
+            clampCoordinate(seat.y + dy / length * displacement, mapHeight)};
+}
+
 bool hasVisibleTarget(const gbr::AiSeatState& seat) {
     return seat.targetVisible && !seat.targetId.isEmpty();
 }
@@ -82,8 +154,7 @@ const gbr::AiObservedTarget* visibleTarget(const gbr::AiSeatState& seat,
 
 bool targetsRedCommandPost(const gbr::AiSeatState& seat) {
     return hasVisibleTarget(seat)
-        && (seat.targetId == QLatin1String("red_cp")
-            || seat.targetKind == QLatin1String("commandpost"));
+        && seat.targetKind == QLatin1String("commandpost");
 }
 
 int planningTargetRank(const gbr::AiSeatState& seat) {
@@ -877,6 +948,19 @@ AiPlanV1 RulesAi::makeStrategicPlan(const AiKnowledgeState& knowledge,
             objective.region = QJsonObject{{QStringLiteral("x"), point.first},
                                            {QStringLiteral("y"), point.second}};
             if (memoryIndex >= 0) ++allocations[contacts.at(memoryIndex).targetId];
+        } else if (seat.kind == QLatin1String("commandpost")) {
+            // A command post is deliberately stationary during routine
+            // operations. Relocate it only while the knowledge model reports
+            // an immediate threat, and move away from the nearest contact.
+            if (normalizedKnowledge.commandPostThreat) {
+                const auto point = commandPostSafePosition(
+                    seat, normalizedKnowledge, width, height);
+                objective.action = QStringLiteral("relocate");
+                objective.region = QJsonObject{{QStringLiteral("x"), point.first},
+                                               {QStringLiteral("y"), point.second}};
+            } else {
+                objective.action = QStringLiteral("defend");
+            }
         } else {
             objective.action = QStringLiteral("patrol");
             const auto point = deterministicRegion(seat, nullptr, normalizedKnowledge, parameters,
@@ -932,13 +1016,16 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
                                      [&objective](const AiSeatState& seat) {
                                          return seat.seatId == objective.seatId;
                                      });
-        if (it == seats.cend() || it->unitId.isEmpty() || !it->alive || !it->movable
-            || it->kind == QLatin1String("commandpost")) {
+        if (it == seats.cend() || it->unitId.isEmpty() || !it->alive || !it->movable) {
             continue;
         }
         AiCommand command;
         command.seatId = it->seatId;
         command.priority = objective.priority;
+        if (it->kind == QLatin1String("commandpost")
+            && objective.action != QLatin1String("relocate")) {
+            continue;
+        }
         if (needsWithdrawal(*it) && objective.action != QLatin1String("withdraw")) {
             command.action = QStringLiteral("withdraw");
             command.args = {{QStringLiteral("unitId"), it->unitId}};
@@ -1009,7 +1096,8 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
         } else if (objective.action == QLatin1String("search")
                    || objective.action == QLatin1String("patrol")
                    || objective.action == QLatin1String("guard")
-                   || objective.action == QLatin1String("jam")) {
+                   || objective.action == QLatin1String("jam")
+                   || objective.action == QLatin1String("relocate")) {
             QJsonObject region = objective.region;
             const AiObservedTarget* liveTarget = objective.targetId.isEmpty()
                 ? nullptr : visibleTarget(*it, objective.targetId);
@@ -1032,11 +1120,28 @@ QList<AiCommand> RulesAi::commandsForPlan(const AiPlanV1& plan,
                 || !region.value(QStringLiteral("y")).isDouble()) {
                 continue;
             }
-            const double x = region.value(QStringLiteral("x")).toDouble(
+            double x = region.value(QStringLiteral("x")).toDouble(
                 std::numeric_limits<double>::quiet_NaN());
-            const double y = region.value(QStringLiteral("y")).toDouble(
+            double y = region.value(QStringLiteral("y")).toDouble(
                 std::numeric_limits<double>::quiet_NaN());
             if (!std::isfinite(x) || !std::isfinite(y)) continue;
+            const QList<QPair<double, double>> reserved = [&commands]() {
+                QList<QPair<double, double>> points;
+                for (const AiCommand& existing : commands) {
+                    if (existing.action != QLatin1String("moveTo")) continue;
+                    const QVariantMap position = existing.args.value(QStringLiteral("pos")).toMap();
+                    if (position.contains(QStringLiteral("x"))
+                        && position.contains(QStringLiteral("y"))) {
+                        points.append({position.value(QStringLiteral("x")).toDouble(),
+                                       position.value(QStringLiteral("y")).toDouble()});
+                    }
+                }
+                return points;
+            }();
+            const auto safe = collisionSafeDestination(*it, x, y, seats, reserved,
+                                                        mapWidth, mapHeight);
+            x = safe.first;
+            y = safe.second;
             if (distance2(x, y, it->x, it->y)
                 < kMinimumCommandDisplacement * kMinimumCommandDisplacement) {
                 continue;

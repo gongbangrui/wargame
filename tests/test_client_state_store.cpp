@@ -351,6 +351,48 @@ TEST(ClientStateStoreTest, ProjectileRemovalInDeltaClearsRenderedState) {
     EXPECT_EQ(store.snapshot(), current);
 }
 
+TEST(ClientStateStoreTest, AppliesShareTargetOnlyIntelDeltaWithoutLedgerRevisionAdvance) {
+    ClientStateStore store;
+    store.beginConnection();
+    ASSERT_EQ(store.applyEnvelope(welcome(1)).disposition,
+              ClientStateStore::Disposition::Accepted);
+
+    QJsonObject base = snapshot(10);
+    base[QStringLiteral("intelState")] =
+        QJsonObject{{QStringLiteral("revision"), 0},
+                    {QStringLiteral("records"), QJsonArray{}},
+                    {QStringLiteral("shareTargets"), QJsonArray{}}};
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("snapshot"), 2, base)).disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+
+    QJsonObject current = base;
+    current[QStringLiteral("stateRevision")] = 11;
+    current[QStringLiteral("intelState")] =
+        QJsonObject{{QStringLiteral("revision"), 0},
+                    {QStringLiteral("records"), QJsonArray{}},
+                    {QStringLiteral("shareTargets"),
+                     QJsonArray{QStringLiteral("red_attack_1")}}};
+    current[QStringLiteral("roomState")] =
+        QJsonObject{{QStringLiteral("scenarioRevision"), 1},
+                    {QStringLiteral("simTime"), 0.1}};
+
+    const QJsonObject delta = StateDelta::create(base, current);
+    ASSERT_FALSE(delta.isEmpty());
+    ASSERT_TRUE(delta.contains(QStringLiteral("intelDelta")));
+    const QJsonObject intelDelta = delta.value(QStringLiteral("intelDelta")).toObject();
+    EXPECT_EQ(intelDelta.value(QStringLiteral("baseRevision")).toInteger(), 0);
+    EXPECT_EQ(intelDelta.value(QStringLiteral("revision")).toInteger(), 0);
+    EXPECT_TRUE(Protocol::validateServerEnvelope(
+                    Protocol::makeServerEnvelope(QStringLiteral("delta"), 3, delta))
+                    .valid);
+
+    const ClientStateStore::Result result = store.applyEnvelope(
+        Protocol::makeServerEnvelope(QStringLiteral("delta"), 3, delta));
+    EXPECT_EQ(result.disposition, ClientStateStore::Disposition::DeltaApplied);
+    EXPECT_EQ(store.snapshot(), current);
+}
+
 TEST(ClientStateStoreTest, GapDoesNotAdvanceCursorAndSnapshotRecovers) {
     ClientStateStore store;
     store.beginConnection();
@@ -470,6 +512,89 @@ TEST(ClientStateStoreTest, RejectedDeltaPreservesStateAndRequiresSnapshot) {
                   QStringLiteral("delta"), 6, recoveredDelta)).disposition,
               ClientStateStore::Disposition::DeltaApplied);
     EXPECT_EQ(store.snapshot(), recoveredCurrent);
+}
+
+TEST(ClientStateStoreTest, ProtocolRejectedDeltaTriggersResyncInsteadOfFatalSession) {
+    ClientStateStore store;
+    store.beginConnection();
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("welcome"), 1,
+                  QJsonObject{{QStringLiteral("username"), QStringLiteral("red-user")},
+                              {QStringLiteral("displayName"), QStringLiteral("Red")}}))
+                  .disposition,
+              ClientStateStore::Disposition::Accepted);
+
+    const QJsonObject base = snapshot(10);
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                  QStringLiteral("snapshot"), 2, base))
+                  .disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+
+    QJsonObject malformed = StateDelta::create(base, snapshot(11));
+    malformed.remove(QStringLiteral("units"));
+    const ClientStateStore::Result result = store.applyEnvelope(
+        Protocol::makeServerEnvelope(QStringLiteral("delta"), 3, malformed));
+    EXPECT_EQ(result.disposition, ClientStateStore::Disposition::ResyncRequired);
+    EXPECT_EQ(result.code, QStringLiteral("DELTA_INVALID"));
+    EXPECT_TRUE(store.waitingForResync());
+    EXPECT_EQ(store.lastSequence(), 2u);
+    EXPECT_EQ(store.snapshot(), base);
+
+    EXPECT_EQ(store.applyEnvelope(Protocol::makeServerEnvelope(
+                      QStringLiteral("snapshot"), 4, snapshot(20)))
+                  .disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+    EXPECT_FALSE(store.waitingForResync());
+}
+
+TEST(ClientStateStoreTest, AcceptsLegacySnapshotAndContiguousLegacyDelta) {
+    ClientStateStore store;
+    store.beginConnection();
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelopeForVersion(
+                  QStringLiteral("welcome"), 1,
+                  QJsonObject{{QStringLiteral("username"), QStringLiteral("red-user")},
+                              {QStringLiteral("displayName"), QStringLiteral("Red")}},
+                  Protocol::LegacyVersion, Protocol::LegacySchemaVersion))
+                  .disposition,
+              ClientStateStore::Disposition::Accepted);
+
+    QJsonObject base = snapshot(10);
+    base[QStringLiteral("schemaVersion")] = Protocol::LegacySchemaVersion;
+    ASSERT_EQ(store.applyEnvelope(Protocol::makeServerEnvelopeForVersion(
+                  QStringLiteral("snapshot"), 2, base,
+                  Protocol::LegacyVersion, Protocol::LegacySchemaVersion))
+                  .disposition,
+              ClientStateStore::Disposition::SnapshotApplied);
+
+    QJsonObject current = base;
+    current[QStringLiteral("stateRevision")] = 11;
+    QJsonObject roomState = current.value(QStringLiteral("roomState")).toObject();
+    roomState[QStringLiteral("stateRevision")] = 11;
+    roomState[QStringLiteral("simTime")] = 0.1;
+    current[QStringLiteral("roomState")] = roomState;
+    const QJsonObject delta = StateDelta::create(base, current);
+    ASSERT_FALSE(delta.isEmpty());
+    EXPECT_EQ(store.applyEnvelope(Protocol::makeServerEnvelopeForVersion(
+                  QStringLiteral("delta"), 3, delta,
+                  Protocol::LegacyVersion, Protocol::LegacySchemaVersion))
+                  .disposition,
+              ClientStateStore::Disposition::DeltaApplied);
+    EXPECT_EQ(store.snapshot(), current);
+}
+
+TEST(ClientStateStoreTest, RejectsMixedWireVersionsWithinOneConnection) {
+    ClientStateStore store;
+    store.beginConnection();
+    ASSERT_EQ(store.applyEnvelope(welcome(1)).disposition,
+              ClientStateStore::Disposition::Accepted);
+
+    const QJsonObject legacyPong = Protocol::makeServerEnvelopeForVersion(
+        QStringLiteral("pong"), 2, QJsonObject{},
+        Protocol::LegacyVersion, Protocol::LegacySchemaVersion);
+    const ClientStateStore::Result result = store.applyEnvelope(legacyPong);
+    EXPECT_EQ(result.disposition, ClientStateStore::Disposition::Fatal);
+    EXPECT_EQ(result.code, QStringLiteral("PROTOCOL_MISMATCH"));
+    EXPECT_EQ(store.lastSequence(), 1u);
 }
 
 TEST(ClientStateStoreTest, InvalidMergedStateRollsBackAndBlocksFollowingDeltas) {

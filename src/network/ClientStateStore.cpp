@@ -9,10 +9,13 @@ namespace gbr {
 
 void ClientStateStore::reset() {
     m_lastSequence = 0;
+    m_protocolVersion = 0;
+    m_schemaVersion = 0;
     m_snapshot = {};
     m_lifecycle = {};
     m_waitingForSnapshot = true;
     m_waitingForResync = false;
+    m_intelState = {};
 }
 
 void ClientStateStore::beginConnection() {
@@ -20,8 +23,11 @@ void ClientStateStore::beginConnection() {
     // the last rendered snapshot while reconnecting, but require a fresh
     // authoritative snapshot before accepting deltas on the new connection.
     m_lastSequence = 0;
+    m_protocolVersion = 0;
+    m_schemaVersion = 0;
     m_waitingForSnapshot = true;
     m_waitingForResync = false;
+    m_intelState = {};
 }
 
 qint64 ClientStateStore::stateRevision() const {
@@ -29,9 +35,31 @@ qint64 ClientStateStore::stateRevision() const {
 }
 
 ClientStateStore::Result ClientStateStore::applyEnvelope(const QJsonObject& envelope) {
-    const Protocol::ValidationResult validation = Protocol::validateServerEnvelope(envelope);
+    const QString envelopeType = envelope.value(QStringLiteral("type")).toString();
+    const int incomingProtocol = envelope.value(QStringLiteral("protocolVersion")).toInt();
+    const int incomingSchema = envelope.value(QStringLiteral("schemaVersion")).toInt();
+    if (m_protocolVersion != 0
+        && (incomingProtocol != m_protocolVersion || incomingSchema != m_schemaVersion)) {
+        return {Disposition::Fatal, {}, {}, QStringLiteral("PROTOCOL_MISMATCH"),
+                QStringLiteral("同一连接内不能混用不同协议版本")};
+    }
+    const Protocol::ValidationResult validation = Protocol::validateServerEnvelopeForVersion(
+        envelope);
     if (!validation.valid) {
+        // A delta is recoverable even when its payload is rejected at the
+        // protocol boundary. Keep the last valid baseline and let the caller
+        // request a complete snapshot instead of terminating the session.
+        if (envelopeType == QLatin1String("delta")) {
+            m_waitingForResync = true;
+            return {Disposition::ResyncRequired, envelopeType,
+                    envelope.value(QStringLiteral("payload")).toObject(),
+                    QStringLiteral("DELTA_INVALID"), validation.message};
+        }
         return {Disposition::Fatal, {}, {}, validation.code, validation.message};
+    }
+    if (m_protocolVersion == 0) {
+        m_protocolVersion = incomingProtocol;
+        m_schemaVersion = incomingSchema;
     }
 
     const quint64 sequence = static_cast<quint64>(
@@ -57,6 +85,12 @@ ClientStateStore::Result ClientStateStore::applyEnvelope(const QJsonObject& enve
             return {Disposition::Fatal, {}, {}, projectionResult.code, projectionResult.message};
         }
         m_snapshot = payload;
+        m_intelState = {};
+        if (payload.contains(QStringLiteral("intelState"))) {
+            const Protocol::ValidationResult intel = Protocol::fromJson(
+                payload.value(QStringLiteral("intelState")).toObject(), &m_intelState);
+            if (!intel.valid) return {Disposition::Fatal, {}, {}, intel.code, intel.message};
+        }
         m_lifecycle = projection.lifecycle;
         m_lastSequence = sequence;
         m_waitingForSnapshot = false;
@@ -86,11 +120,13 @@ ClientStateStore::Result ClientStateStore::applyEnvelope(const QJsonObject& enve
 
         const QJsonObject previousSnapshot = m_snapshot;
         const Protocol::RoomLifecycleProjection previousLifecycle = m_lifecycle;
+        const Protocol::IntelState previousIntel = m_intelState;
         QJsonObject candidateSnapshot = m_snapshot;
         QString error;
         if (!StateDelta::apply(candidateSnapshot, payload, &error)) {
             m_snapshot = previousSnapshot;
             m_lifecycle = previousLifecycle;
+            m_intelState = previousIntel;
             m_waitingForResync = true;
             return {Disposition::ResyncRequired, type, payload,
                     QStringLiteral("DELTA_REJECTED"), error};
@@ -101,12 +137,26 @@ ClientStateStore::Result ClientStateStore::applyEnvelope(const QJsonObject& enve
         if (!projectionResult.valid) {
             m_snapshot = previousSnapshot;
             m_lifecycle = previousLifecycle;
+            m_intelState = previousIntel;
             m_waitingForResync = true;
             return {Disposition::ResyncRequired, type, payload,
                     QStringLiteral("STATE_PROJECTION_REJECTED"), projectionResult.message};
         }
         m_snapshot = candidateSnapshot;
         m_lifecycle = projection.lifecycle;
+        m_intelState = {};
+        if (candidateSnapshot.contains(QStringLiteral("intelState"))) {
+            const Protocol::ValidationResult intel = Protocol::fromJson(
+                candidateSnapshot.value(QStringLiteral("intelState")).toObject(), &m_intelState);
+            if (!intel.valid) {
+                m_snapshot = previousSnapshot;
+                m_lifecycle = previousLifecycle;
+                m_intelState = previousIntel;
+                m_waitingForResync = true;
+                return {Disposition::ResyncRequired, type, payload,
+                        QStringLiteral("INTEL_STATE_REJECTED"), intel.message};
+            }
+        }
         m_lastSequence = sequence;
         return {Disposition::DeltaApplied, type, payload, {}, {}};
     }

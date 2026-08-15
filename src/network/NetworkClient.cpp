@@ -43,6 +43,7 @@ NetworkClient::NetworkClient(QObject* parent) : QObject(parent) {
     connect(&m_latencyTimer, &QTimer::timeout, this, &NetworkClient::sendLatencyProbe);
     m_commandTimer.setInterval(1000);
     connect(&m_commandTimer, &QTimer::timeout, this, &NetworkClient::processPendingCommands);
+    connect(&m_commandTimer, &QTimer::timeout, this, &NetworkClient::processPendingIntelRequests);
     m_commandTimer.start();
     connect(&m_socket, &QWebSocket::errorOccurred, this,
             [this](QAbstractSocket::SocketError) {
@@ -121,6 +122,9 @@ void NetworkClient::login(const QString& accountServer, const QString& username,
                           const QString& password) {
     close();
     m_manualClose = false;
+    m_protocolVersion = Protocol::Version;
+    m_schemaVersion = Protocol::SchemaVersion;
+    m_legacyFallbackAttempted = false;
     const quint64 generation = ++m_loginGeneration;
     const QUrl base = normalizeAccountServer(accountServer);
     if (!base.isValid() || base.host().isEmpty()
@@ -276,11 +280,14 @@ void NetworkClient::onWebSocketConnected() {
     m_identityPublished = false;
     m_welcomePayload = {};
     setState(QStringLiteral("authenticating"), QStringLiteral("正在进入推演室"));
-    sendEnvelope(QStringLiteral("auth"),
-                 QJsonObject{{QStringLiteral("token"), m_token},
-                             {QStringLiteral("resumeSequence"),
-                              static_cast<qint64>(resumeSequence)},
-                             {QStringLiteral("resumeStateRevision"), resumeStateRevision}});
+    QJsonObject auth{{QStringLiteral("token"), m_token}};
+    // The v4 server contract did not require reconnect cursors. Omitting the
+    // optional fields keeps auth compatible with strict older validators.
+    if (m_schemaVersion != Protocol::LegacySchemaVersion) {
+        auth.insert(QStringLiteral("resumeSequence"), static_cast<qint64>(resumeSequence));
+        auth.insert(QStringLiteral("resumeStateRevision"), resumeStateRevision);
+    }
+    sendEnvelope(QStringLiteral("auth"), auth);
     m_authTimer.start(8000);
 }
 
@@ -297,6 +304,10 @@ void NetworkClient::onWebSocketDisconnected() {
         publishDiagnostics();
     }
     if (m_manualClose || m_token.isEmpty()) return;
+    if (!wasAuthenticated && m_protocolVersion != Protocol::LegacyVersion
+        && !m_legacyFallbackAttempted) {
+        fallbackToLegacyProtocol();
+    }
     scheduleReconnect();
 }
 
@@ -361,7 +372,22 @@ void NetworkClient::onTextMessage(const QString& text) {
         emit fatalError(message);
         return;
     }
-    const ClientStateStore::Result result = m_stateStore.applyEnvelope(document.object());
+    const QJsonObject envelope = document.object();
+    const int incomingProtocol = envelope.value(QStringLiteral("protocolVersion")).toInt();
+    const int incomingSchema = envelope.value(QStringLiteral("schemaVersion")).toInt();
+    if (Protocol::isSupportedWireVersion(incomingProtocol, incomingSchema)) {
+        if (m_authenticated
+            && (incomingProtocol != m_protocolVersion || incomingSchema != m_schemaVersion)) {
+            reconnectWithWireVersion(
+                incomingProtocol, incomingSchema,
+                QStringLiteral("服务器在同一连接内切换了协议版本，正在重新协商"));
+            return;
+        }
+        m_protocolVersion = incomingProtocol;
+        m_schemaVersion = incomingSchema;
+        m_legacyFallbackAttempted = incomingProtocol == Protocol::LegacyVersion;
+    }
+    const ClientStateStore::Result result = m_stateStore.applyEnvelope(envelope);
     if (result.disposition == ClientStateStore::Disposition::Fatal) {
         const QString message = result.message.isEmpty()
             ? QStringLiteral("服务器返回了无效协议消息") : result.message;
@@ -416,6 +442,7 @@ void NetworkClient::onTextMessage(const QString& text) {
         publishDiagnostics();
         emit snapshotReceived(m_stateStore.snapshot());
         retransmitPendingCommands();
+        retransmitPendingIntelRequests();
     } else if (type == QLatin1String("delta")) {
         QStringList changedUnitIds;
         for (const QJsonValue& value
@@ -435,6 +462,8 @@ void NetworkClient::onTextMessage(const QString& text) {
         emit deploymentPromptReceived(payload);
     } else if (type == QLatin1String("intelShare")) {
         emit intelShareReceived(payload);
+    } else if (type == QLatin1String("intelHistoryPage")) {
+        emit intelHistoryPageReceived(payload);
     } else if (type == QLatin1String("event")) {
         Protocol::TransferEventProjection transfer;
         if (Protocol::projectTransferEvent(payload, &transfer).valid) {
@@ -452,6 +481,19 @@ void NetworkClient::onTextMessage(const QString& text) {
     } else if (type == QLatin1String("error")) {
         const QString message = payload.value(QStringLiteral("message")).toString(QStringLiteral("服务器拒绝了请求"));
         const QString code = payload.value(QStringLiteral("code")).toString();
+        const QString requestId = payload.value(QStringLiteral("requestId")).toString();
+        if (!m_authenticated && (code == QLatin1String("PROTOCOL_MISMATCH")
+                                 || code == QLatin1String("SCHEMA_MISMATCH"))) {
+            fallbackToLegacyProtocol();
+            return;
+        }
+        if (!requestId.isEmpty() && m_pendingIntelRequests.contains(requestId)) {
+            const PendingIntelRequest pending = m_pendingIntelRequests.take(requestId);
+            emit commandStatusChanged(requestId, pending.action, QStringLiteral("rejected"),
+                                      code, message);
+            emit commandRejected(message);
+            return;
+        }
         if (code == QLatin1String("KICKED_BY_ADMIN")
             || code == QLatin1String("USER_KICKED_OFFLINE")) {
             const QString token = m_token;
@@ -486,7 +528,17 @@ void NetworkClient::onTextMessage(const QString& text) {
         Protocol::CommandResultProjection commandResult;
         const Protocol::ValidationResult validation =
             Protocol::projectCommandResult(payload, &commandResult);
-        if (!validation.valid || !m_pendingCommands.contains(commandResult.commandId)) return;
+        if (!validation.valid) return;
+        if (!m_pendingCommands.contains(commandResult.commandId)) {
+            if (!m_pendingIntelRequests.contains(commandResult.commandId)) return;
+            const PendingIntelRequest pending = m_pendingIntelRequests.take(commandResult.commandId);
+            emit commandStatusChanged(commandResult.commandId, pending.action,
+                                      commandResult.accepted ? QStringLiteral("accepted")
+                                                             : QStringLiteral("rejected"),
+                                      commandResult.code, commandResult.message);
+            if (!commandResult.accepted) emit commandRejected(commandResult.message);
+            return;
+        }
         const PendingCommand pending = m_pendingCommands.take(commandResult.commandId);
         emit commandStatusChanged(commandResult.commandId, pending.action,
                                   commandResult.accepted ? QStringLiteral("accepted")
@@ -505,17 +557,50 @@ void NetworkClient::requestResync() {
                               m_stateStore.stateRevision()}});
 }
 
+void NetworkClient::fallbackToLegacyProtocol() {
+    if (m_protocolVersion == Protocol::Version) {
+        reconnectWithWireVersion(Protocol::PreviousVersion, Protocol::PreviousSchemaVersion,
+                                 QStringLiteral("服务器不支持当前协议，正在切换 v5 兼容模式"));
+    } else if (m_protocolVersion == Protocol::PreviousVersion) {
+        reconnectWithWireVersion(Protocol::LegacyVersion, Protocol::LegacySchemaVersion,
+                                 QStringLiteral("服务器版本较旧，正在切换 v4 兼容模式"));
+    }
+}
+
+void NetworkClient::reconnectWithWireVersion(int protocolVersion, int schemaVersion,
+                                             const QString& message) {
+    if (!Protocol::isSupportedWireVersion(protocolVersion, schemaVersion)) return;
+    m_protocolVersion = protocolVersion;
+    m_schemaVersion = schemaVersion;
+    m_legacyFallbackAttempted = protocolVersion == Protocol::LegacyVersion;
+    m_stateStore.reset();
+    m_authTimer.stop();
+    m_identityPublished = false;
+    m_welcomePayload = {};
+    m_diagnosticState = QStringLiteral("checking");
+    m_diagnosticMessage = message;
+    publishDiagnostics();
+    if (m_socket.state() != QAbstractSocket::UnconnectedState) m_socket.abort();
+}
+
 void NetworkClient::setState(const QString& state, const QString& message) {
     m_state = state;
     emit stateChanged(state, message);
 }
 
 bool NetworkClient::sendEnvelope(const QString& type, const QJsonObject& payload) {
+    return sendEnvelope(type, payload, QString());
+}
+
+bool NetworkClient::sendEnvelope(const QString& type, const QJsonObject& payload,
+                                 const QString& messageId) {
     if (m_socket.state() != QAbstractSocket::ConnectedState) return false;
-    const QJsonObject envelope = Protocol::makeClientEnvelope(
-        type, QUuid::createUuid().toString(QUuid::WithoutBraces), payload);
+    const QJsonObject envelope = Protocol::makeClientEnvelopeForVersion(
+        type, messageId.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : messageId,
+        payload, m_protocolVersion, m_schemaVersion);
     const QByteArray encoded = QJsonDocument(envelope).toJson(QJsonDocument::Compact);
-    const Protocol::ValidationResult validation = Protocol::validateClientEnvelope(envelope);
+    const Protocol::ValidationResult validation = Protocol::validateClientEnvelopeForVersion(
+        envelope);
     if (!validation.valid || encoded.size() > Protocol::MaxMessageBytes) {
         const QString message = validation.valid
             ? QStringLiteral("待发送消息超过 256 KiB") : validation.message;
@@ -527,9 +612,8 @@ bool NetworkClient::sendEnvelope(const QString& type, const QJsonObject& payload
 }
 
 void NetworkClient::sendCommand(const QString& action, const QVariantMap& args) {
-    if (!m_authenticated || state() != QLatin1String("connected")
-        || m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()) {
-        emit commandRejected(QStringLiteral("推演状态尚未同步，暂时不能下达命令"));
+    if (!m_authenticated || m_socket.state() != QAbstractSocket::ConnectedState) {
+        emit commandRejected(QStringLiteral("联网会话尚未建立"));
         return;
     }
     if (m_pendingCommands.size() >= 128) {
@@ -538,9 +622,13 @@ void NetworkClient::sendCommand(const QString& action, const QVariantMap& args) 
     }
     const QString commandId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     const QJsonObject jsonArgs = QJsonObject::fromVariantMap(args);
+    // During the initial sync the authoritative revision is not available
+    // yet. Validate the command shape with a temporary positive revision; the
+    // actual payload is built from the current snapshot when it is sent.
+    const qint64 validationRevision = std::max<qint64>(1, m_stateStore.stateRevision());
     const QJsonObject payload{{QStringLiteral("commandId"), commandId},
                               {QStringLiteral("action"), action},
-                              {QStringLiteral("stateRevision"), m_stateStore.stateRevision()},
+                              {QStringLiteral("stateRevision"), validationRevision},
                               {QStringLiteral("args"), jsonArgs}};
     const Protocol::ValidationResult validation =
         Protocol::validateClientPayload(QStringLiteral("command"), payload);
@@ -552,7 +640,9 @@ void NetworkClient::sendCommand(const QString& action, const QVariantMap& args) 
     }
     m_pendingCommands.insert(commandId, PendingCommand{action, jsonArgs});
     emit commandStatusChanged(commandId, action, QStringLiteral("queued"), {},
-                              QStringLiteral("命令已进入发送队列"));
+                              m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()
+                                  ? QStringLiteral("状态同步完成后发送命令")
+                                  : QStringLiteral("命令已进入发送队列"));
     sendPendingCommand(commandId, false);
 }
 
@@ -565,7 +655,7 @@ void NetworkClient::sendUnitOrder(const QString& unitId, const QString& text) {
 void NetworkClient::sendPendingCommand(const QString& commandId, bool retry) {
     if (!m_pendingCommands.contains(commandId) || !m_authenticated
         || state() != QLatin1String("connected") || m_stateStore.waitingForSnapshot()
-        || m_stateStore.waitingForResync()) {
+        || m_stateStore.waitingForResync() || m_stateStore.stateRevision() <= 0) {
         return;
     }
     PendingCommand& pending = m_pendingCommands[commandId];
@@ -590,9 +680,34 @@ void NetworkClient::retransmitPendingCommands() {
     }
 }
 
+void NetworkClient::sendPendingIntelRequest(const QString& requestId, bool retry) {
+    if (!m_pendingIntelRequests.contains(requestId) || !m_authenticated
+        || state() != QLatin1String("connected") || m_stateStore.waitingForSnapshot()
+        || m_stateStore.waitingForResync()) {
+        return;
+    }
+    PendingIntelRequest& pending = m_pendingIntelRequests[requestId];
+    if (!sendEnvelope(pending.type, pending.payload, requestId)) return;
+    pending.lastSentAtMs = m_monotonic.elapsed();
+    ++pending.attempts;
+    emit commandStatusChanged(requestId, pending.action,
+                              retry ? QStringLiteral("retrying") : QStringLiteral("pending"),
+                              {}, retry ? QStringLiteral("正在重新确认情报请求")
+                                        : QStringLiteral("情报请求已提交，等待服务器确认"));
+}
+
+void NetworkClient::retransmitPendingIntelRequests() {
+    const QStringList requestIds = m_pendingIntelRequests.keys();
+    for (const QString& requestId : requestIds) {
+        sendPendingIntelRequest(requestId,
+                                m_pendingIntelRequests.value(requestId).attempts > 0);
+    }
+}
+
 void NetworkClient::processPendingCommands() {
     if (m_pendingCommands.isEmpty() || !m_authenticated
-        || state() != QLatin1String("connected") || m_stateStore.waitingForResync()) {
+        || state() != QLatin1String("connected") || m_stateStore.waitingForSnapshot()
+        || m_stateStore.waitingForResync()) {
         return;
     }
     const qint64 now = m_monotonic.elapsed();
@@ -615,10 +730,42 @@ void NetworkClient::processPendingCommands() {
     }
 }
 
+void NetworkClient::processPendingIntelRequests() {
+    if (m_pendingIntelRequests.isEmpty() || !m_authenticated
+        || state() != QLatin1String("connected") || m_stateStore.waitingForSnapshot()
+        || m_stateStore.waitingForResync()) {
+        return;
+    }
+    const qint64 now = m_monotonic.elapsed();
+    const QStringList requestIds = m_pendingIntelRequests.keys();
+    for (const QString& requestId : requestIds) {
+        if (!m_pendingIntelRequests.contains(requestId)) continue;
+        PendingIntelRequest& pending = m_pendingIntelRequests[requestId];
+        pending.onlineWaitMs += m_commandTimer.interval();
+        if (pending.onlineWaitMs >= 30000) {
+            const PendingIntelRequest timedOut = m_pendingIntelRequests.take(requestId);
+            const QString message = QStringLiteral("情报请求结果暂时未知，请以同步后的台账为准");
+            emit commandStatusChanged(requestId, timedOut.action, QStringLiteral("unknown"),
+                                      QStringLiteral("CLIENT_TIMEOUT"), message);
+            emit commandRejected(message);
+            continue;
+        }
+        if (pending.lastSentAtMs < 0 || now - pending.lastSentAtMs >= 5000) {
+            sendPendingIntelRequest(requestId, pending.attempts > 0);
+        }
+    }
+}
+
 void NetworkClient::clearPendingCommands(const QString& status, const QString& message) {
     const auto pending = m_pendingCommands;
     m_pendingCommands.clear();
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+        emit commandStatusChanged(it.key(), it.value().action, status,
+                                  QStringLiteral("CLIENT_CANCELED"), message);
+    }
+    const auto pendingIntel = m_pendingIntelRequests;
+    m_pendingIntelRequests.clear();
+    for (auto it = pendingIntel.cbegin(); it != pendingIntel.cend(); ++it) {
         emit commandStatusChanged(it.key(), it.value().action, status,
                                   QStringLiteral("CLIENT_CANCELED"), message);
     }
@@ -706,13 +853,51 @@ void NetworkClient::sendUnitName(const QString& unitName) {
     sendSimple(QStringLiteral("setUnitName"), QJsonObject{{QStringLiteral("unitName"), unitName}});
 }
 
-void NetworkClient::shareIntel(const QString& targetId, const QStringList& recipientSeatIds,
-                               const QString& note) {
+QString NetworkClient::sendIntelRequest(const QString& type, const QString& action,
+                                        const QJsonObject& payload) {
+    if (!m_authenticated || m_socket.state() != QAbstractSocket::ConnectedState) {
+        emit commandRejected(QStringLiteral("联网会话尚未建立"));
+        return {};
+    }
+    if (m_schemaVersion == Protocol::LegacySchemaVersion) {
+        emit commandRejected(QStringLiteral("当前推演服务器版本不支持新版情报台账"));
+        return {};
+    }
+    if (m_pendingIntelRequests.size() >= 128) {
+        emit commandRejected(QStringLiteral("待确认情报请求过多，请等待服务器响应"));
+        return {};
+    }
+    const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_pendingIntelRequests.insert(requestId,
+                                  PendingIntelRequest{type, action, payload});
+    sendPendingIntelRequest(requestId, false);
+    return requestId;
+}
+
+QString NetworkClient::shareIntel(const QString& intelId, const QStringList& recipientSeatIds,
+                                  const QString& note) {
     QJsonArray recipients;
     for (const QString& seatId : recipientSeatIds) recipients.append(seatId);
-    sendSimple(QStringLiteral("shareIntel"), QJsonObject{{QStringLiteral("targetId"), targetId},
-                                                          {QStringLiteral("recipientSeatIds"), recipients},
-                                                          {QStringLiteral("note"), note}});
+    return sendIntelRequest(QStringLiteral("shareIntel"), QStringLiteral("shareIntel"),
+                            QJsonObject{{QStringLiteral("intelId"), intelId},
+                                        {QStringLiteral("recipientSeatIds"), recipients},
+                                        {QStringLiteral("note"), note}});
+}
+
+QString NetworkClient::createIntelReport(const QVariantMap& position, const QString& type,
+                                         const QString& title, const QString& note) {
+    return sendIntelRequest(QStringLiteral("createIntelReport"),
+                            QStringLiteral("createIntelReport"),
+                            QJsonObject{{QStringLiteral("position"), QJsonObject::fromVariantMap(position)},
+                                        {QStringLiteral("type"), type},
+                                        {QStringLiteral("title"), title},
+                                        {QStringLiteral("note"), note}});
+}
+
+QString NetworkClient::requestIntelHistory(const QVariantMap& query) {
+    return sendIntelRequest(QStringLiteral("requestIntelHistory"),
+                            QStringLiteral("requestIntelHistory"),
+                            QJsonObject::fromVariantMap(query));
 }
 
 void NetworkClient::sendMapMark(const QVariantMap& position, const QString& label,

@@ -45,13 +45,14 @@ struct AiCheckpointState {
 };
 
 struct RoomCheckpoint {
-    int sourceSchemaVersion = 4;
+    int sourceSchemaVersion = 6;
     Scenario scenario;
     Scenario runInitialScenario;
     QJsonArray runtimeUnits;
     QJsonObject engineState;
     QJsonArray commandHistory;
     QJsonArray mapMarks;
+    QJsonObject intelLedger;
     QJsonObject authoritativeRoom;
     QString phase = QStringLiteral("preparing");
     bool redReady = false;

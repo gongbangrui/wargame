@@ -212,6 +212,7 @@ private:
     void updateMessageCache(const QJsonObject& msg);
     void onTickInternal(bool manual, double manualDt);
     void tickUnits(double dt, const QHash<QString, GeoPos>& previousPositions);
+    void resolveUnitCollisions(double dt, const QHash<QString, GeoPos>& previousPositions);
     void resolveCombatRequests();
     void advanceProjectiles(double dt, const QHash<QString, GeoPos>& previousPositions);
     void settleTerminalProjectiles(const QStringList& projectileIds);
@@ -259,6 +260,9 @@ private:
     QHash<QString, QJsonObject> m_remoteRuntimeProjection;
     std::vector<CombatRequest> m_pendingCombatRequests;
     std::map<QString, ProjectileState> m_projectiles;
+    // Pair key is the lexicographically ordered unit ids. Values are seconds
+    // until another impact from the same contact may deal damage.
+    QHash<QString, double> m_collisionCooldowns;
     std::vector<ScanContact> m_scanContacts;
     quint64 m_battleSeed = 0x57415247414d4532ULL;
     std::unordered_map<QString, std::function<void(const QVariantMap&)>> m_dispatch;

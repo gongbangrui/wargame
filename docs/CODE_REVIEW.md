@@ -1,0 +1,37 @@
+# 全仓代码审查记录
+
+审查基线（2026-08-14）：Debug CTest 368 项、ASan/UBSan CTest 368 项、Debug 构建、独立
+`server/`（Qt 6.4）构建、`all_qmllint`、源码格式检查、账号生命周期/安全/监控/PVE 测试均
+通过；新增台账单测覆盖 10 项。隔离 Docker 已完成联网冒烟、房间托管契约、SIGTERM 落盘、
+卷备份/还原和重启恢复验证。本机常驻旧服务返回 `PROTOCOL_MISMATCH`，未将其当作当前源码
+验证结果。
+
+## 已关闭
+
+| 严重度 | 证据与影响 | 修复与验证 |
+| --- | --- | --- |
+| High | 情报曾以临时 `targetId` 共享，客户端可伪造目标关联或跨战位复用。 | `IntelLedger` 按战位保存当前记录和历史；服务器按来源台账、阵营、通信链重投影，协议测试和服务器单测通过。 |
+| High | 观察员快照/历史接口若附带台账会泄露战位备注和传播链。 | 观察员不附加 `intelState`，历史请求明确拒绝；观察员服务器测试通过。 |
+| High | v4/v5/v6 混用会导致状态字段解释不一致。 | 协议/检查点统一到 v6/schema 6，旧检查点和 v5/v4 客户端按兼容投影恢复；Debug、ASan/UBSan、独立 server 构建通过。 |
+| High | 独立服务器最低 Qt 6.4 不支持 `QHash::tryInsert`，Docker 发布构建会失败。 | 台账战位初始化改用 Qt 6.4 可用的 `contains`/`insert`；独立 Qt 6.4 构建和隔离 Docker 恢复验证通过。 |
+| High | `QWebSocket::disconnected` 回调捕获裸指针，析构顺序可能触发段错误。 | 使用 `QPointer` 守护回调；服务器 CTest 和 ASan/UBSan 通过。 |
+| Medium | 管理员 PUT 房间时省略情报阈值会把已配置值重置为默认值。 | 按 `model_fields_set` 保留数据库值，新增账号回归测试覆盖自定义阈值。 |
+| Medium | 传感器每个 tick 都产生重复历史和检查点写入，造成日志/磁盘放大。 | 稳定观测合并为 no-op；鲜度变化和可信度按阈值推进 revision；台账单测覆盖。 |
+| Medium | 情报直消息缺少统一确认，重试可能重复产生台账记录。 | `shareIntel`、`createIntelReport`、`requestIntelHistory` 使用请求 ID 回执；成功结果持久化后发送，重启从事件恢复幂等缓存；联网冒烟验证成功、失败和重复报告均通过。 |
+| Medium | 情报工作区曾在 revision 推进时把待处理命令显示为成功，其他状态变更可能造成假确认。 | 报告、共享和历史请求均只按匹配的 `requestId` 处理服务端结果；提交阶段统一显示“已提交”，服务器接受后才显示“已确认”。 |
+| Medium | 情报事件已 `fsync` 后若检查点刷新失败，曾会撤销幂等成功结果并返回持久化失败，与可重放日志的已提交状态矛盾。 | 将 JSONL 落盘作为提交点；检查点失败记录 `intelCheckpointDeferred` 审计事件并保留成功回执。报告与共享测试均覆盖失败注入、重试幂等和 JSONL 重放。 |
+| Medium | 联网攻击候选曾仅依赖目标投影，未显式与实时、传感器产生且服务器标记 `actionable` 的情报求交，客户端可能展示不可行动目标。 | 服务端行动集合与控制器候选均要求 `sensorContact + live + actionable`；新增控制器回归测试并在 Debug、ASan/UBSan 下通过。 |
+| Medium | 人工报告从 `live` 转为 `stale` 时曾套用传感器 100 分基准，可信度可能从默认 50 反升。 | 鲜度衰减按情报类型分别使用 50/100 基准，并限制结果不高于已有可信度；台账生命周期测试覆盖。 |
+| Medium | 合法人工报告没有隐藏目标 ID，但共享通知曾强制 `targetId`，导致客户端把通知判为畸形。 | 分享投影以 `intelId` 为必需标识，`targetId` 仅对目标接触可选发送；协议 round-trip 与人工报告共享测试通过。 |
+| Medium | 协议接受不含毫秒的 ISO 8601 时间，但历史范围过滤只按毫秒格式解析，合法查询会静默漏筛。 | 历史过滤统一兼容 `Qt::ISODateWithMs` 和 `Qt::ISODate`；回归测试覆盖无毫秒时间。 |
+| Medium | 联网情报地图与通知设置修改后依赖视图重建才完全刷新。 | 设置成功写盘后发送 `settingChanged(key)`；联网视图立即重载图层/通知开关，新情报按 `intelId` 去重，共享通知独立门控。控制器回归测试验证信号发出时可立即读取新值。 |
+| Low | 历史游标基于筛选结果的内存偏移，长时间比赛裁剪旧记录后会跳过未读事件。 | 游标改为最后返回的单调 `historyId` 序号；旧记录裁剪和新记录追加不再改变分页边界，台账回归测试覆盖裁剪后续页。 |
+| Low | 原生 CI 只构建 Debug/sanitizer，未执行 CTest，测试回归仍可能通过质量门禁。 | `Native quality gate` 现先校验两套构建的测试清单一致，再分别运行 Debug 与 ASan/UBSan CTest；发布文档同步改为有效的 `ctest --test-dir` 命令。 |
+| Low | 审查记录曾认为 CI 未执行真实 WebSocket、权限和 Docker 恢复组合场景。 | `Docker smoke and recovery` 已直接运行 `tools/verify-docker-recovery.sh`；脚本串联联网冒烟、房间托管契约、服务重启、卷备份和隔离恢复，因此该缺口不成立。 |
+
+## 后续事项
+
+本轮未留下与联网、情报、碰撞通信或设置直接相关的未关闭问题。性能压力和人工界面验收仍按
+`docs/NETWORK_TEST_CHECKLIST.md` 与发布流程执行，不以客户端权限判断替代服务器授权。
+
+审查不覆盖无关架构重写；所有未关闭事项均不应通过客户端 QML 权限判断替代服务器授权。

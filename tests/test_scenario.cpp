@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "core/Scenario.h"
 #include "core/SimulationEngine.h"
+#include "core/UnitBase.h"
 
 #include <cmath>
 #include <limits>
@@ -89,7 +90,8 @@ TEST(ScenarioTest, MissingSpeedUsesTheUnitKindDefault) {
         QJsonObject{{QStringLiteral("units"), units}}, &error);
     ASSERT_TRUE(error.isEmpty()) << error.toStdString();
     ASSERT_EQ(parsed.units.size(), 5U);
-    EXPECT_DOUBLE_EQ(parsed.units.at(0).speed, 0.0);
+    EXPECT_DOUBLE_EQ(parsed.units.at(0).speed,
+                     UnitBase::defaultSpeedMps(UnitKind::CommandPost));
     EXPECT_DOUBLE_EQ(parsed.units.at(1).speed, 150.0);
     EXPECT_DOUBLE_EQ(parsed.units.at(2).speed, 200.0);
     EXPECT_DOUBLE_EQ(parsed.units.at(3).speed, 18.0);

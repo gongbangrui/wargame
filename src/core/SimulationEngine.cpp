@@ -56,6 +56,10 @@ QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map) {
         && std::isfinite(u.commRange) && u.commRange >= 0.0
         && std::isfinite(u.speed) && u.speed >= 0.0
         && u.speed <= UnitBase::commandedSpeedLimitMps(kindFromName(u.kind))
+        && std::isfinite(u.collisionRadius) && u.collisionRadius > 0.0
+        && u.collisionRadius <= 1000.0
+        && std::isfinite(u.collisionHalfHeight) && u.collisionHalfHeight > 0.0
+        && u.collisionHalfHeight <= 500.0
         && std::isfinite(u.maxHp) && u.maxHp > 0.0
         && std::isfinite(u.attackPower) && u.attackPower >= 0.0
         && std::isfinite(u.armor) && u.armor >= 0.0 && u.armor <= 0.9
@@ -108,6 +112,21 @@ QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map) {
         }
     }
     return {};
+}
+
+// ScenarioUnit is also the editor-facing mutation DTO. Older callers and
+// lightweight fixtures do not carry the collision fields introduced in schema
+// 4, so fill only the new required values before validation. Explicit negative
+// or non-finite values remain invalid and are never silently repaired.
+ScenarioUnit normalizeScenarioUnitDefaults(ScenarioUnit unit) {
+    const UnitKind kind = kindFromName(unit.kind);
+    if (std::isfinite(unit.collisionRadius) && unit.collisionRadius == 0.0) {
+        unit.collisionRadius = UnitBase::defaultCollisionRadiusM(kind);
+    }
+    if (std::isfinite(unit.collisionHalfHeight) && unit.collisionHalfHeight == 0.0) {
+        unit.collisionHalfHeight = UnitBase::defaultCollisionHalfHeightM(kind);
+    }
+    return unit;
 }
 
 bool isHostileTarget(const UnitBase* attacker, const UnitBase* target) {
@@ -188,9 +207,13 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
         emit errorOccurred(m_lastError);
         return false;
     }
+    Scenario normalized = s;
+    for (ScenarioUnit& unit : normalized.units) {
+        unit = normalizeScenarioUnitDefaults(unit);
+    }
     QSet<QString> ids;
-    for (const auto& unit : s.units) {
-        const QString validationError = validateScenarioUnit(unit, s.map);
+    for (const auto& unit : normalized.units) {
+        const QString validationError = validateScenarioUnit(unit, normalized.map);
         if (!validationError.isEmpty()) {
             m_lastError = validationError + QStringLiteral("，场景未应用");
             emit errorOccurred(m_lastError);
@@ -204,7 +227,7 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
         ids.insert(unit.id);
     }
     setRunning(false);
-    m_scenario = s;
+    m_scenario = std::move(normalized);
     rebuildScenarioIndex();
     m_map->setLogicalSizeMeters(s.map.widthMeters, s.map.heightMeters);
     m_map->setName(s.map.name);
@@ -228,6 +251,7 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
     m_remoteRuntimeProjection.clear();
     m_pendingCombatRequests.clear();
     m_projectiles.clear();
+    m_collisionCooldowns.clear();
     m_scanContacts.clear();
     m_unitIdentityCatalog = {};
     m_unitIdentityOrder.clear();
@@ -327,6 +351,8 @@ void SimulationEngine::createSingleUnit(const ScenarioUnit& u) {
     p.attackRange = u.attackRange;
     p.commRange = u.commRange;
     p.speed = u.speed;
+    p.collisionRadius = u.collisionRadius;
+    p.collisionHalfHeight = u.collisionHalfHeight;
     p.maxHp = u.maxHp;
     p.attackPower = u.attackPower;
     p.armor = u.armor;
@@ -430,6 +456,7 @@ void SimulationEngine::onTickInternal(bool manual, double manualDt) {
     for (const auto& [id, unit] : m_units) previousPositions.insert(id, unit->pos());
     applySchedules(m_clock->simTime(), dt);
     tickUnits(dt, previousPositions);
+    resolveUnitCollisions(dt, previousPositions);
     applyEcmJamming();
     resolveCombatRequests();
     advanceProjectiles(dt, previousPositions);
@@ -473,6 +500,184 @@ void SimulationEngine::tickUnits(double dt,
         // Don't sample path for dead units — they don't move and we'd be
         // pushing the same position into recentPath forever.
         if (u->alive()) u->sampleRecentPath(m_clock->simTime());
+    }
+}
+
+void SimulationEngine::resolveUnitCollisions(
+    double dt, const QHash<QString, GeoPos>& previousPositions) {
+    if (!std::isfinite(dt) || dt <= 0.0 || m_units.size() < 2) return;
+
+    // Cooldowns are deliberately advanced before pair evaluation so a
+    // restored checkpoint behaves exactly like an uninterrupted simulation.
+    for (auto it = m_collisionCooldowns.begin(); it != m_collisionCooldowns.end();) {
+        it.value() = std::max(0.0, it.value() - dt);
+        if (it.value() <= 1e-9) it = m_collisionCooldowns.erase(it);
+        else ++it;
+    }
+
+    struct PendingImpact {
+        UnitBase* first = nullptr;
+        UnitBase* second = nullptr;
+        double damageToFirst = 0.0;
+        double damageToSecond = 0.0;
+        QPointF normal;
+        QPointF contact;
+        double relativeSpeed = 0.0;
+        bool friendly = false;
+    };
+    std::vector<PendingImpact> impacts;
+    std::vector<UnitBase*> units;
+    units.reserve(m_units.size());
+    for (const auto& [id, value] : m_units) {
+        Q_UNUSED(id);
+        if (value->alive()) units.push_back(value.get());
+    }
+
+    const auto layerOverlap = [](const UnitBase* a, const UnitBase* b) {
+        if (UnitBase::isGroundCollisionLayer(a->kind())
+            && UnitBase::isGroundCollisionLayer(b->kind())) {
+            return true;
+        }
+        return std::abs(a->pos().alt - b->pos().alt)
+            <= a->collisionHalfHeight() + b->collisionHalfHeight();
+    };
+    const auto pairKey = [](const UnitBase* a, const UnitBase* b) {
+        return a->id() < b->id() ? a->id() + QLatin1Char('|') + b->id()
+                                 : b->id() + QLatin1Char('|') + a->id();
+    };
+
+    for (size_t i = 0; i < units.size(); ++i) {
+        UnitBase* first = units[i];
+        for (size_t j = i + 1; j < units.size(); ++j) {
+            UnitBase* second = units[j];
+            if (!layerOverlap(first, second)) continue;
+
+            const GeoPos firstPrevious = previousPositions.value(first->id(), first->pos());
+            const GeoPos secondPrevious = previousPositions.value(second->id(), second->pos());
+            const QPointF start(firstPrevious.x - secondPrevious.x,
+                                firstPrevious.y - secondPrevious.y);
+            const QPointF firstDelta(first->pos().x - firstPrevious.x,
+                                     first->pos().y - firstPrevious.y);
+            const QPointF secondDelta(second->pos().x - secondPrevious.x,
+                                      second->pos().y - secondPrevious.y);
+            const QPointF relativeDelta(firstDelta.x() - secondDelta.x(),
+                                         firstDelta.y() - secondDelta.y());
+            // Units placed at the same deployment point are not considered
+            // colliding until at least one body moves. This keeps a static
+            // service/deployment overlap stable while still catching every
+            // swept crossing during simulation.
+            if (std::hypot(relativeDelta.x(), relativeDelta.y()) <= 1e-6) continue;
+            const double deltaSquared = QPointF::dotProduct(relativeDelta, relativeDelta);
+            double contactT = 0.0;
+            if (deltaSquared > 1e-9) {
+                contactT = std::clamp(
+                    -QPointF::dotProduct(start, relativeDelta) / deltaSquared, 0.0, 1.0);
+            }
+            const QPointF closest(start.x() + relativeDelta.x() * contactT,
+                                  start.y() + relativeDelta.y() * contactT);
+            const double radius = first->collisionRadius() + second->collisionRadius();
+            const double distance = std::hypot(closest.x(), closest.y());
+            if (distance > radius + 1e-6) continue;
+
+            QPointF normal(closest.x(), closest.y());
+            if (std::hypot(normal.x(), normal.y()) <= 1e-6) {
+                normal = QPointF(first->pos().x - second->pos().x,
+                                 first->pos().y - second->pos().y);
+            }
+            if (std::hypot(normal.x(), normal.y()) <= 1e-6) {
+                // Stable fallback for exact co-location, independent of map
+                // iteration order or pointer addresses.
+                normal = (first->id() < second->id())
+                    ? QPointF(1.0, 0.0) : QPointF(-1.0, 0.0);
+            }
+            const double normalLength = std::hypot(normal.x(), normal.y());
+            normal /= normalLength;
+
+            const QPointF firstVelocity(firstDelta.x() / dt, firstDelta.y() / dt);
+            const QPointF secondVelocity(secondDelta.x() / dt, secondDelta.y() / dt);
+            const QPointF relativeVelocity(firstVelocity.x() - secondVelocity.x(),
+                                            firstVelocity.y() - secondVelocity.y());
+            const double closingSpeed = std::max(
+                0.0, -QPointF::dotProduct(relativeVelocity, normal));
+            const double relativeSpeed = std::hypot(relativeVelocity.x(), relativeVelocity.y());
+            const QString key = pairKey(first, second);
+            const bool damageReady = !m_collisionCooldowns.contains(key)
+                || m_collisionCooldowns.value(key) <= 1e-9;
+
+            PendingImpact impact;
+            impact.first = first;
+            impact.second = second;
+            impact.normal = normal;
+            impact.contact = QPointF(second->pos().x + normal.x() * second->collisionRadius(),
+                                     second->pos().y + normal.y() * second->collisionRadius());
+            impact.relativeSpeed = relativeSpeed;
+            impact.friendly = first->side() == second->side();
+            if (damageReady) {
+                const double severity = std::clamp(
+                    std::max(0.25, (closingSpeed - 2.0) / 20.0), 0.25, 3.0);
+                const double base = 8.0 * severity;
+                const double firstDamage = std::min(
+                    impact.friendly ? first->maxHp() * 0.10 : first->maxHp() * 0.35,
+                    base * UnitBase::collisionImpactPower(second->kind())
+                        / UnitBase::collisionResistance(first->kind())
+                        * (impact.friendly ? 0.25 : 1.0));
+                const double secondDamage = std::min(
+                    impact.friendly ? second->maxHp() * 0.10 : second->maxHp() * 0.35,
+                    base * UnitBase::collisionImpactPower(first->kind())
+                        / UnitBase::collisionResistance(second->kind())
+                        * (impact.friendly ? 0.25 : 1.0));
+                impact.damageToFirst = firstDamage;
+                impact.damageToSecond = secondDamage;
+                m_collisionCooldowns.insert(key, 0.75);
+            }
+            impacts.push_back(impact);
+        }
+    }
+
+    for (const PendingImpact& impact : impacts) {
+        UnitBase* first = impact.first;
+        UnitBase* second = impact.second;
+        if (!first->alive() || !second->alive()) continue;
+
+        // Resolve overlap after recording the contact. Moving both bodies is
+        // deterministic and prevents a route from repeatedly tunnelling
+        // through the same unit on subsequent 50ms ticks.
+        const double currentDistance = first->pos().distanceTo2D(second->pos());
+        const double minimumDistance = first->collisionRadius() + second->collisionRadius();
+        if (currentDistance < minimumDistance - 1e-6) {
+            const double correction = minimumDistance - currentDistance + 0.01;
+            const bool firstCanMove = first->movable();
+            const bool secondCanMove = second->movable();
+            const double firstShare = firstCanMove && secondCanMove ? 0.5
+                : (firstCanMove ? 1.0 : 0.0);
+            const double secondShare = secondCanMove && firstCanMove ? 0.5
+                : (secondCanMove ? 1.0 : 0.0);
+            const GeoPos firstPos = first->pos();
+            const GeoPos secondPos = second->pos();
+            if (firstCanMove) first->setPosition(GeoPos{
+                firstPos.x + impact.normal.x() * correction * firstShare,
+                firstPos.y + impact.normal.y() * correction * firstShare,
+                firstPos.alt});
+            if (secondCanMove) second->setPosition(GeoPos{
+                secondPos.x - impact.normal.x() * correction * secondShare,
+                secondPos.y - impact.normal.y() * correction * secondShare,
+                secondPos.alt});
+        }
+        if (impact.damageToFirst > 0.0 || impact.damageToSecond > 0.0) {
+            first->applyDamageDelta(first->assessDamage(impact.damageToFirst, 2));
+            second->applyDamageDelta(second->assessDamage(impact.damageToSecond, 2));
+            appendTimeline(QStringLiteral("collision"), QStringLiteral("单位碰撞"),
+                           QJsonObject{{QStringLiteral("unitAId"), first->id()},
+                                       {QStringLiteral("unitBId"), second->id()},
+                                       {QStringLiteral("damageToA"), impact.damageToFirst},
+                                       {QStringLiteral("damageToB"), impact.damageToSecond},
+                                       {QStringLiteral("relativeSpeed"), impact.relativeSpeed},
+                                       {QStringLiteral("friendly"), impact.friendly},
+                                       {QStringLiteral("x"), impact.contact.x()},
+                                       {QStringLiteral("y"), impact.contact.y()}},
+                           impact.friendly ? QStringLiteral("info")
+                                            : QStringLiteral("warn"));
+        }
     }
 }
 
@@ -1066,6 +1271,8 @@ QJsonObject SimulationEngine::unitSnapshot(const QString& id) const {
     o["speed"] = u->speed();
     o["baseSpeed"] = u->baseSpeed();
     o["maxCommandedSpeed"] = u->maxCommandedSpeed();
+    o["collisionRadius"] = u->collisionRadius();
+    o["collisionHalfHeight"] = u->collisionHalfHeight();
     o["maxHp"] = u->maxHp();
     o["attackPower"] = u->attackPower();
     o["armor"] = u->armor();
@@ -1079,7 +1286,8 @@ QJsonObject SimulationEngine::unitSnapshot(const QString& id) const {
     o["serviceElapsed"] = u->serviceElapsed();
     o["serviceCpId"] = u->serviceCpId();
     const UnitBase* serviceCp = unit(commandSenderIdFor(u.get()));
-    o["serviceEligible"] = u->movable() && u->alive() && serviceCp && serviceCp->alive()
+    o["serviceEligible"] = u->kind() != UnitKind::CommandPost && u->movable() && u->alive()
+        && serviceCp && serviceCp->alive()
         && u->pos().distanceTo2D(serviceCp->pos()) <= kServiceRadiusMeters;
     o["fuelRemaining"] = u->fuelRemaining();
     o["fuelCapacity"] = u->fuelCapacity();
@@ -1461,7 +1669,7 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
     }
     if (action == QLatin1String("service")) {
         UnitBase* cp = unit(commandSenderIdFor(controlled));
-        if (!cp || !cp->alive()
+        if (controlled->kind() == UnitKind::CommandPost || !cp || !cp->alive()
             || controlled->pos().distanceTo2D(cp->pos()) > kServiceRadiusMeters) {
             return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
                                          QStringLiteral("单元必须在活指挥所 750 米内才能开始补充"));
@@ -1472,13 +1680,26 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
                                      QStringLiteral("单元当前未在补充"));
     }
 
-    const bool needsCommandPost = action != QLatin1String("setSpeed")
+    // Scanning is a local sensor action. It intentionally remains usable when
+    // the recon unit is outside the command-post network; the resulting
+    // contact is still filtered by the directed communication graph.
+    const bool needsCommandPost = action != QLatin1String("activateScan")
+        && action != QLatin1String("setSpeed")
         && action != QLatin1String("setSchedule")
         && action != QLatin1String("guideAttack")
         && action != QLatin1String("cancelService");
-    if (needsCommandPost && commandSenderIdFor(controlled).isEmpty()) {
-        return CommandResult::reject(QString::fromLatin1(CommandCode::CommandPostUnavailable),
-                                     QStringLiteral("己方指挥所已摧毁，无法派单: %1").arg(unitId));
+    if (needsCommandPost) {
+        const QString commandPostId = commandSenderIdFor(controlled);
+        if (commandPostId.isEmpty()) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::CommandPostUnavailable),
+                                         QStringLiteral("己方指挥所已摧毁，无法派单: %1").arg(unitId));
+        }
+        if (commandPostId != controlled->id()
+            && !m_transport->canCommunicate(commandPostId, controlled->id())) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::CommunicationLost),
+                                         QStringLiteral("指挥所与单元之间没有可用通信链路: %1")
+                                             .arg(unitId));
+        }
     }
     return CommandResult::ok();
 }
@@ -1906,13 +2127,14 @@ void SimulationEngine::cmdSetRulesOfEngagement(const QVariantMap& args) {
 }
 
 void SimulationEngine::addOrUpdateUnit(const ScenarioUnit& su) {
-    const QString validationError = validateScenarioUnit(su, m_scenario.map);
+    const ScenarioUnit normalized = normalizeScenarioUnitDefaults(su);
+    const QString validationError = validateScenarioUnit(normalized, m_scenario.map);
     if (!validationError.isEmpty()) {
         m_lastError = validationError;
         emit errorOccurred(m_lastError);
         return;
     }
-    if (m_scenarioIndex.find(su.id) == m_scenarioIndex.end()
+    if (m_scenarioIndex.find(normalized.id) == m_scenarioIndex.end()
         && m_scenario.units.size() >= kMaxScenarioUnits) {
         m_lastError = QStringLiteral("场景单元数量不能超过 %1").arg(kMaxScenarioUnits);
         emit errorOccurred(m_lastError);
@@ -1920,57 +2142,59 @@ void SimulationEngine::addOrUpdateUnit(const ScenarioUnit& su) {
     }
 
     // Update scenario store via O(1) index
-    auto idxIt = m_scenarioIndex.find(su.id);
+    auto idxIt = m_scenarioIndex.find(normalized.id);
     if (idxIt != m_scenarioIndex.end()) {
-        m_scenario.units[idxIt->second] = su;
+        m_scenario.units[idxIt->second] = normalized;
     } else {
-        m_scenarioIndex[su.id] = m_scenario.units.size();
-        m_scenario.units.push_back(su);
+        m_scenarioIndex[normalized.id] = m_scenario.units.size();
+        m_scenario.units.push_back(normalized);
     }
-    rememberUnitIdentity(su);
+    rememberUnitIdentity(normalized);
 
     // Incrementally update runtime units
-    auto it = m_units.find(su.id);
+    auto it = m_units.find(normalized.id);
     if (it != m_units.end()) {
-        const bool runtimeTypeChanged = it->second->kindStr() != su.kind
-            || it->second->sideStr() != su.side;
+        const bool runtimeTypeChanged = it->second->kindStr() != normalized.kind
+            || it->second->sideStr() != normalized.side;
         if (runtimeTypeChanged) {
             m_units.erase(it);
-            createSingleUnit(su);
+            createSingleUnit(normalized);
         } else {
             UnitBase::Params p;
-            p.detectRange = su.detectRange;
-            p.attackRange = su.attackRange;
-            p.commRange = su.commRange;
-            p.speed = su.speed;
-            p.maxHp = su.maxHp;
-            p.attackPower = su.attackPower;
-            p.armor = su.armor;
-            p.repairRate = su.repairRate;
-            p.subsystemRepairRate = su.subsystemRepairRate;
-            p.pos = su.pos;
-            it->second->setCallsign(su.callsign);
+            p.detectRange = normalized.detectRange;
+            p.attackRange = normalized.attackRange;
+            p.commRange = normalized.commRange;
+            p.speed = normalized.speed;
+            p.collisionRadius = normalized.collisionRadius;
+            p.collisionHalfHeight = normalized.collisionHalfHeight;
+            p.maxHp = normalized.maxHp;
+            p.attackPower = normalized.attackPower;
+            p.armor = normalized.armor;
+            p.repairRate = normalized.repairRate;
+            p.subsystemRepairRate = normalized.subsystemRepairRate;
+            p.pos = normalized.pos;
+            it->second->setCallsign(normalized.callsign);
             it->second->setParams(p);
             if (it->second->movable()) {
-                it->second->configureFuel(std::max(1.0, su.fuelCapacitySec),
-                                          std::clamp(su.initialFuelSec, 0.0,
-                                                     su.fuelCapacitySec),
-                                          std::max(1.0, su.speed));
+                it->second->configureFuel(std::max(1.0, normalized.fuelCapacitySec),
+                                          std::clamp(normalized.initialFuelSec, 0.0,
+                                                     normalized.fuelCapacitySec),
+                                          std::max(1.0, normalized.speed));
             }
             if (auto* attacker = qobject_cast<AttackUAV*>(it->second.get())) {
-                attacker->configureWeapon(su);
+                attacker->configureWeapon(normalized);
             }
-            it->second->setSchedule(su.schedule);
+            it->second->setSchedule(normalized.schedule);
         }
     } else {
-        createSingleUnit(su);
+        createSingleUnit(normalized);
     }
 
     for (auto& [oid, ou] : m_units) {
         ou->setCpId(commandSenderIdFor(ou.get()));
     }
-    if (auto* updated = unit(su.id); updated && updated->alive()) {
-        m_destroyedReported.remove(su.id);
+    if (auto* updated = unit(normalized.id); updated && updated->alive()) {
+        m_destroyedReported.remove(normalized.id);
     }
 
     emit unitsChanged();
@@ -2236,10 +2460,24 @@ QJsonObject SimulationEngine::collectGlobalCheckpointState() const {
                                       {QStringLiteral("damageMax"), weapon.damageMax},
                                       {QStringLiteral("rangeFalloff"), weapon.rangeFalloff}}}}}});
     }
-    return {{QStringLiteral("schema"), 4},
+    QJsonArray collisionCooldowns;
+    QStringList collisionKeys = m_collisionCooldowns.keys();
+    std::sort(collisionKeys.begin(), collisionKeys.end());
+    for (const QString& key : collisionKeys) {
+        const double remaining = m_collisionCooldowns.value(key);
+        if (!std::isfinite(remaining) || remaining <= 1e-9) continue;
+        const int separator = key.indexOf(QLatin1Char('|'));
+        if (separator <= 0 || separator >= key.size() - 1) continue;
+        collisionCooldowns.append(QJsonObject{
+            {QStringLiteral("unitAId"), key.left(separator)},
+            {QStringLiteral("unitBId"), key.mid(separator + 1)},
+            {QStringLiteral("remaining"), remaining}});
+    }
+    return {{QStringLiteral("schema"), 6},
             {QStringLiteral("combatSeed"), QString::number(m_battleSeed, 16)},
             {QStringLiteral("projectiles"), projectiles},
-            {QStringLiteral("scanContacts"), activeScanContacts()}};
+            {QStringLiteral("scanContacts"), activeScanContacts()},
+            {QStringLiteral("collisionCooldowns"), collisionCooldowns}};
 }
 
 bool SimulationEngine::restoreGlobalCheckpointState(const QJsonObject& state,
@@ -2252,6 +2490,7 @@ bool SimulationEngine::restoreGlobalCheckpointState(const QJsonObject& state,
     if (state.isEmpty() || state.value(QStringLiteral("schema")).toInt(2) <= 2) {
         m_projectiles.clear();
         m_scanContacts.clear();
+        m_collisionCooldowns.clear();
         for (auto& [id, value] : m_units) {
             Q_UNUSED(id);
             if (auto* attacker = qobject_cast<AttackUAV*>(value.get())) {
@@ -2263,7 +2502,7 @@ bool SimulationEngine::restoreGlobalCheckpointState(const QJsonObject& state,
         return true;
     }
     const int schema = state.value(QStringLiteral("schema")).toInt();
-    if (schema != 3 && schema != 4) {
+    if (schema != 3 && schema != 4 && schema != 5 && schema != 6) {
         return fail(QStringLiteral("不支持的全局检查点版本"));
     }
     bool seedOk = false;
@@ -2404,6 +2643,23 @@ bool SimulationEngine::restoreGlobalCheckpointState(const QJsonObject& state,
     m_battleSeed = seed;
     m_projectiles = std::move(restoredProjectiles);
     m_scanContacts = std::move(restoredContacts);
+    m_collisionCooldowns.clear();
+    if (schema >= 5) {
+        const QJsonArray cooldowns = state.value(QStringLiteral("collisionCooldowns")).toArray();
+        if (cooldowns.size() > 4096) return fail(QStringLiteral("全局检查点碰撞冷却过多"));
+        for (const QJsonValue& value : cooldowns) {
+            const QJsonObject object = value.toObject();
+            const QString first = object.value(QStringLiteral("unitAId")).toString();
+            const QString second = object.value(QStringLiteral("unitBId")).toString();
+            const double remaining = object.value(QStringLiteral("remaining")).toDouble(-1.0);
+            if (first.isEmpty() || second.isEmpty() || first >= second
+                || !unit(first) || !unit(second) || !std::isfinite(remaining)
+                || remaining <= 0.0 || remaining > 0.75 + 1e-9) {
+                return fail(QStringLiteral("全局检查点碰撞冷却无效"));
+            }
+            m_collisionCooldowns.insert(first + QLatin1Char('|') + second, remaining);
+        }
+    }
     for (auto& [id, value] : m_units) {
         Q_UNUSED(id);
         if (auto* attacker = qobject_cast<AttackUAV*>(value.get())) {

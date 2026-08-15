@@ -34,15 +34,40 @@ TEST_F(MessageBusTest, UnregisteredUnit) {
     EXPECT_FALSE(bus.canCommunicate("red_cp", "unknown_unit"));
 }
 
-TEST_F(MessageBusTest, CpBypassesRange) {
-    // Move the recon far away; CP can still reach it
+TEST_F(MessageBusTest, CpRespectsRangeWhenNoRelayExists) {
+    // A command post no longer has a hidden global bypass.
     bus.updateUnitPosition("red_r1", QPointF(100000, 100000), 15000, "red");
+    EXPECT_FALSE(bus.canCommunicate("red_cp", "red_r1"));
+}
+
+TEST_F(MessageBusTest, CpPositionUpdateBreaksAndRestoresDirectLink) {
+    bus.updateUnitPosition("red_cp", QPointF(100000, 100000), 20000, "red");
+    bus.updateUnitPosition("red_r1", QPointF(0, 0), 15000, "red");
+    EXPECT_FALSE(bus.canCommunicate("red_cp", "red_r1"));
+    bus.updateUnitPosition("red_cp", QPointF(5000, 0), 20000, "red");
     EXPECT_TRUE(bus.canCommunicate("red_cp", "red_r1"));
 }
 
-TEST_F(MessageBusTest, CpFlagSurvivesPositionUpdate) {
-    bus.updateUnitPosition("red_cp", QPointF(100000, 100000), 20000, "red");
-    bus.updateUnitPosition("red_r1", QPointF(0, 0), 15000, "red");
+TEST_F(MessageBusTest, FriendlyRelayRestoresCommandPostReachability) {
+    bus.subscribe("red_relay", [](const Message&) {});
+    bus.updateUnitPosition("red_cp", QPointF(0, 0), 2000, "red");
+    bus.updateUnitPosition("red_relay", QPointF(1500, 0), 2000, "red");
+    bus.updateUnitPosition("red_r1", QPointF(3000, 0), 1000, "red");
+    EXPECT_TRUE(bus.canCommunicate("red_cp", "red_r1"));
+}
+
+TEST_F(MessageBusTest, InactiveUnitCannotTransmitOrRelay) {
+    bus.subscribe("red_relay", [](const Message&) {});
+    bus.updateUnitPosition("red_cp", QPointF(0, 0), 2000, "red");
+    bus.updateUnitPosition("red_relay", QPointF(1500, 0), 2000, "red");
+    bus.updateUnitPosition("red_r1", QPointF(3000, 0), 1000, "red");
+    ASSERT_TRUE(bus.canCommunicate("red_cp", "red_r1"));
+
+    bus.setUnitActive("red_relay", false);
+    EXPECT_FALSE(bus.canCommunicate("red_cp", "red_r1"));
+    EXPECT_FALSE(bus.canCommunicate("red_relay", "red_r1"));
+
+    bus.setUnitActive("red_relay", true);
     EXPECT_TRUE(bus.canCommunicate("red_cp", "red_r1"));
 }
 

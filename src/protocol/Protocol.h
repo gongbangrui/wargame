@@ -7,20 +7,44 @@
 
 namespace gbr::Protocol {
 
-inline constexpr int Version = 4;
-inline constexpr int SchemaVersion = 4;
+// v6 is the current contract. v5 contains the first intelligence-ledger
+// fields and v4 is the pre-ledger contract; all three remain valid during a
+// rolling deployment so a new client can downgrade without losing its room.
+inline constexpr int Version = 6;
+inline constexpr int SchemaVersion = 6;
+inline constexpr int IntelVersion = 5;
+inline constexpr int IntelSchemaVersion = 5;
+inline constexpr int PreviousVersion = 5;
+inline constexpr int PreviousSchemaVersion = 5;
+inline constexpr int LegacyVersion = 4;
+inline constexpr int LegacySchemaVersion = 4;
 inline constexpr int MaxMessageBytes = 256 * 1024;
 inline constexpr int MaxServerMessageBytes = 8 * 1024 * 1024;
 inline constexpr int MaxIdentifierLength = 64;
 inline constexpr int MaxActionLength = 64;
 inline constexpr int MaxTokenLength = 4096;
 inline constexpr int MaxChatLength = 500;
+// v4 used the chat-sized compatibility field for shareIntel notes and
+// accepted up to 1024 characters. Keep that limit on the legacy wire only;
+// the v5 intelligence ledger remains bounded by MaxIntelNoteLength below.
+inline constexpr int LegacyShareIntelNoteLength = 1024;
 inline constexpr int MaxMapLabelLength = 128;
 inline constexpr int MaxJsonDepth = 16;
 inline constexpr int MaxJsonNodes = 262144;
 inline constexpr int MaxRoomNameLength = 96;
 inline constexpr int MaxSeatIdLength = 64;
 inline constexpr int MaxDdsTicketLength = 128;
+inline constexpr int MaxIntelNoteLength = 500;
+inline constexpr int MaxIntelTitleLength = 64;
+inline constexpr int MaxIntelTimestampLength = 64;
+inline constexpr int MaxIntelKnownAttributes = 32;
+inline constexpr int MaxIntelAttributeValueLength = 128;
+inline constexpr int MaxIntelPropagationSources = 32;
+inline constexpr int MaxIntelShareTargets = 64;
+inline constexpr int MaxIntelRecords = 4096;
+inline constexpr int MaxIntelHistoryPageSize = 200;
+inline constexpr int MaxIntelCursorLength = 256;
+inline constexpr int MaxIntelSearchLength = 128;
 inline constexpr int MaxProjectiles = 512;
 inline constexpr int MaxProjectileRecords = MaxProjectiles * 2;
 inline constexpr int MaxChangedUnitIds = 512;
@@ -95,6 +119,7 @@ struct DeploymentPromptProjection {
 
 struct IntelShareProjection {
     QString senderSeatId;
+    QString intelId;
     QString targetId;
     QString sharedAt;
     QString note;
@@ -122,7 +147,8 @@ struct TransferEventProjection {
 ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
                                       RoomLifecycleProjection* projection);
 ValidationResult projectSnapshot(const QJsonObject& payload, SnapshotProjection* projection);
-ValidationResult validateSnapshotState(const QJsonObject& payload);
+ValidationResult validateSnapshotState(const QJsonObject& payload,
+                                       int schemaVersion = SchemaVersion);
 ValidationResult projectSeatDirectory(const QJsonObject& payload,
                                       SeatDirectoryProjection* projection);
 ValidationResult projectDeploymentPrompt(const QJsonObject& payload,
@@ -138,15 +164,30 @@ QVariantList seatVariants(const QList<SeatProjection>& seats);
 
 bool isKnownClientMessageType(const QString& type);
 bool isKnownServerMessageType(const QString& type);
+bool isSupportedWireVersion(int protocolVersion, int schemaVersion);
 ValidationResult validateClientEnvelope(const QJsonObject& envelope);
 ValidationResult validateServerEnvelope(const QJsonObject& envelope);
+ValidationResult validateClientEnvelopeForVersion(const QJsonObject& envelope);
+ValidationResult validateServerEnvelopeForVersion(const QJsonObject& envelope);
 ValidationResult validateClientPayload(const QString& type, const QJsonObject& payload);
 ValidationResult validateServerPayload(const QString& type, const QJsonObject& payload);
+ValidationResult validateClientPayloadForVersion(const QString& type,
+                                                 const QJsonObject& payload,
+                                                 int schemaVersion);
+ValidationResult validateServerPayloadForVersion(const QString& type,
+                                                 const QJsonObject& payload,
+                                                 int schemaVersion);
 
 QJsonObject makeClientEnvelope(const QString& type, const QString& messageId,
                                const QJsonObject& payload);
+QJsonObject makeClientEnvelopeForVersion(const QString& type, const QString& messageId,
+                                         const QJsonObject& payload,
+                                         int protocolVersion, int schemaVersion);
 QJsonObject makeServerEnvelope(const QString& type, quint64 sequence,
                                const QJsonObject& payload);
+QJsonObject makeServerEnvelopeForVersion(const QString& type, quint64 sequence,
+                                         const QJsonObject& payload,
+                                         int protocolVersion, int schemaVersion);
 
 // 联网模式的统一战位消息名。当前权威数据面使用 WebSocket。
 // 传输，但两者都使用同一套 envelope，保证服务器权限和客户端状态机一致。
@@ -160,6 +201,8 @@ inline constexpr const char* DeploymentMessage = "deployment";
 inline constexpr const char* RequestRedeployMessage = "requestRedeploy";
 inline constexpr const char* RedeployMessage = "redeploy";
 inline constexpr const char* ShareIntelMessage = "shareIntel";
+inline constexpr const char* CreateIntelReportMessage = "createIntelReport";
+inline constexpr const char* RequestIntelHistoryMessage = "requestIntelHistory";
 inline constexpr const char* MapMarkMessage = "mapMark";
 inline constexpr const char* SetObserverTrajectoriesMessage = "setObserverTrajectories";
 inline constexpr const char* SetObserverTrailsMessage = "setObserverTrails";
@@ -168,6 +211,7 @@ inline constexpr const char* RoomDirectoryMessage = "roomDirectory";
 inline constexpr const char* SeatStateMessage = "seatState";
 inline constexpr const char* DeploymentPromptMessage = "deploymentPrompt";
 inline constexpr const char* IntelShareEventMessage = "intelShare";
+inline constexpr const char* IntelHistoryPageMessage = "intelHistoryPage";
 
 inline constexpr int MaxObserverTrajectoryUnits = 8;
 inline constexpr int MaxObserverTrajectoryPoints = 90;

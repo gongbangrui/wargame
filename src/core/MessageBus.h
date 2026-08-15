@@ -100,6 +100,10 @@ public:
     bool canCommunicate(const QString& aId, const QString& bId) const;
 
     void updateUnitPosition(const QString& unitId, const QPointF& pos, double commRange, const QString& side = QString());
+    /// Mark whether a registered unit is alive and may transmit or relay.
+    /// Dead units remain registered so their identity can still be projected,
+    /// but they must not participate in the communication graph.
+    void setUnitActive(const QString& unitId, bool active);
     void setUnitCommandPost(const QString& unitId, bool isCp);
 
     void updateUnitSide(const QString& unitId, const QString& side);
@@ -117,6 +121,7 @@ private:
         double commRange = 0.0;
         QString side;
         bool isCp = false;
+        bool active = true;
     };
 
     void deliver(const Message& msg, const QString& targetId);

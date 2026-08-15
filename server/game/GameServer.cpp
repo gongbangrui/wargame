@@ -39,6 +39,24 @@ constexpr qint64 kMaxPendingBytes = 1024 * 1024;
 constexpr qint64 kDdsTicketLifetimeMs = 120000;
 constexpr int kAiProviderPlanGraceMs = 1000;
 
+QJsonObject payloadForWireVersion(const QString& type, const QJsonObject& payload,
+                                  int schemaVersion) {
+    if (schemaVersion != Protocol::LegacySchemaVersion) return payload;
+    QJsonObject compatible = payload;
+    if (type == QLatin1String("snapshot") || type == QLatin1String("delta")) {
+        compatible[QStringLiteral("schemaVersion")] = Protocol::LegacySchemaVersion;
+        compatible.remove(QStringLiteral("intelState"));
+        compatible.remove(QStringLiteral("intelDelta"));
+    } else if (type == QLatin1String("intelShare")) {
+        // v4 identifies shared contacts by targetId. Newer projections keep
+        // intelId as an internal ledger identifier and may also carry it.
+        compatible.remove(QStringLiteral("intelId"));
+    } else if (type == QLatin1String("intelHistoryPage")) {
+        compatible = {};
+    }
+    return compatible;
+}
+
 double planarDistance2(double ax, double ay, double bx, double by) {
     const double dx = ax - bx;
     const double dy = ay - by;
@@ -132,8 +150,7 @@ bool observerMessageIsReadOnly(const QString& type) {
 
 bool isRedCommandPost(const UnitBase* unit) {
     return unit && unit->sideStr() == QLatin1String("red")
-        && (unit->id() == QLatin1String("red_cp")
-            || unit->kind() == UnitKind::CommandPost);
+        && unit->kind() == UnitKind::CommandPost;
 }
 
 QString commandCacheKey(const QString& controllerId, const QString& commandId) {
@@ -142,6 +159,17 @@ QString commandCacheKey(const QString& controllerId, const QString& commandId) {
 
 QString commandCacheKey(qint64 userId, const QString& commandId) {
     return commandCacheKey(QString::number(userId), commandId);
+}
+
+QString intelRequestCacheKey(qint64 userId, const QString& action,
+                             const QString& requestId) {
+    return commandCacheKey(userId, QStringLiteral("intel:%1:%2").arg(action, requestId));
+}
+
+bool isIntelRequestType(const QString& type) {
+    return type == QLatin1String("shareIntel")
+        || type == QLatin1String("createIntelReport")
+        || type == QLatin1String("requestIntelHistory");
 }
 
 QString roomModeFromConfig(const QJsonObject& room) {
@@ -161,6 +189,19 @@ QString aiDifficultyFromConfig(const QJsonObject& room) {
 quint64 configVersionFromConfig(const QJsonObject& room) {
     const qint64 version = room.value(QStringLiteral("configVersion")).toInteger();
     return version > 0 ? static_cast<quint64>(version) : 1;
+}
+
+IntelLedger::Config intelConfigFromRoom(const QJsonObject& room,
+                                        const IntelLedger::Config& fallback) {
+    const double stale = room.value(QStringLiteral("intelStaleAfterSec"))
+                             .toDouble(fallback.staleAfterSec);
+    const double archive = room.value(QStringLiteral("intelArchiveAfterSec"))
+                               .toDouble(fallback.archiveAfterSec);
+    if (!std::isfinite(stale) || !std::isfinite(archive) || stale <= 0.0
+        || archive <= stale) {
+        return fallback;
+    }
+    return IntelLedger::Config{stale, archive};
 }
 
 bool aiConfigurationFromJson(const QJsonObject& value, const OllamaConfig& current,
@@ -444,6 +485,7 @@ GameServer::GameServer(QObject* parent)
         m_blueReady = false;
         m_runInitialScenario = {};
         m_mapMarks = {};
+        m_intelLedger.clear();
         m_observerTrajectories.clear();
         m_nextObserverTrajectorySampleAt = 0.0;
         m_commandResults.clear();
@@ -646,6 +688,22 @@ GameServer::~GameServer() {
     m_engine.setRunning(false);
     m_fastDds.stop();
     m_server.close();
+    // The WebSocket server transfers ownership of accepted sockets to the
+    // caller.  During normal operation removeClient() schedules deletion,
+    // but there may be no event loop left while GameServer is being torn
+    // down.  Delete the remaining sockets synchronously after disconnecting
+    // this object's callbacks so ASan and shutdown both see a complete
+    // ownership release.
+    const QList<QWebSocket*> clients = m_ownedSockets.values();
+    m_clients.clear();
+    m_ownedSockets.clear();
+    for (QWebSocket* socket : clients) {
+        if (!socket) continue;
+        socket->disconnect(this);
+        socket->close(QWebSocketProtocol::CloseCodeGoingAway,
+                      QStringLiteral("服务器正在关闭"));
+        delete socket;
+    }
 }
 
 bool GameServer::listen(quint16 port) {
@@ -713,6 +771,7 @@ void GameServer::refreshRoomControlForJoin(QWebSocket* socket, const QJsonObject
             m_observerJoinAllowed = false;
         } else {
             m_observerJoinAllowed = observerRoomIsOpen(selected);
+            m_intelLedger.setConfig(intelConfigFromRoom(selected, m_intelLedger.config()));
             const QJsonObject globalAi =
                 document.object().value(QStringLiteral("aiConfig")).toObject();
             if (!payload.value(QStringLiteral("asObserver")).toBool()) {
@@ -920,6 +979,10 @@ int GameServer::unauthenticatedClientCount(const QHostAddress& peerAddress) cons
 void GameServer::onNewConnection() {
     while (m_server.hasPendingConnections()) {
         QWebSocket* socket = m_server.nextPendingConnection();
+        m_ownedSockets.insert(socket);
+        connect(socket, &QObject::destroyed, this, [this, socket]() {
+            m_ownedSockets.remove(socket);
+        });
         const QHostAddress peerAddress = normalizedPeerAddress(socket->peerAddress());
         if (unauthenticatedClientCount() >= kMaxUnauthenticated) {
             socket->close(QWebSocketProtocol::CloseCodePolicyViolated,
@@ -942,8 +1005,15 @@ void GameServer::onNewConnection() {
                                                          {QStringLiteral("port"), static_cast<int>(socket->peerPort())}});
         connect(socket, &QWebSocket::textMessageReceived, this,
                 [this, socket](const QString& text) { onTextMessage(socket, text); });
+        // The server owns the socket through QTcpServer. During server
+        // teardown Qt may destroy a child socket before emitting its final
+        // disconnected signal, so never retain a dangling raw pointer in the
+        // callback.
+        QPointer<QWebSocket> guardedSocket(socket);
         connect(socket, &QWebSocket::disconnected, this,
-                [this, socket]() { removeClient(socket); });
+                [this, guardedSocket]() {
+                    if (guardedSocket) removeClient(guardedSocket.data());
+                });
         QPointer<QWebSocket> guarded(socket);
         QTimer::singleShot(kUnauthenticatedTimeoutMs, this, [this, guarded]() {
             if (guarded && m_clients.contains(guarded)
@@ -990,7 +1060,18 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
         return;
     }
     const QJsonObject envelope = document.object();
-    const Protocol::ValidationResult validation = Protocol::validateClientEnvelope(envelope);
+    const int incomingProtocol = envelope.value(QStringLiteral("protocolVersion")).toInt();
+    const int incomingSchema = envelope.value(QStringLiteral("schemaVersion")).toInt();
+    if (!session.authenticated
+        && Protocol::isSupportedWireVersion(incomingProtocol, incomingSchema)) {
+        // The auth envelope is the version negotiation. Remember the
+        // compatible pair before sending any rejection so even that error is
+        // encoded in the client's wire format.
+        session.protocolVersion = incomingProtocol;
+        session.schemaVersion = incomingSchema;
+    }
+    const Protocol::ValidationResult validation = Protocol::validateClientEnvelopeForVersion(
+        envelope);
     if (!validation.valid) {
         sendError(socket, validation.code, validation.message);
         if (validation.code == QLatin1String("PROTOCOL_MISMATCH")
@@ -999,7 +1080,45 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
         }
         return;
     }
+    const QString type = envelope.value(QStringLiteral("type")).toString();
+    const QJsonObject payload = envelope.value(QStringLiteral("payload")).toObject();
     const QString messageId = envelope.value(QStringLiteral("messageId")).toString();
+    if (session.authenticated
+        && (incomingProtocol != session.protocolVersion
+            || incomingSchema != session.schemaVersion)) {
+        sendError(socket, QStringLiteral("PROTOCOL_MISMATCH"),
+                  QStringLiteral("当前连接已协商其他协议版本"), messageId);
+        socket->close(QWebSocketProtocol::CloseCodeProtocolError,
+                      QStringLiteral("协议版本发生变化"));
+        return;
+    }
+    if (!session.authenticated) {
+        if (session.recentMessageIds.contains(messageId)) {
+            sendError(socket, QStringLiteral("DUPLICATE_MESSAGE"),
+                      QStringLiteral("消息 ID 已处理"), messageId);
+            return;
+        }
+        session.recentMessageIds.insert(messageId);
+        session.recentMessageIdOrder.append(messageId);
+        while (session.recentMessageIdOrder.size() > 2048) {
+            session.recentMessageIds.remove(session.recentMessageIdOrder.takeFirst());
+        }
+        if (type != QLatin1String("auth")) {
+            sendError(socket, QStringLiteral("AUTH_REQUIRED"), QStringLiteral("请先完成登录认证"));
+            return;
+        }
+        authenticate(socket, payload.value(QStringLiteral("token")).toString());
+        return;
+    }
+
+    if (isIntelRequestType(type)) {
+        const QString cacheKey = intelRequestCacheKey(session.userId, type, messageId);
+        if (m_commandResults.contains(cacheKey)) {
+            sendEnvelope(socket, QStringLiteral("commandResult"),
+                         m_commandResults.value(cacheKey));
+            return;
+        }
+    }
     if (session.recentMessageIds.contains(messageId)) {
         sendError(socket, QStringLiteral("DUPLICATE_MESSAGE"),
                   QStringLiteral("消息 ID 已处理"), messageId);
@@ -1009,16 +1128,6 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
     session.recentMessageIdOrder.append(messageId);
     while (session.recentMessageIdOrder.size() > 2048) {
         session.recentMessageIds.remove(session.recentMessageIdOrder.takeFirst());
-    }
-    const QString type = envelope.value(QStringLiteral("type")).toString();
-    const QJsonObject payload = envelope.value(QStringLiteral("payload")).toObject();
-    if (!session.authenticated) {
-        if (type != QLatin1String("auth")) {
-            sendError(socket, QStringLiteral("AUTH_REQUIRED"), QStringLiteral("请先完成登录认证"));
-            return;
-        }
-        authenticate(socket, payload.value(QStringLiteral("token")).toString());
-        return;
     }
 
     if (session.observer && !observerMessageIsReadOnly(type)) {
@@ -1043,7 +1152,9 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
     else if (type == QLatin1String("requestRedeploy")) handleRedeployRequest(socket);
     else if (type == QLatin1String("redeploy")) handleRedeploy(socket, payload);
     else if (type == QLatin1String("setUnitName")) handleSetUnitName(socket, payload);
-    else if (type == QLatin1String("shareIntel")) handleShareIntel(socket, payload);
+    else if (type == QLatin1String("shareIntel")) handleShareIntel(socket, payload, messageId);
+    else if (type == QLatin1String("createIntelReport")) handleCreateIntelReport(socket, payload, messageId);
+    else if (type == QLatin1String("requestIntelHistory")) handleRequestIntelHistory(socket, payload, messageId);
     else if (type == QLatin1String("mapMark")) handleMapMark(socket, payload);
     else if (type == QLatin1String("setObserverTrajectories")
              || type == QLatin1String("setObserverTrails")) {
@@ -1363,6 +1474,7 @@ void GameServer::syncRoomControl(QWebSocket* requester) {
         }
         const QJsonObject selectedAiConfig = roomAiConfiguration(selected, globalAiConfig);
         applyAiConfiguration(selectedAiConfig);
+        m_intelLedger.setConfig(intelConfigFromRoom(selected, m_intelLedger.config()));
         m_observerJoinAllowed = observerRoomIsOpen(selected);
         bool roomHasParticipant = false;
         for (auto it = m_clients.cbegin(); it != m_clients.cend(); ++it) {
@@ -1907,6 +2019,7 @@ void GameServer::finishAuthentication(QWebSocket* socket, const QJsonObject& ide
 
 void GameServer::removeClient(QWebSocket* socket) {
     if (!m_clients.contains(socket)) return;
+    const bool owned = m_ownedSockets.contains(socket);
     const ClientSession session = m_clients.take(socket);
     bool lastParticipant = session.roomId == m_roomId && !session.observer;
     if (lastParticipant) {
@@ -1986,7 +2099,7 @@ void GameServer::removeClient(QWebSocket* socket) {
                                                      {QStringLiteral("user"), session.username},
                                                      {QStringLiteral("role"), session.role}});
     writeMonitorStatus();
-    socket->deleteLater();
+    if (owned) socket->deleteLater();
     if (session.authenticated) {
         broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("presence")},
                                    {QStringLiteral("message"), QStringLiteral("%1 已离开推演室").arg(session.displayName)}});
@@ -2028,6 +2141,8 @@ void GameServer::sendRoomDirectory(QWebSocket* socket) {
                      {QStringLiteral("mode"), m_roomMode},
                      {QStringLiteral("aiDifficulty"), m_aiDifficulty},
                      {QStringLiteral("configVersion"), static_cast<qint64>(m_configVersion)},
+                     {QStringLiteral("intelStaleAfterSec"), m_intelLedger.config().staleAfterSec},
+                     {QStringLiteral("intelArchiveAfterSec"), m_intelLedger.config().archiveAfterSec},
                      {QStringLiteral("hostedByGameServer"), true},
                      {QStringLiteral("scenarioId"), QStringLiteral("default")}};
     QJsonObject limits;
@@ -2666,17 +2781,49 @@ void GameServer::handleDeployment(QWebSocket* socket, const QJsonObject& payload
     }
     const double x = point.value(QStringLiteral("x")).toDouble();
     const double y = point.value(QStringLiteral("y")).toDouble();
+    const double alt = point.value(QStringLiteral("alt")).toDouble(0.0);
     const QJsonObject map = m_engine.mapInfo();
-    if (!std::isfinite(x) || !std::isfinite(y) || x < 0.0 || y < 0.0
-        || x > map.value(QStringLiteral("widthMeters")).toDouble()
-        || y > map.value(QStringLiteral("heightMeters")).toDouble()) {
+    UnitBase* replacing = m_engine.unit(targetSeat.unitId);
+    UnitKind targetKind = replacing ? replacing->kind() : UnitKind::GroundScout;
+    if (!replacing) {
+        const QString kind = targetSeat.seatType == QLatin1String("commander")
+            ? QStringLiteral("commandpost")
+            : targetSeat.seatType == QLatin1String("attack") ? QStringLiteral("attackuav")
+            : targetSeat.seatType == QLatin1String("recon") ? QStringLiteral("reconuav")
+            : targetSeat.seatType == QLatin1String("jammer") ? QStringLiteral("jammeruav")
+            : QStringLiteral("groundscout");
+        targetKind = kindFromName(kind);
+    }
+    const double candidateRadius = replacing ? replacing->collisionRadius()
+        : UnitBase::defaultCollisionRadiusM(targetKind);
+    const double candidateHalfHeight = replacing ? replacing->collisionHalfHeight()
+        : UnitBase::defaultCollisionHalfHeightM(targetKind);
+    const double width = map.value(QStringLiteral("widthMeters")).toDouble();
+    const double height = map.value(QStringLiteral("heightMeters")).toDouble();
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(alt)
+        || x < candidateRadius || y < candidateRadius
+        || x > width - candidateRadius || y > height - candidateRadius) {
         sendError(socket, QStringLiteral("INVALID_DEPLOYMENT"), QStringLiteral("部署位置超出地图范围"));
         return;
+    }
+    for (const QString& existingId : m_engine.unitIds()) {
+        if (existingId == targetSeat.unitId) continue;
+        UnitBase* existing = m_engine.unit(existingId);
+        if (!existing || !existing->alive()) continue;
+        const double dx = x - existing->pos().x;
+        const double dy = y - existing->pos().y;
+        const double dz = std::abs(alt - existing->pos().alt);
+        if (std::hypot(dx, dy) < candidateRadius + existing->collisionRadius() - 1e-9
+            && dz < candidateHalfHeight + existing->collisionHalfHeight() - 1e-9) {
+            sendError(socket, QStringLiteral("DEPLOYMENT_COLLISION"),
+                      QStringLiteral("部署位置与已有单位碰撞体积重叠"));
+            return;
+        }
     }
     const QJsonObject before = m_authoritativeRoom.toJson();
     const AuthoritativeRoom::Result deployed = m_authoritativeRoom.deploy(
         session.userId, targetSeatId,
-        GeoPos{x, y, point.value(QStringLiteral("alt")).toDouble()});
+        GeoPos{x, y, alt});
     if (!deployed.ok) {
         sendError(socket, deployed.code, QStringLiteral("部署请求被服务器拒绝"));
         return;
@@ -2767,38 +2914,224 @@ void GameServer::handleRedeploy(QWebSocket* socket, const QJsonObject& payload) 
     broadcastSnapshots(true);
 }
 
-void GameServer::handleShareIntel(QWebSocket* socket, const QJsonObject& payload) {
+void GameServer::handleShareIntel(QWebSocket* socket, const QJsonObject& payload,
+                                  const QString& requestId) {
     const ClientSession& sender = m_clients.value(socket);
-    if (m_roomStatus == QLatin1String("stopped") || sender.seatId.isEmpty() || sender.roomId != m_roomId) {
-        sendError(socket, QStringLiteral("SEAT_REQUIRED"), QStringLiteral("请先选择战位"));
+    const auto reject = [this, socket, requestId](const QString& code,
+                                                   const QString& message) {
+        sendIntelCommandResult(socket, QStringLiteral("shareIntel"), requestId,
+                               CommandResult::reject(code, message));
+    };
+    QJsonObject normalizedPayload = payload;
+    if (sender.schemaVersion == Protocol::LegacySchemaVersion
+        && payload.contains(QStringLiteral("targetId"))) {
+        if (payload.value(QStringLiteral("note")).toString().size()
+            > Protocol::MaxIntelNoteLength) {
+            reject(QStringLiteral("INTEL_NOTE_TOO_LONG"),
+                   QStringLiteral("当前服务器兼容模式下情报备注最多 %1 字")
+                       .arg(Protocol::MaxIntelNoteLength));
+            return;
+        }
+        const QString targetId = payload.value(QStringLiteral("targetId")).toString();
+        normalizedPayload.remove(QStringLiteral("targetId"));
+        normalizedPayload[QStringLiteral("intelId")] =
+            QStringLiteral("sensor_%1_%2").arg(sender.seatId, targetId);
+    }
+    Protocol::IntelShareRequest request;
+    const Protocol::ValidationResult requestValidation = Protocol::fromJson(
+        normalizedPayload, &request);
+    if (!requestValidation.valid) {
+        reject(requestValidation.code, requestValidation.message);
         return;
     }
-    const QString targetId = payload.value(QStringLiteral("targetId")).toString();
-    if (!visibleUnitIds(sender).contains(targetId)) {
-        sendError(socket, QStringLiteral("TARGET_NOT_VISIBLE"), QStringLiteral("只能共享当前视角已掌握的信息"));
+    if (m_roomStatus == QLatin1String("stopped") || sender.seatId.isEmpty()
+        || sender.roomId != m_roomId || sender.side.isEmpty()) {
+        reject(QStringLiteral("SEAT_REQUIRED"), QStringLiteral("请先选择战位"));
+        return;
+    }
+    const QString intelId = request.intelId;
+    const QStringList requestedRecipients = request.recipientSeatIds;
+    const QString note = request.note;
+    const Protocol::IntelState source = m_intelLedger.state(sender.seatId);
+    const Protocol::IntelContact* contact = nullptr;
+    for (const auto& candidate : source.records) {
+        if (candidate.intelId == intelId) { contact = &candidate; break; }
+    }
+    if (!contact) {
+        reject(QStringLiteral("INTEL_NOT_FOUND"), QStringLiteral("当前战位没有该情报"));
+        return;
+    }
+    if (contact->freshness == QLatin1String("archived")) {
+        reject(QStringLiteral("INTEL_ARCHIVED"), QStringLiteral("归档情报不能直接共享"));
         return;
     }
     UnitBase* senderUnit = seatUnit(sender.seatId);
     if (!senderUnit) {
-        sendError(socket, QStringLiteral("SEAT_UNIT_NOT_FOUND"), QStringLiteral("当前战位没有对应的仿真单位"));
+        reject(QStringLiteral("SEAT_UNIT_NOT_FOUND"), QStringLiteral("当前战位没有对应的仿真单位"));
         return;
     }
-    const QJsonArray recipients = payload.value(QStringLiteral("recipientSeatIds")).toArray();
-    for (const QJsonValue& value : recipients) {
-        const QString recipientSeat = value.toString();
+    QStringList acceptedRecipients;
+    for (const QString& recipientSeat : requestedRecipients) {
+        const AuthoritativeRoom::Seat recipient = m_authoritativeRoom.seat(recipientSeat);
+        if (recipient.seatId.isEmpty() || recipient.side != sender.side
+            || recipient.unitId.isEmpty() || !recipient.connected) continue;
+        UnitBase* recipientUnit = seatUnit(recipientSeat);
+        if (!recipientUnit || !StateProjector::canTransmit(m_engine, senderUnit->id(), recipientUnit->id())) continue;
+        acceptedRecipients.append(recipientSeat);
+    }
+    acceptedRecipients.removeDuplicates();
+    if (acceptedRecipients.isEmpty()) {
+        reject(QStringLiteral("COMMUNICATION_LOST"), QStringLiteral("没有当前可达的同阵营战位"));
+        return;
+    }
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    const QJsonArray targetSeats = [&]() { QJsonArray a; for (const auto& id : acceptedRecipients) a.append(id); return a; }();
+    QString persistenceError;
+    if (!recordDurableEvent(QStringLiteral("intelShare"),
+                            QJsonObject{{QStringLiteral("senderSeatId"), sender.seatId},
+                                        {QStringLiteral("senderUserId"), sender.userId},
+                                        {QStringLiteral("requestId"), requestId},
+                                        {QStringLiteral("recipientSeatIds"), targetSeats},
+                                        {QStringLiteral("intelId"), intelId},
+                                        {QStringLiteral("note"), note},
+                                        {QStringLiteral("receivedAt"), now.toString(Qt::ISODateWithMs)}},
+                            &persistenceError)) {
+        reject(QStringLiteral("PERSISTENCE_FAILED"), persistenceError);
+        return;
+    }
+    QList<QPair<QWebSocket*, QJsonObject>> notifications;
+    for (const QString& recipientSeat : acceptedRecipients) {
+        const AuthoritativeRoom::Seat recipient = m_authoritativeRoom.seat(recipientSeat);
+        const IntelLedger::Result result = m_intelLedger.share(
+            sender.seatId, recipientSeat, sender.side, recipient.side, true, intelId, note, now);
+        if (!result.ok) continue;
+        if (contact->type == QLatin1String("sensorContact")
+            && contact->freshness == QLatin1String("live") && contact->actionable
+            && !contact->targetId.isEmpty()) {
+            m_sharedIntel[recipientSeat].insert(contact->targetId);
+        }
         for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
-            if (!it->authenticated || it->seatId != recipientSeat || it->side != sender.side) continue;
-            UnitBase* recipientUnit = seatUnit(it->seatId);
-            if (!recipientUnit) continue;
-            if (!StateProjector::canTransmit(m_engine, senderUnit->id(), recipientUnit->id())) continue;
-            m_sharedIntel[recipientSeat].insert(targetId);
-            sendEnvelope(it.key(), QStringLiteral("intelShare"),
-                         QJsonObject{{QStringLiteral("senderSeatId"), sender.seatId},
-                                     {QStringLiteral("targetId"), targetId},
-                                     {QStringLiteral("sharedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
-                                     {QStringLiteral("note"), payload.value(QStringLiteral("note"))}});
+            if (!it->authenticated || it->seatId != recipientSeat) continue;
+            QJsonObject notification{
+                {QStringLiteral("senderSeatId"), sender.seatId},
+                {QStringLiteral("intelId"), intelId},
+                {QStringLiteral("sharedAt"), now.toString(Qt::ISODateWithMs)},
+                {QStringLiteral("note"), note}};
+            if (!contact->targetId.isEmpty()) {
+                notification[QStringLiteral("targetId")] = contact->targetId;
+            }
+            notifications.append({it.key(), notification});
         }
     }
+    const CommandResult accepted = CommandResult::ok(QStringLiteral("情报共享已确认"));
+    cacheIntelCommandResult(sender.userId, QStringLiteral("shareIntel"), requestId, accepted);
+    if (!persistRoomState(&persistenceError)) {
+        audit(QStringLiteral("persistence"),
+              QJsonObject{{QStringLiteral("event"),
+                           QStringLiteral("intelCheckpointDeferred")},
+                          {QStringLiteral("action"), QStringLiteral("shareIntel")},
+                          {QStringLiteral("requestId"), requestId},
+                          {QStringLiteral("message"), persistenceError}});
+    }
+    sendIntelCommandResult(socket, QStringLiteral("shareIntel"), requestId, accepted);
+    for (const auto& notification : notifications) {
+        if (m_clients.contains(notification.first)) {
+            sendEnvelope(notification.first, QStringLiteral("intelShare"), notification.second);
+        }
+    }
+    broadcastSnapshots();
+}
+
+void GameServer::handleCreateIntelReport(QWebSocket* socket, const QJsonObject& payload,
+                                         const QString& requestId) {
+    ClientSession& sender = m_clients[socket];
+    const auto reject = [this, socket, requestId](const QString& code,
+                                                   const QString& message) {
+        sendIntelCommandResult(socket, QStringLiteral("createIntelReport"), requestId,
+                               CommandResult::reject(code, message));
+    };
+    const Protocol::ValidationResult requestValidation =
+        Protocol::validateClientPayload(QStringLiteral("createIntelReport"), payload);
+    if (!requestValidation.valid) {
+        reject(requestValidation.code, requestValidation.message);
+        return;
+    }
+    if (m_roomStatus == QLatin1String("stopped") || sender.seatId.isEmpty()
+        || sender.roomId != m_roomId || sender.side.isEmpty()) {
+        reject(QStringLiteral("SEAT_REQUIRED"), QStringLiteral("请先选择战位"));
+        return;
+    }
+    const QJsonObject position = payload.value(QStringLiteral("position")).toObject();
+    const double width = m_engine.mapInfo().value(QStringLiteral("widthMeters")).toDouble();
+    const double height = m_engine.mapInfo().value(QStringLiteral("heightMeters")).toDouble();
+    const double x = position.value(QStringLiteral("x")).toDouble(qQNaN());
+    const double y = position.value(QStringLiteral("y")).toDouble(qQNaN());
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0.0 || y < 0.0 || x > width || y > height) {
+        reject(QStringLiteral("MAP_BOUNDS"), QStringLiteral("情报位置超出权威地图范围"));
+        return;
+    }
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    const QString category = payload.value(QStringLiteral("type")).toString();
+    const QString title = payload.value(QStringLiteral("title")).toString();
+    const QString note = payload.value(QStringLiteral("note")).toString();
+    QString persistenceError;
+    if (!recordDurableEvent(QStringLiteral("intelReport"),
+                            QJsonObject{{QStringLiteral("seatId"), sender.seatId},
+                                        {QStringLiteral("userId"), sender.userId},
+                                        {QStringLiteral("requestId"), requestId},
+                                        {QStringLiteral("type"), category},
+                                        {QStringLiteral("title"), title},
+                                        {QStringLiteral("position"), position},
+                                        {QStringLiteral("note"), note},
+                                        {QStringLiteral("receivedAt"), now.toString(Qt::ISODateWithMs)}},
+                            &persistenceError)) {
+        reject(QStringLiteral("PERSISTENCE_FAILED"), persistenceError);
+        return;
+    }
+    const IntelLedger::Result result = m_intelLedger.createManualReport(
+        sender.seatId, category, title, position, note, now);
+    if (!result.ok) {
+        reject(result.code, QStringLiteral("人工情报报告被拒绝"));
+        return;
+    }
+    const CommandResult accepted = CommandResult::ok(QStringLiteral("人工情报报告已确认"));
+    cacheIntelCommandResult(sender.userId, QStringLiteral("createIntelReport"), requestId,
+                            accepted);
+    if (!persistRoomState(&persistenceError)) {
+        audit(QStringLiteral("persistence"),
+              QJsonObject{{QStringLiteral("event"),
+                           QStringLiteral("intelCheckpointDeferred")},
+                          {QStringLiteral("action"),
+                           QStringLiteral("createIntelReport")},
+                          {QStringLiteral("requestId"), requestId},
+                          {QStringLiteral("message"), persistenceError}});
+    }
+    sendIntelCommandResult(socket, QStringLiteral("createIntelReport"), requestId, accepted);
+    broadcastSnapshots();
+}
+
+void GameServer::handleRequestIntelHistory(QWebSocket* socket, const QJsonObject& payload,
+                                           const QString& requestId) {
+    const ClientSession& session = m_clients.value(socket);
+    const auto reject = [this, socket, requestId](const QString& code,
+                                                   const QString& message) {
+        sendIntelCommandResult(socket, QStringLiteral("requestIntelHistory"), requestId,
+                               CommandResult::reject(code, message));
+    };
+    if (session.seatId.isEmpty() || session.observer) {
+        reject(QStringLiteral("PERMISSION_DENIED"), QStringLiteral("观察员不能查询战位私有情报台账"));
+        return;
+    }
+    Protocol::IntelHistoryQuery query;
+    const Protocol::ValidationResult validation = Protocol::fromJson(payload, &query);
+    if (!validation.valid) {
+        reject(validation.code, validation.message);
+        return;
+    }
+    const Protocol::IntelHistoryPage page = m_intelLedger.historyPage(session.seatId, query);
+    sendEnvelope(socket, QStringLiteral("intelHistoryPage"), page.toJson());
+    sendIntelCommandResult(socket, QStringLiteral("requestIntelHistory"), requestId,
+                           CommandResult::ok(QStringLiteral("情报历史查询已确认")));
 }
 
 void GameServer::handleMapMark(QWebSocket* socket, const QJsonObject& payload) {
@@ -3111,7 +3444,7 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
     }
     if (action == QLatin1String("service")) {
         UnitBase* commandPost = m_engine.unit(unit->cpId());
-        if (!commandPost || !commandPost->alive()
+        if (unit->kind() == UnitKind::CommandPost || !commandPost || !commandPost->alive()
             || commandPost->kind() != UnitKind::CommandPost
             || commandPost->side() != unit->side()
             || unit->pos().distanceTo2D(commandPost->pos())
@@ -3471,6 +3804,7 @@ bool GameServer::persistRoomState(QString* error) {
                         {QStringLiteral("result"), m_commandResults.value(key)}});
     }
     checkpoint.mapMarks = m_mapMarks;
+    checkpoint.intelLedger = m_intelLedger.toJson();
     checkpoint.authoritativeRoom = m_authoritativeRoom.toJson();
     checkpoint.phase = m_phase;
     checkpoint.redReady = m_redReady;
@@ -3631,6 +3965,7 @@ bool GameServer::restoreRoomState(QString* error) {
         m_commandResults.insert(key, result);
     }
     m_mapMarks = checkpoint.mapMarks;
+    if (!m_intelLedger.restore(checkpoint.intelLedger, error)) return false;
     if (!checkpoint.authoritativeRoom.isEmpty()
         && !m_authoritativeRoom.restore(checkpoint.authoritativeRoom, error)) return false;
     m_roomMode = m_authoritativeRoom.mode();
@@ -3805,6 +4140,58 @@ bool GameServer::applyDurableEvent(const QString& kind, const QJsonObject& paylo
         }
         return true;
     }
+    if (kind == QLatin1String("intelReport")) {
+        const QDateTime received = QDateTime::fromString(
+            payload.value(QStringLiteral("receivedAt")).toString(), Qt::ISODateWithMs);
+        const IntelLedger::Result result = m_intelLedger.createManualReport(
+            payload.value(QStringLiteral("seatId")).toString(),
+            payload.value(QStringLiteral("type")).toString(),
+            payload.value(QStringLiteral("title")).toString(),
+            payload.value(QStringLiteral("position")).toObject(),
+            payload.value(QStringLiteral("note")).toString(), received.isValid()
+                ? received : QDateTime::currentDateTimeUtc());
+        if (!result.ok) {
+            if (error) *error = QStringLiteral("情报报告重放失败: %1").arg(result.code);
+            return false;
+        }
+        const qint64 userId = payload.value(QStringLiteral("userId")).toInteger();
+        const QString requestId = payload.value(QStringLiteral("requestId")).toString();
+        if (userId > 0 && !requestId.isEmpty()) {
+            cacheIntelCommandResult(userId, QStringLiteral("createIntelReport"), requestId,
+                                    CommandResult::ok(QStringLiteral("人工情报报告已确认")));
+        }
+        return true;
+    }
+    if (kind == QLatin1String("intelShare")) {
+        const QString senderSeat = payload.value(QStringLiteral("senderSeatId")).toString();
+        const QDateTime received = QDateTime::fromString(
+            payload.value(QStringLiteral("receivedAt")).toString(), Qt::ISODateWithMs);
+        const AuthoritativeRoom::Seat sourceSeat = m_authoritativeRoom.seat(senderSeat);
+        for (const QJsonValue& value : payload.value(QStringLiteral("recipientSeatIds")).toArray()) {
+            const QString recipientSeat = value.toString();
+            const AuthoritativeRoom::Seat targetSeat = m_authoritativeRoom.seat(recipientSeat);
+            const UnitBase* sourceUnit = seatUnit(senderSeat);
+            const UnitBase* targetUnit = seatUnit(recipientSeat);
+            const bool reachable = sourceUnit && targetUnit
+                && StateProjector::canTransmit(m_engine, sourceUnit->id(), targetUnit->id());
+            const IntelLedger::Result result = m_intelLedger.share(
+                senderSeat, recipientSeat, sourceSeat.side, targetSeat.side, reachable,
+                payload.value(QStringLiteral("intelId")).toString(),
+                payload.value(QStringLiteral("note")).toString(),
+                received.isValid() ? received : QDateTime::currentDateTimeUtc());
+            if (!result.ok) {
+                if (error) *error = QStringLiteral("情报共享重放失败: %1").arg(result.code);
+                return false;
+            }
+        }
+        const qint64 userId = payload.value(QStringLiteral("senderUserId")).toInteger();
+        const QString requestId = payload.value(QStringLiteral("requestId")).toString();
+        if (userId > 0 && !requestId.isEmpty()) {
+            cacheIntelCommandResult(userId, QStringLiteral("shareIntel"), requestId,
+                                    CommandResult::ok(QStringLiteral("情报共享已确认")));
+        }
+        return true;
+    }
     if (error) *error = QStringLiteral("未知持久化事件类型: %1").arg(kind);
     return false;
 }
@@ -3922,6 +4309,7 @@ GameServer::RoomStateBackup GameServer::captureRoomState() const {
     backup.blueReady = m_blueReady;
     backup.mapMarks = m_mapMarks;
     backup.sharedIntel = m_sharedIntel;
+    backup.intelLedger = m_intelLedger.toJson();
     backup.chatHistory = m_chatHistory;
     backup.chatSequence = m_chatSequence;
     backup.commandResults = m_commandResults;
@@ -3979,6 +4367,10 @@ bool GameServer::restoreRoomStateBackup(const RoomStateBackup& backup, QString* 
     m_blueReady = backup.blueReady;
     m_mapMarks = backup.mapMarks;
     m_sharedIntel = backup.sharedIntel;
+    if (!m_intelLedger.restore(backup.intelLedger, &localError)) {
+        if (error) *error = localError;
+        return false;
+    }
     m_chatHistory = backup.chatHistory;
     m_chatSequence = backup.chatSequence;
     m_commandResults = backup.commandResults;
@@ -4025,6 +4417,7 @@ bool GameServer::resetAuthoritativeRuntime(const QString& operationId, QString* 
         m_mapMarks = {};
         m_mapMarkRateWindows.clear();
         m_sharedIntel.clear();
+        m_intelLedger.clear();
         m_observerTrajectories.clear();
         m_nextObserverTrajectorySampleAt = 0.0;
         m_chatHistory = {};
@@ -4514,6 +4907,8 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
         state.movable = unit->movable();
         state.x = unit->pos().x;
         state.y = unit->pos().y;
+        state.collisionRadius = unit->collisionRadius();
+        state.collisionHalfHeight = unit->collisionHalfHeight();
         state.speed = unit->speed();
         state.commandedSpeed = unit->baseSpeed();
         state.cruiseSpeed = cruiseSpeeds.value(seat.unitId, state.commandedSpeed);
@@ -4541,7 +4936,8 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
         if (commandPost) {
             state.commandPostX = commandPost->pos().x;
             state.commandPostY = commandPost->pos().y;
-            state.serviceEligible = state.commandPostAlive
+            state.serviceEligible = unit->kind() != UnitKind::CommandPost
+                && state.commandPostAlive
                 && unit->pos().distanceTo2D(commandPost->pos())
                     <= SimulationEngine::kServiceRadiusMeters;
         }
@@ -5110,6 +5506,8 @@ void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
         const QJsonObject map = m_engine.mapInfo();
         const double mapWidth = map.value(QStringLiteral("widthMeters")).toDouble();
         const double mapHeight = map.value(QStringLiteral("heightMeters")).toDouble();
+        const AiKnowledgeState currentKnowledge = buildAiKnowledge(
+            latestStates, m_engine.simTime(), RulesAi::parameters(m_aiDifficulty));
         bool valid = result.plan.sourceStateRevision > 0
             && result.plan.sourceStateRevision == context.sourceStateRevision
             && result.plan.matchGeneration == context.matchGeneration
@@ -5120,9 +5518,14 @@ void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
                 const auto state = latestBySeat.constFind(objective.seatId);
                 if (state == latestBySeat.cend()
                     || !state->alive || !state->movable
-                    || state->kind == QLatin1String("commandpost")
                     || objectiveSeats.contains(objective.seatId)
                     || objective.validUntil + 1e-9 < m_engine.simTime()) {
+                    valid = false;
+                    break;
+                }
+                if (state->kind == QLatin1String("commandpost")
+                    && (objective.action != QLatin1String("relocate")
+                        || !currentKnowledge.commandPostThreat)) {
                     valid = false;
                     break;
                 }
@@ -5130,9 +5533,15 @@ void GameServer::handleAiPlanResult(const AiPlanRequestContext& context,
                 const bool movement = objective.action == QLatin1String("search")
                     || objective.action == QLatin1String("patrol")
                     || objective.action == QLatin1String("guard")
-                    || objective.action == QLatin1String("jam");
+                    || objective.action == QLatin1String("jam")
+                    || objective.action == QLatin1String("relocate");
                 if (objective.action == QLatin1String("attack")
                     && state->kind != QLatin1String("attackuav")) {
+                    valid = false;
+                    break;
+                }
+                if (objective.action == QLatin1String("relocate")
+                    && state->kind != QLatin1String("commandpost")) {
                     valid = false;
                     break;
                 }
@@ -5300,7 +5709,6 @@ void GameServer::runAiDecision() {
             request.mapHeight = map.value(QStringLiteral("heightMeters")).toDouble();
             for (const AiSeatState& state : states) {
                 if (!state.alive || !state.movable
-                    || state.kind == QLatin1String("commandpost")
                     || !state.seatId.startsWith(QLatin1String("blue_"))) {
                     continue;
                 }
@@ -5679,19 +6087,114 @@ QJsonObject GameServer::snapshotFor(const ClientSession& session, quint64 projec
     // an empty field, so the projection remains valid under that contract.
     if (!session.observer) {
         snapshot[QStringLiteral("mapMarks")] = filteredMapMarks(session);
+        // Unseated authenticated clients have no seat-scoped intelligence
+        // projection. Omitting the field keeps their snapshot in the same
+        // valid wire shape as the pre-seat lifecycle.
+        if (!session.seatId.isEmpty()) {
+            snapshot[QStringLiteral("intelState")] = projectedIntelState(session);
+        }
+    }
+    if (session.schemaVersion == Protocol::LegacySchemaVersion) {
+        snapshot[QStringLiteral("schemaVersion")] = Protocol::LegacySchemaVersion;
+        snapshot.remove(QStringLiteral("intelState"));
     }
     return snapshot;
 }
 
-void GameServer::sendEnvelope(QWebSocket* socket, const QString& type, const QJsonObject& payload) {
-    if (!socket || socket->state() != QAbstractSocket::ConnectedState || !m_clients.contains(socket)) return;
+QStringList GameServer::intelShareTargets(const ClientSession& session) const {
+    QStringList targets;
+    if (session.seatId.isEmpty() || session.side.isEmpty()) return targets;
+    const AuthoritativeRoom::Seat source = m_authoritativeRoom.seat(session.seatId);
+    UnitBase* sourceUnit = seatUnit(session.seatId);
+    if (!sourceUnit || !source.connected) return targets;
+    QStringList seatIds = m_authoritativeRoom.seats().keys();
+    seatIds.sort();
+    for (const QString& seatId : seatIds) {
+        const AuthoritativeRoom::Seat candidate = m_authoritativeRoom.seat(seatId);
+        if (candidate.seatId.isEmpty() || candidate.seatId == session.seatId
+            || candidate.side != source.side || !candidate.connected || candidate.unitId.isEmpty()) continue;
+        UnitBase* destination = seatUnit(seatId);
+        if (destination && StateProjector::canTransmit(m_engine, sourceUnit->id(), destination->id())) {
+            targets.append(seatId);
+        }
+    }
+    return targets;
+}
+
+QJsonObject GameServer::projectedIntelState(const ClientSession& session) const {
+    if (session.observer || session.seatId.isEmpty()) return {};
+    return m_intelLedger.projectedState(session.seatId, intelShareTargets(session)).toJson();
+}
+
+void GameServer::refreshIntelLedger() {
+    if (m_roomId.isEmpty()) return;
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    bool changed = m_intelLedger.advance(now) > 0;
+    QStringList seatIds = m_authoritativeRoom.seats().keys();
+    seatIds.sort();
+    for (const QString& seatId : seatIds) {
+        const AuthoritativeRoom::Seat seat = m_authoritativeRoom.seat(seatId);
+        if (seat.side.isEmpty() || seat.unitId.isEmpty() || !seat.connected) continue;
+        const QSet<QString> visible = StateProjector::sensorVisibleUnitIds(
+            m_engine, seatId, seat.unitId);
+        for (const QString& targetId : visible) {
+            UnitBase* target = m_engine.unit(targetId);
+            UnitBase* source = m_engine.unit(seat.unitId);
+            if (!target || !source || !target->alive() || target->sideStr() == seat.side) continue;
+            const QJsonObject runtime = m_engine.unitSnapshot(targetId);
+            const QJsonArray coordinates = runtime.value(QStringLiteral("position")).toArray();
+            if (coordinates.size() < 2) continue;
+            const QJsonObject position{{QStringLiteral("x"), coordinates.at(0)},
+                                       {QStringLiteral("y"), coordinates.at(1)},
+                                       {QStringLiteral("alt"), coordinates.size() > 2 ? coordinates.at(2) : QJsonValue(0.0)}};
+            const QJsonObject known{{QStringLiteral("callsign"), runtime.value(QStringLiteral("callsign"))},
+                                    {QStringLiteral("kind"), runtime.value(QStringLiteral("kind"))},
+                                    {QStringLiteral("side"), runtime.value(QStringLiteral("side"))}};
+            const IntelLedger::Result result = m_intelLedger.observeSensor(
+                seatId, targetId, known, position, source->id(), now);
+            changed = changed || result.changed;
+        }
+    }
+    m_sharedIntel.clear();
+    for (const QString& seatId : seatIds) {
+        for (const auto& contact : m_intelLedger.state(seatId).records) {
+            if (contact.type == QLatin1String("sensorContact")
+                && contact.freshness == QLatin1String("live") && contact.actionable
+                && !contact.targetId.isEmpty()) {
+                m_sharedIntel[seatId].insert(contact.targetId);
+            }
+        }
+    }
+    if (changed) persistRoomState();
+}
+
+bool GameServer::sendEnvelope(QWebSocket* socket, const QString& type,
+                              const QJsonObject& payload) {
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState
+        || !m_clients.contains(socket)) return false;
     if (socket->bytesToWrite() > kMaxPendingBytes) {
         socket->close(QWebSocketProtocol::CloseCodeTooMuchData,
                       QStringLiteral("客户端接收速度过慢"));
-        return;
+        return false;
     }
     ClientSession& session = m_clients[socket];
-    const QJsonObject envelope = Protocol::makeServerEnvelope(type, ++session.sequence, payload);
+    const QJsonObject wirePayload = payloadForWireVersion(type, payload, session.schemaVersion);
+    if (wirePayload.isEmpty() && type == QLatin1String("intelHistoryPage")) return false;
+    const QJsonObject envelope = Protocol::makeServerEnvelopeForVersion(
+        type, session.sequence + 1, wirePayload, session.protocolVersion, session.schemaVersion);
+    const Protocol::ValidationResult validation = Protocol::validateServerEnvelopeForVersion(
+        envelope);
+    if (!validation.valid) {
+        audit(QStringLiteral("protocol"),
+              QJsonObject{{QStringLiteral("event"), QStringLiteral("outgoingMessageRejected")},
+                          {QStringLiteral("type"), type},
+                          {QStringLiteral("code"), validation.code},
+                          {QStringLiteral("message"), validation.message},
+                          {QStringLiteral("protocolVersion"), session.protocolVersion},
+                          {QStringLiteral("schemaVersion"), session.schemaVersion},
+                          {QStringLiteral("user"), session.username}});
+        return false;
+    }
     const QByteArray encoded = QJsonDocument(envelope).toJson(QJsonDocument::Compact);
     if (encoded.size() > Protocol::MaxServerMessageBytes) {
         audit(QStringLiteral("security"),
@@ -5701,8 +6204,9 @@ void GameServer::sendEnvelope(QWebSocket* socket, const QString& type, const QJs
                           {QStringLiteral("user"), session.username}});
         socket->close(QWebSocketProtocol::CloseCodeTooMuchData,
                       QStringLiteral("服务器状态快照超过大小限制"));
-        return;
+        return false;
     }
+    ++session.sequence;
     socket->sendTextMessage(QString::fromUtf8(encoded));
     if (type != QLatin1String("snapshot") && type != QLatin1String("delta")
         && type != QLatin1String("pong")) {
@@ -5712,6 +6216,7 @@ void GameServer::sendEnvelope(QWebSocket* socket, const QString& type, const QJs
                                                        {QStringLiteral("role"), session.role},
                                                        {QStringLiteral("summary"), messageSummary(type, payload)}});
     }
+    return true;
 }
 
 void GameServer::sendError(QWebSocket* socket, const QString& code, const QString& message,
@@ -5761,12 +6266,46 @@ void GameServer::sendCommandResult(QWebSocket* socket, const QString& commandId,
     sendEnvelope(socket, QStringLiteral("commandResult"), payload);
 }
 
-void GameServer::sendFullSnapshot(QWebSocket* socket) {
-    if (!socket || !m_clients.contains(socket)) return;
+void GameServer::cacheIntelCommandResult(qint64 userId, const QString& action,
+                                         const QString& requestId,
+                                         const CommandResult& result) {
+    if (userId <= 0 || requestId.isEmpty() || !result.accepted) return;
+    const QString key = intelRequestCacheKey(userId, action, requestId);
+    if (m_commandResults.contains(key)) return;
+    QJsonObject payload = result.toJson();
+    payload[QStringLiteral("commandId")] = requestId;
+    payload[QStringLiteral("serverTime")] = m_engine.simTime();
+    m_commandResultOrder.append(key);
+    m_commandResults.insert(key, payload);
+    while (m_commandResultOrder.size() > 2048) {
+        m_commandResults.remove(m_commandResultOrder.takeFirst());
+    }
+}
+
+void GameServer::sendIntelCommandResult(QWebSocket* socket, const QString& action,
+                                        const QString& requestId,
+                                        const CommandResult& result) {
+    if (requestId.isEmpty()) return;
+    const qint64 userId = m_clients.contains(socket) ? m_clients.value(socket).userId : 0;
+    if (result.accepted) cacheIntelCommandResult(userId, action, requestId, result);
+    const QString key = intelRequestCacheKey(userId, action, requestId);
+    const QJsonObject payload = result.accepted && m_commandResults.contains(key)
+        ? m_commandResults.value(key)
+        : QJsonObject{{QStringLiteral("accepted"), result.accepted},
+                      {QStringLiteral("code"), result.code},
+                      {QStringLiteral("message"), result.message},
+                      {QStringLiteral("commandId"), requestId},
+                      {QStringLiteral("serverTime"), m_engine.simTime()}};
+    sendEnvelope(socket, QStringLiteral("commandResult"), payload);
+}
+
+bool GameServer::sendFullSnapshot(QWebSocket* socket) {
+    if (!socket || !m_clients.contains(socket)) return false;
     ClientSession& session = m_clients[socket];
     const QJsonObject snapshot = snapshotFor(session);
-    sendEnvelope(socket, QStringLiteral("snapshot"), snapshot);
+    if (!sendEnvelope(socket, QStringLiteral("snapshot"), snapshot)) return false;
     session.lastSnapshot = snapshot;
+    return true;
 }
 
 void GameServer::closeRoomSessions(const QString& message) {
@@ -5798,6 +6337,7 @@ void GameServer::closeRoomSessions(const QString& message) {
 }
 
 void GameServer::broadcastSnapshots(bool forceFull) {
+    refreshIntelLedger();
     const quint64 candidateRevision = m_stateRevision + 1;
     QHash<QString, QJsonObject> projectedByGroup;
     QHash<QWebSocket*, QJsonObject> currentSnapshots;
@@ -5861,14 +6401,27 @@ void GameServer::broadcastSnapshots(bool forceFull) {
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it->authenticated) continue;
         const QJsonObject current = currentSnapshots.value(it.key());
+        bool sent = false;
         if (!forceFull && !it->lastSnapshot.isEmpty()
             && StateDelta::canCreate(it->lastSnapshot, current)) {
             const QJsonObject delta = StateDelta::create(it->lastSnapshot, current);
-            sendEnvelope(it.key(), QStringLiteral("delta"), delta);
+            const QJsonObject candidateEnvelope = Protocol::makeServerEnvelopeForVersion(
+                QStringLiteral("delta"), 1, delta, it->protocolVersion, it->schemaVersion);
+            if (!delta.isEmpty()
+                && Protocol::validateServerEnvelopeForVersion(candidateEnvelope).valid) {
+                sent = sendEnvelope(it.key(), QStringLiteral("delta"), delta);
+                if (!sent) sent = sendFullSnapshot(it.key());
+            } else {
+                // A projection that cannot be encoded as a valid delta must
+                // never reach the client. Re-establish its complete baseline.
+                sent = sendFullSnapshot(it.key());
+            }
         } else {
-            sendEnvelope(it.key(), QStringLiteral("snapshot"), current);
+            sent = sendEnvelope(it.key(), QStringLiteral("snapshot"), current);
         }
-        it->lastSnapshot = current;
+        // A failed send must leave the previous baseline intact so the next
+        // broadcast can retry a full snapshot or a delta from known state.
+        if (sent) it->lastSnapshot = current;
     }
 }
 
