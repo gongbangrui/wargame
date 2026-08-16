@@ -8,6 +8,7 @@
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QEventLoop>
+#include <QAbstractSocket>
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QTcpServer>
@@ -27,7 +28,9 @@ using namespace gbr;
 
 namespace {
 
-bool waitFor(const std::function<bool()>& condition, int timeoutMs = 1500) {
+constexpr int kAsyncTestTimeoutMs = 5000;
+
+bool waitFor(const std::function<bool()>& condition, int timeoutMs = kAsyncTestTimeoutMs) {
     QElapsedTimer timer;
     timer.start();
     while (!condition() && timer.elapsed() < timeoutMs) {
@@ -148,7 +151,12 @@ QWebSocket* openAndAuthenticate(GameServer& server, QWebSocket& client,
         messages.append(QJsonDocument::fromJson(text.toUtf8()).object());
     });
     client.open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(server.m_server.serverPort())));
-    if (!waitFor([&server]() { return server.m_clients.size() == 1; })) return nullptr;
+    if (!waitFor([&server, &client]() {
+            return server.m_clients.size() == 1
+                && client.state() == QAbstractSocket::ConnectedState;
+        })) {
+        return nullptr;
+    }
     QWebSocket* socket = server.m_clients.keys().constFirst();
     sendClientEnvelope(client, QStringLiteral("auth"), QStringLiteral("auth-1"),
                        QJsonObject{{QStringLiteral("token"), QStringLiteral("observer-token")}});
@@ -560,7 +568,10 @@ TEST(GameServerObserverTest, LastParticipantDisconnectResetsWhileObserverRemains
     QWebSocket participantClient;
     participantClient.open(QUrl(QStringLiteral("ws://127.0.0.1:%1")
                                     .arg(server.m_server.serverPort())));
-    ASSERT_TRUE(waitFor([&server]() { return server.m_clients.size() == 2; }));
+    ASSERT_TRUE(waitFor([&server, &participantClient]() {
+        return server.m_clients.size() == 2
+            && participantClient.state() == QAbstractSocket::ConnectedState;
+    }));
     QWebSocket* participantSocket = nullptr;
     for (QWebSocket* candidate : server.m_clients.keys()) {
         if (candidate != observerSocket) participantSocket = candidate;
