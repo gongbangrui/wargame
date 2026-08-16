@@ -46,10 +46,10 @@ jobs:
           version: 6.10.1
           host: linux
           target: desktop
-          arch: gcc_64
+          arch: linux_gcc_64
           modules: qtwebsockets
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+        run: sudo apt-get update && sudo apt-get install -y ninja-build qtkeychain-qt6-dev
       - name: Configure Debug
         run: cmake --preset debug
       - name: Configure Sanitizers
