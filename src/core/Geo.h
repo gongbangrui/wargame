@@ -122,6 +122,18 @@ inline QPointF latLonToMeters(double lat, double lon) {
     return {mx, my};
 }
 
+/// @brief Convert Mercator meters back to latitude/longitude degrees.
+inline GeoCoord metersToLatLon(double mx, double my) {
+    if (!std::isfinite(mx) || !std::isfinite(my)) return {};
+    const double lon = std::clamp(mx / kOriginShift * 180.0, -180.0, 180.0);
+    const double normalized = std::clamp(my / kOriginShift, -1.0, 1.0);
+    const double lat = std::clamp(180.0 / M_PI
+                                      * (2.0 * std::atan(std::exp(normalized * M_PI))
+                                         - M_PI / 2.0),
+                                  -85.05112878, 85.05112878);
+    return {lat, lon};
+}
+
 /// @brief Convert Mercator meters to tile X/Y at a given zoom level.
 inline void metersToTile(double mx, double my, int zoom, int& tx, int& ty) {
     int shift = safeZoomShift(zoom);

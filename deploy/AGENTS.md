@@ -21,7 +21,7 @@
 - Runtime configuration comes from the managed installation root `.env` with mode `0600`; replaceable source lives under `current/`, backups under `backups/`, and the `.wargame-install` marker identifies a managed root. Never commit runtime configuration. Use absolute Compose/env/project paths from the installed root.
 - Install/update scripts may install packages, write `.env`, rebuild images, recreate containers and enable services. Verify target host, Compose project and backup before running.
 - `reset-room.sh` requires explicit confirmation and must back up `/data` before removing room checkpoint/log/status files. `uninstall-server.sh --purge-data` and `--remove-config` are destructive.
-- `package-one-click.sh` must emit a deterministic archive plus `.sha256` sidecar, include `release-manifest.env` for the v6/schema 6 three-end contract, and exclude every `.env` variant, databases, JSONL, checkpoints, logs, backups, build outputs and other runtime secrets. `QUICK_START.md` is the package-local fresh-host guide.
+- `package-one-click.sh` must emit a deterministic archive plus `.sha256` sidecar, include `release-manifest.env` for the v7/schema 7 three-end contract, and exclude every `.env` variant, databases, JSONL, checkpoints, logs, backups, build outputs and other runtime secrets. `QUICK_START.md` is the package-local fresh-host guide.
 - `install-server.sh` accepts a source directory or validated archive through `--source`, stages it beside `current/`, and preserves the installed `.env`, backups and named volume across updates. Failed activation keeps the previous `current/` usable.
 - Keep production behind the documented network/reverse-proxy boundary; evaluate the high-risk web-shell setting explicitly.
 

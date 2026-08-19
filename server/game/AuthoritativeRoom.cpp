@@ -592,6 +592,21 @@ AuthoritativeRoom::Result AuthoritativeRoom::deploy(qint64 commanderUserId,
     return success();
 }
 
+AuthoritativeRoom::Result AuthoritativeRoom::deployInitial(const QString& seatId,
+                                                           const GeoPos& position) {
+    if (m_phase != QLatin1String("preparing") || !m_seats.contains(seatId)
+        || !std::isfinite(position.x) || !std::isfinite(position.y)
+        || !std::isfinite(position.alt) || position.x < 0.0 || position.y < 0.0) {
+        return failure(QStringLiteral("INVALID_DEPLOYMENT"));
+    }
+    Seat& seat = m_seats[seatId];
+    seat.position = position;
+    seat.deployed = true;
+    seat.ready = false;
+    seat.revision = m_revision + 1;
+    return success();
+}
+
 AuthoritativeRoom::Result AuthoritativeRoom::setReady(qint64 userId, bool ready) {
     const QString current = seatForUser(userId);
     if (current.isEmpty() || (ready && !m_seats.value(current).deployed)) {
@@ -798,6 +813,9 @@ QJsonArray AuthoritativeRoom::runtimeUnits() const {
         if (!seat.deployed || seat.unitId.isEmpty()) continue;
         ScenarioUnit unit = m_templates.value(seat.selectedTemplate);
         unit.id = seat.unitId;
+        // Template DTOs can carry the same generated URN for every seat.  A
+        // deployed runtime identity must be unique and stable with its seat.
+        unit.vmfUrn = QStringLiteral("urn:gbr:wargame:unit:%1").arg(unit.id);
         unit.side = seat.side;
         unit.pos = seat.position;
         if (!seat.unitName.isEmpty()) {
@@ -805,7 +823,7 @@ QJsonArray AuthoritativeRoom::runtimeUnits() const {
         } else if (seat.side == QLatin1String("blue")) {
             unit.callsign.replace(QStringLiteral("红方"), QStringLiteral("蓝方"));
         }
-        units.append(ScenarioIo::toJson(Scenario{ScenarioMap{}, {unit}, {}})
+        units.append(ScenarioIo::toJson(Scenario{ScenarioMap{}, CommunicationPolicy{}, {unit}, {}})
                          .value(QStringLiteral("units")).toArray().at(0));
     }
     return units;

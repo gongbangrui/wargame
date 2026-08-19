@@ -11,6 +11,7 @@
 | `check-source-format.sh` | Git | Trailing whitespace and diff checks |
 | `verify-test-baseline.sh` | Two configured builds | Debug/Sanitizer CTest set parity |
 | `network-smoke.mjs` | Node, account/game services, admin secret | Auth, rooms, seats, visibility and commands |
+| `vmf-guided-strike-smoke.mjs` | Node, VMF-enabled account/game services, admin secret, `vmf_encode` (or `VMF_FIXTURES_ONLY=1` for offline fixtures) | VMF catalog mapping, guided-strike workflow, ACK, duplicate/role rejection and observer redaction |
 | `room-hosting-contract.mjs` | Node, deployed services, admin secret | Room hosting lifecycle |
 | `verify-docker-recovery.sh` | Docker Compose, ports | Isolated smoke, stop, backup, restore and restart |
 | `build-release.sh` | Qt 6.10, Qt 6.4 standalone, CMake/Ninja | One release identity for desktop and both server artifacts |

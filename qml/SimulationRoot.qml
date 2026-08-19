@@ -37,6 +37,18 @@ Item {
             root.activePage.autoFitZoom()
     }
 
+    function onlineIdentityLabel() {
+        if (!root.controller) return ""
+        // The username is the authenticated identity.  Display names are
+        // user-editable metadata and must never be used as an identity badge.
+        var identity = String(root.controller.username || "").trim()
+        if (!identity) identity = "未登录"
+        var role = root.controller.isRoomAdmin
+            ? "房间管理员"
+            : root.controller.currentSeatId || "房间大厅"
+        return identity + " · " + role
+    }
+
     function activeCanvas() {
         return root.activePage && root.activePage["canvas"] ? root.activePage["canvas"] : null
     }
@@ -395,9 +407,7 @@ Item {
                 Behavior on color { ColorAnimation { duration: 180 } }
                 Text {
                     id: onlineIdentity; anchors.centerIn: parent
-                text: root.compactTopBar
-                          ? (root.controller.currentSeatId || "未选择战位")
-                          : (root.controller.displayName || root.controller.username) + " · " + (root.controller.currentSeatId || "房间大厅")
+                    text: root.onlineIdentityLabel()
                     elide: Text.ElideRight
                     color: theme.textStrong; font.pixelSize: 11; font.bold: true
                 }
@@ -489,7 +499,10 @@ Item {
                 visible: !root.compactTopBar; text: "快捷键"; onClicked: shortcutHelpDialog.open()
             }
             GhostButton {
-                visible: root.controller.networked && !root.controller.isObserver && !root.compactTopBar
+                visible: root.controller.networked && !root.controller.isObserver
+                         && root.controller.onlineStage !== "roomSelect"
+                         && root.controller.onlineStage !== "roomAdmin"
+                         && root.controller.currentSeatId !== "" && !root.compactTopBar
                 text: {
                     var base = root.controller.currentSeatType === "commander"
                         ? "收件箱 · " + root.controller.chatMessages.length : "通信"

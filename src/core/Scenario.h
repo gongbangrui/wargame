@@ -23,6 +23,9 @@ struct SchedulePoint {
 
 struct ScenarioUnit {
     QString id;
+    /// Stable VMF identity.  Older scenario files may omit it; the loader
+    /// derives a deterministic URN from the unit id.
+    QString vmfUrn;
     QString callsign;
     QString kind;
     QString side;
@@ -73,8 +76,21 @@ struct ScenarioMap {
     QString backgroundResource;
 };
 
+struct CommunicationPolicy {
+    /// `native` keeps the pre-VMF JSON message path.  `vmf-design-v1` selects
+    /// the repository's XML/bit-stream profile for design messages.
+    QString format = QStringLiteral("native");
+    QString vmfProfile;
+    double ackTimeoutSec = 3.0;
+    int maxRetries = 2;
+    bool automaticAck = true;
+
+    bool isVmf() const { return format == QLatin1String("vmf-design-v1"); }
+};
+
 struct Scenario {
     ScenarioMap map;
+    CommunicationPolicy communicationPolicy;
     std::vector<ScenarioUnit> units;
     QString notes;
 };
@@ -82,7 +98,7 @@ struct Scenario {
 class ScenarioIo : public QObject {
     Q_OBJECT
 public:
-    static constexpr int SchemaVersion = 4;
+    static constexpr int SchemaVersion = 5;
     static Scenario loadFromFile(const QString& path, QString* err = nullptr);
     static bool saveToFile(const Scenario& s, const QString& path, QString* err = nullptr);
     static QJsonObject toJson(const Scenario& s);

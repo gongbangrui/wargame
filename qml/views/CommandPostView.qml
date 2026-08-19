@@ -466,6 +466,15 @@ Item {
                     UnitPanel { controller: root.controller; editor: root.editor; anchors.fill: parent; anchors.margins: 12; snap: root.snap; interactionEnabled: root.commandsEnabled && root.snap.side === root.side }
                 }
 
+                GuidedStrikeWorkflowPanel {
+                    id: guidedStrikePanel
+                    controller: root.controller
+                    side: root.side
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: visible ? Math.min(370, implicitHeight) : 0
+                    Layout.maximumHeight: 370
+                }
+
                 SectionTitle { text: "事件队列" }
                 Rectangle {
                     Layout.fillWidth: true; Layout.preferredHeight: 130; Layout.minimumHeight: 80; Layout.maximumHeight: 220

@@ -40,12 +40,14 @@ class SimulationController : public QObject {
     Q_PROPERTY(int accountLatencyMs READ accountLatencyMs NOTIFY networkDiagnosticsChanged)
     Q_PROPERTY(int gameLatencyMs READ gameLatencyMs NOTIFY networkDiagnosticsChanged)
     Q_PROPERTY(QString lastCommandId READ lastCommandId NOTIFY commandStatusChanged)
+    Q_PROPERTY(QString lastCommandCode READ lastCommandCode NOTIFY commandStatusChanged)
     Q_PROPERTY(QString lastCommandStatus READ lastCommandStatus NOTIFY commandStatusChanged)
     Q_PROPERTY(QString lastCommandMessage READ lastCommandMessage NOTIFY commandStatusChanged)
     Q_PROPERTY(QStringList serverHistory READ serverHistory NOTIFY serverHistoryChanged)
     Q_PROPERTY(QString username READ username NOTIFY sessionChanged)
     Q_PROPERTY(QString displayName READ displayName NOTIFY sessionChanged)
     Q_PROPERTY(QString userRole READ userRole NOTIFY sessionChanged)
+    Q_PROPERTY(bool isRoomAdmin READ isRoomAdmin NOTIFY sessionChanged)
     Q_PROPERTY(QString serverAddress READ serverAddress NOTIFY sessionChanged)
     Q_PROPERTY(QVariantList onlineRooms READ onlineRooms NOTIFY onlineRoomsChanged)
     Q_PROPERTY(QVariantList onlineSeats READ onlineSeats NOTIFY onlineSeatsChanged)
@@ -76,13 +78,20 @@ class SimulationController : public QObject {
     Q_PROPERTY(QString aiDifficulty READ aiDifficulty NOTIFY roomStateChanged)
     Q_PROPERTY(QString aiEffectiveEngine READ aiEffectiveEngine NOTIFY roomStateChanged)
     Q_PROPERTY(qint64 configVersion READ configVersion NOTIFY roomStateChanged)
+    Q_PROPERTY(QString roomName READ roomName NOTIFY roomStateChanged)
+    Q_PROPERTY(QString roomDescription READ roomDescription NOTIFY roomStateChanged)
+    Q_PROPERTY(QString scenarioId READ scenarioId NOTIFY roomStateChanged)
+    Q_PROPERTY(QJsonObject onlineSeatLimits READ onlineSeatLimits NOTIFY roomStateChanged)
+    Q_PROPERTY(QJsonObject onlineSeatParameters READ onlineSeatParameters NOTIFY roomStateChanged)
     Q_PROPERTY(QString communicationState READ communicationState NOTIFY roomStateChanged)
     Q_PROPERTY(QVariantList chatMessages READ chatMessages NOTIFY chatMessagesChanged)
-    Q_PROPERTY(bool canEditScenario READ canEditScenario NOTIFY sessionChanged)
+    Q_PROPERTY(QString lastCommandAction READ lastCommandAction NOTIFY commandStatusChanged)
+    Q_PROPERTY(bool canEditScenario READ canEditScenario NOTIFY roomStateChanged)
     Q_PROPERTY(bool canEditOwnRoster READ canEditOwnRoster NOTIFY sessionChanged)
     Q_PROPERTY(bool canDirect READ canDirect NOTIFY sessionChanged)
     Q_PROPERTY(QVariantList timeline READ timeline NOTIFY timelineForward)
     Q_PROPERTY(double replayDuration READ replayDuration NOTIFY timelineForward)
+    Q_PROPERTY(QJsonObject vmfWorkflow READ vmfWorkflow NOTIFY vmfWorkflowChanged)
 public:
     explicit SimulationController(QObject* parent = nullptr);
 
@@ -119,12 +128,17 @@ public:
     int accountLatencyMs() const { return m_accountLatencyMs; }
     int gameLatencyMs() const { return m_gameLatencyMs; }
     QString lastCommandId() const { return m_lastCommandId; }
+    QString lastCommandCode() const { return m_lastCommandCode; }
     QString lastCommandStatus() const { return m_lastCommandStatus; }
     QString lastCommandMessage() const { return m_lastCommandMessage; }
     QStringList serverHistory() const { return m_serverHistory; }
     QString username() const { return m_username; }
     QString displayName() const { return m_displayName; }
     QString userRole() const { return m_userRole; }
+    bool isRoomAdmin() const {
+        return isNetworked() && !m_isObserver
+            && m_userRole == QLatin1String("room_admin");
+    }
     QString serverAddress() const { return m_serverAddress; }
     QVariantList onlineRooms() const { return m_onlineRooms; }
     QVariantList onlineSeats() const { return m_onlineSeats; }
@@ -153,15 +167,30 @@ public:
     QString aiDifficulty() const { return m_aiDifficulty; }
     QString aiEffectiveEngine() const { return m_aiEffectiveEngine; }
     qint64 configVersion() const { return m_configVersion; }
+    QString roomName() const { return m_roomName; }
+    QString roomDescription() const { return m_roomDescription; }
+    QString scenarioId() const { return m_scenarioId; }
+    QJsonObject onlineSeatLimits() const { return m_onlineSeatLimits; }
+    QJsonObject onlineSeatParameters() const { return m_onlineSeatParameters; }
     QString communicationState() const { return m_communicationState; }
     QVariantList chatMessages() const { return m_chatMessages; }
+    QString lastCommandAction() const { return m_lastCommandAction; }
     bool canEditScenario() const {
-        return !isNetworked() || (!m_isObserver && m_userRole == QLatin1String("editor"));
+        if (!isNetworked()) return true;
+        if (!isRoomAdmin() || m_currentRoomId.isEmpty()
+            || m_matchPhase != QLatin1String("preparing")) return false;
+        for (const QVariant& value : m_onlineSeats) {
+            if (value.toMap().value(QStringLiteral("occupied")).toBool()) return false;
+        }
+        return true;
     }
-    bool canEditOwnRoster() const { return isNetworked() && !m_isObserver && m_currentSeatType == QLatin1String("commander"); }
+    bool canEditOwnRoster() const { return false; }
     bool canDirect() const { return !isNetworked() || (!m_isObserver && m_currentSeatType == QLatin1String("commander")); }
     QVariantList timeline() const { return isNetworked() ? QVariantList{} : m_engine.timelineForView(); }
     double replayDuration() const { return isNetworked() ? 0.0 : m_engine.replayDuration(); }
+    /// Projected guided-strike state for the focused side.  The QML layer sees
+    /// only this bounded snapshot, never the engine workflow or MessageBus.
+    QJsonObject vmfWorkflow() const;
 
     Q_INVOKABLE void loadDefault();
     Q_INVOKABLE void saveScenario(const QString& path);
@@ -172,6 +201,23 @@ public:
     Q_INVOKABLE void stepOnce();
 
     Q_INVOKABLE void command(const QString& action, const QVariantMap& args);
+
+    /// Explicit VMF guided-strike facade used by local and online QML views.
+    /// Local calls post through the authoritative MessageBus; online calls
+    /// only enqueue a validated VMF envelope and wait for the server event.
+    Q_INVOKABLE QVariantMap reportGuidedStrikeTarget(const QString& reconId,
+                                                     const QString& targetId,
+                                                     const QVariantMap& report = {});
+    Q_INVOKABLE QVariantMap dispatchGuidedStrike(const QString& attackerId,
+                                                 const QString& targetId,
+                                                 const QVariantList& waypoints);
+    Q_INVOKABLE QVariantMap commandGuidedStrikeGroundGuidance(
+        const QString& guideId, const QString& attackerId, const QString& targetId);
+    Q_INVOKABLE QVariantMap confirmGuidedStrikeAttack(
+        const QString& guideId, const QString& attackerId,
+        const QString& targetId, const QVariantList& waypoints);
+    Q_INVOKABLE QVariantMap withdrawGuidedStrike(const QString& attackerId,
+                                                 const QVariantMap& home);
 
     Q_INVOKABLE void saveSetting(const QString& key, const QVariant& value);
     Q_INVOKABLE QVariant loadSetting(const QString& key, const QVariant& defaultValue = QVariant()) const;
@@ -202,6 +248,7 @@ public:
     Q_INVOKABLE void rejectSeatTransfer(qint64 userId, qint64 requestedRevision);
     Q_INVOKABLE void leaveOnlineRoom();
     Q_INVOKABLE void setSeatReady(bool ready);
+    Q_INVOKABLE void updateOnlineRoomConfig(const QVariantMap& config);
     Q_INVOKABLE void deployOnlineUnit(const QString& unitId, const QVariantMap& position);
     Q_INVOKABLE void requestOnlineRedeploy();
     Q_INVOKABLE void redeployOnlineUnit(const QString& seatId);
@@ -294,6 +341,7 @@ signals:
     void chatMessagesChanged();
     void commandStatusChanged();
     void timelineForward();
+    void vmfWorkflowChanged();
 
     void viewModeChanged();
     void focusedSideChanged();
@@ -328,6 +376,11 @@ private:
     void rememberServerAddress(const QString& server);
     QJsonObject scenarioUnitJson(const ScenarioUnit& unit) const;
     bool applyScenarioReplacement(const Scenario& replacement);
+    QString guidedStrikeSide() const;
+    QVariantMap guidedStrikeResult(bool accepted, const QString& code,
+                                   const QString& message,
+                                   const QString& requestId = QString()) const;
+    QVariantMap sendGuidedStrikeVmf(Message message);
 
     SimulationEngine m_engine;
     NetworkClient m_networkClient;
@@ -347,6 +400,8 @@ private:
     int m_accountLatencyMs = -1;
     int m_gameLatencyMs = -1;
     QString m_lastCommandId;
+    QString m_lastCommandCode;
+    QString m_lastCommandAction;
     QString m_lastCommandStatus;
     QString m_lastCommandMessage;
     QStringList m_serverHistory;
@@ -364,10 +419,16 @@ private:
     QString m_aiDifficulty = QStringLiteral("normal");
     QString m_aiEffectiveEngine = QStringLiteral("rules");
     qint64 m_configVersion = 1;
+    QString m_roomName;
+    QString m_roomDescription;
+    QString m_scenarioId = QStringLiteral("default");
+    QJsonObject m_onlineSeatLimits;
+    QJsonObject m_onlineSeatParameters;
     QString m_communicationState = QStringLiteral("disconnected");
     qint64 m_remoteScenarioRevision = -1;
     QVariantList m_remoteMessages;
     QVariantList m_remoteProjectiles;
+    QJsonObject m_remoteVmfWorkflow;
     QVariantList m_chatMessages;
     QVariantList m_onlineRooms;
     QVariantList m_onlineSeats;

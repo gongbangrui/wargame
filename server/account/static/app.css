@@ -144,10 +144,7 @@ td.actions { height: auto; min-height: 56px; padding-block: 8px; white-space: no
 .room-empty { border: 1px solid var(--line); border-radius: 7px; background: #10182099; }
 .user-cell { color: white; font-family: Consolas, monospace; font-weight: 700; }
 .badge { display: inline-flex; align-items: center; min-height: 24px; border-radius: 4px; padding: 0 9px; font-size: 11px; font-weight: 700; }
-.role-director { background: #49391d; color: #f3c869; }
-.role-editor { background: #28364b; color: #92b8e8; }
-.role-red { background: #46252c; color: #ff8d99; }
-.role-blue { background: #1f3848; color: #75c7ef; }
+.role-admin { background: #49391d; color: #f3c869; }
 .role-player { background: #173b3a; color: #75d8c8; }
 .enabled, .disabled { display: inline-flex; align-items: center; gap: 7px; }
 .enabled::before, .disabled::before { content: ""; width: 7px; height: 7px; border-radius: 50%; }
@@ -368,7 +365,7 @@ body.modal-open > #toast { bottom: 104px; }
   #usersPage tbody td::before { display: block; margin-bottom: 4px; color: #718096; font-size: 10px; }
   #usersPage tbody td:nth-child(1)::before { content: "账号"; }
   #usersPage tbody td:nth-child(2)::before { content: "显示名称"; }
-  #usersPage tbody td:nth-child(3)::before { content: "分配方式"; }
+  #usersPage tbody td:nth-child(3)::before { content: "账号角色"; }
   #usersPage tbody td:nth-child(4)::before { content: "状态"; }
   #usersPage tbody td:nth-child(5)::before { content: "更新时间"; }
   #usersPage tbody td:nth-child(5), #usersPage tbody td.actions { grid-column: 1 / -1; }

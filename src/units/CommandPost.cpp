@@ -19,7 +19,8 @@ void CommandPost::onTick(double dt) {
 void CommandPost::onMessage(const Message& m) {
     onMobileMessage(m);
     switch (m.type) {
-    case Message::Type::TargetDetect: {
+    case Message::Type::TargetDetect:
+    case Message::Type::TargetReport: {
         const QString tid = m.payload.value("targetId").toString();
         if (tid.isEmpty()) break;
         if (m_pending.contains(tid) || m_targets.contains(tid)) {

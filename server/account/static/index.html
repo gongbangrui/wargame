@@ -52,7 +52,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>账号</th><th>显示名称</th><th>分配方式</th><th>状态</th><th>更新时间</th><th class="actions">操作</th></tr></thead>
+            <thead><tr><th>账号</th><th>显示名称</th><th>账号角色</th><th>状态</th><th>更新时间</th><th class="actions">操作</th></tr></thead>
             <tbody id="userRows"></tbody>
           </table>
           <div id="emptyState" class="empty hidden">暂无兵棋账号，请先创建账号。</div>
@@ -129,6 +129,7 @@
         <input id="userId" type="hidden">
         <label>用户名<input id="username" minlength="3" maxlength="64" pattern="[A-Za-z0-9_.-]+" autocomplete="off" required><span>仅支持字母、数字、点、横线和下划线</span></label>
         <label>显示名称<input id="displayName" maxlength="64" required></label>
+        <label>账号角色<select id="userRole"><option value="player">普通用户</option><option value="room_admin">房间管理员</option></select><span>房间管理员可在客户端编辑准备阶段的房间与初始阵容。</span></label>
         <label>登录密码<input id="userPassword" type="password" minlength="8" autocomplete="new-password"><span id="passwordHint"></span></label>
         <label class="toggle-line"><input id="enabled" type="checkbox" checked><span class="toggle-ui"></span><span>允许登录</span></label>
         <div class="modal-actions"><button id="modalCancel" type="button" class="secondary">取消</button><button type="submit" class="primary">保存账号</button></div>

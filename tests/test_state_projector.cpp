@@ -80,6 +80,25 @@ TEST(StateProjectorTest, PermissionMatrixIsServerOwned) {
     EXPECT_FALSE(StateProjector::canEditSide(QStringLiteral("red"), QStringLiteral("blue")));
 }
 
+TEST(StateProjectorTest, WorkflowProjectionDropsCheckpointOnlyFields) {
+    const QJsonObject full{{QStringLiteral("taskId"), QStringLiteral("red:guided-strike")},
+                           {QStringLiteral("stage"), QStringLiteral("engaging")},
+                           {QStringLiteral("side"), QStringLiteral("red")},
+                           {QStringLiteral("commandPostId"), QStringLiteral("red_cp")},
+                           {QStringLiteral("targetId"), QStringLiteral("blue_t")},
+                           {QStringLiteral("sequence"), 7},
+                           {QStringLiteral("events"), QJsonArray{QJsonObject{{"stage", "engaging"}}}}};
+
+    const QJsonObject projected = StateProjector::projectWorkflow(full);
+    EXPECT_EQ(projected.value(QStringLiteral("taskId")).toString(),
+              QStringLiteral("red:guided-strike"));
+    EXPECT_EQ(projected.value(QStringLiteral("stage")).toString(), QStringLiteral("engaging"));
+    EXPECT_EQ(projected.value(QStringLiteral("targetId")).toString(), QStringLiteral("blue_t"));
+    EXPECT_FALSE(projected.contains(QStringLiteral("commandPostId")));
+    EXPECT_FALSE(projected.contains(QStringLiteral("sequence")));
+    EXPECT_FALSE(projected.contains(QStringLiteral("events")));
+}
+
 TEST(StateProjectorTest, ProjectsPerUnitActionCapabilitiesWithoutEnemyPrivateState) {
     SimulationEngine engine;
     engine.loadDefaultScenario();

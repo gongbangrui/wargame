@@ -1,0 +1,46 @@
+<MessageContent message="NetworkMonitoring">
+  <Header>
+    <Field name="version">1</Field>
+    <Field name="length">0</Field>
+    <Field name="messageId">100</Field>
+    <Field name="originator">66051</Field>
+    <Field name="destination">263430</Field>
+  </Header>
+  <Body>
+    <DataUnit DFI="4029" DUI="125">1</DataUnit>
+    <DataUnit DFI="4093" DUI="042">1</DataUnit>
+    <DataUnit DFI="4004" DUI="012">1</DataUnit>
+    <Group name="NetworkInfo">
+      <GRI DFI="4045" DUI="001">0</GRI>
+      <DataUnit DFI="4085" DUI="059">11</DataUnit>
+      <Group name="DataCollectionTime">
+        <GRI DFI="4045" DUI="001">0</GRI>
+        <DataUnit DFI="4019" DUI="044">10</DataUnit>
+        <DataUnit DFI="792" DUI="452">10</DataUnit>
+        <DataUnit DFI="797" DUI="449">35</DataUnit>
+        <DataUnit DFI="380" DUI="417">20</DataUnit>
+      </Group>
+      <Group name="NetworkCharacteristics">
+        <GPI DFI="4014" DUI="001">1</GPI>
+        <DataUnit DFI="4093" DUI="044">2</DataUnit>
+        <Group name="NetworkType">
+          <GRI DFI="4045" DUI="001">0</GRI>
+          <DataUnit DFI="4093" DUI="045">1</DataUnit>
+          <Group name="TrafficStatus">
+            <GRI DFI="4045" DUI="001">0</GRI>
+            <DataUnit DFI="4093" DUI="046">1</DataUnit>
+            <DataUnit DFI="4082" DUI="012">9</DataUnit>
+            <DataUnit DFI="4082" DUI="013">7</DataUnit>
+          </Group>
+        </Group>
+        <Field name="ServerId">
+          <FPI DFI="4014" DUI="002">0</FPI>
+        </Field>
+        <DataUnit DFI="4082" DUI="014">2</DataUnit>
+        <Group name="ServerNetworkUsage">
+          <GPI DFI="4014" DUI="001">0</GPI>
+        </Group>
+      </Group>
+    </Group>
+  </Body>
+</MessageContent>

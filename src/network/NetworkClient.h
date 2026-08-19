@@ -49,6 +49,7 @@ public:
     QString createIntelReport(const QVariantMap& position, const QString& type,
                               const QString& title, const QString& note);
     QString requestIntelHistory(const QVariantMap& query = {});
+    QString sendVmfMessage(const QJsonObject& message);
     void cancelIntelHistoryRequests();
     void sendMapMark(const QVariantMap& position, const QString& label,
                      const QStringList& recipientSeatIds = {});
@@ -68,12 +69,14 @@ public:
 signals:
     void stateChanged(const QString& state, const QString& message);
     void authenticated(const QString& username, const QString& displayName,
-                       const QString& seatId, const QString& accountServer);
+                       const QString& role, const QString& seatId,
+                       const QString& accountServer);
     void roomDirectoryReceived(const QJsonArray& rooms);
     void seatStateReceived(const QJsonObject& state);
     void deploymentPromptReceived(const QJsonObject& prompt);
     void intelShareReceived(const QJsonObject& share);
     void intelHistoryPageReceived(const QJsonObject& page);
+    void vmfEventReceived(const QJsonObject& event);
     void transferEventReceived(const QJsonObject& event);
     void snapshotReceived(const QJsonObject& payload);
     void deltaSnapshotReceived(const QJsonObject& payload,

@@ -121,7 +121,7 @@ ADMIN_PASSWORD='管理员密码' node tools/network-smoke.mjs
 - [x] 根项目 Debug 与 ASan/UBSan 构建通过，两套 CTest 均为 `368/368`，测试注册基线一致。
 - [x] 情报聚焦回归在 Debug 与 ASan/UBSan 下均为 `12/12`，覆盖实时可行动攻击候选、人工报告
   可信度、无目标 ID 分享、无毫秒 ISO 时间过滤和台账分页/恢复。
-- [x] 独立 `server/` 使用 Qt 6.4 重建通过；协议保持 v6/schema 6，未引入 Qt Quick 或
+- [x] 独立 `server/` 使用 Qt 6.4 重建通过；协议保持 v7/schema 7，未引入 Qt Quick 或
   QtKeychain 依赖。
 - [x] 账号生命周期、安全、监控和 PVE 共 `48/48` 通过；管理台 Node 契约 `4/4` 通过，五组
   发布包与安装生命周期脚本通过。
@@ -145,7 +145,7 @@ ADMIN_PASSWORD='管理员密码' node tools/network-smoke.mjs
 - [x] Debug 单元、协议、命令结果和恢复测试通过：`133/133`。
 - [x] ASan/UBSan 下 `133/133` 测试通过，无内存与未定义行为报告。
 - [x] 全量 QML lint、源码格式检查和客户端离屏启动通过。
-- [x] 隔离 Docker 网络中的四席位协议 v6/schema 6 冒烟通过，覆盖账号单客户端、战位容量、部署碰撞边界、定向通信、独立视野、情报共享、就绪和管理员开局。
+- [x] 隔离 Docker 网络中的四席位协议 v7/schema 7 冒烟通过，覆盖账号单客户端、战位容量、部署碰撞边界、定向通信、独立视野、情报共享、就绪和管理员开局。
 - [x] 运行态检查点生成、SIGTERM 最终落盘、数据卷备份还原和 `game-server` 容器重启恢复通过。
 
 执行日期：2026-07-19。

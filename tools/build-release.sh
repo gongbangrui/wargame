@@ -18,7 +18,7 @@ usage() {
 Usage: tools/build-release.sh [--version VERSION] [--clean]
 
 Builds appindex, the root-project game server, and the Qt 6.4 standalone
-game server with one v6/schema 6 release identity. Outputs are placed under
+game server with one v7/schema 7 release identity. Outputs are placed under
 dist/release-VERSION unless WARGAME_RELEASE_OUTPUT is set.
 EOF
 }
@@ -69,9 +69,16 @@ cmake -S "$ROOT_DIR" -B "$BUILD_ROOT" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_TESTING=OFF \
   -DWARGAME_BUILD_SERVER=ON \
+  -DWARGAME_BUILD_VMF_TOOLS=ON \
   -DWARGAME_VERSION="$VERSION" \
   -DWARGAME_SOURCE_DIGEST="$SOURCE_DIGEST"
 cmake --build "$BUILD_ROOT" --target appindex wargame_server --parallel
+
+if cmake --build "$BUILD_ROOT" --target help | grep -q 'vmf_design_regression'; then
+  cmake --build "$BUILD_ROOT" --target vmf_design_regression --parallel
+else
+  printf 'VMF design regression: disabled (tinyxml2 was not found)\n'
+fi
 
 cmake -S "$ROOT_DIR/server" -B "$SERVER_BUILD_ROOT" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \

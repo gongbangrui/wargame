@@ -35,6 +35,10 @@ public:
                                                const QString& ownedUnitId = {});
     static QJsonArray filteredMessages(const SimulationEngine& engine, const QString& role,
                                        const QString& ownedUnitId = {});
+    /// Project the durable workflow snapshot to the bounded wire shape. The
+    /// complete snapshot remains server/checkpoint-only because it contains
+    /// event history and sequencing metadata.
+    static QJsonObject projectWorkflow(const QJsonObject& workflow);
     static QJsonObject projectEvent(const SimulationEngine& engine, const QString& role,
                                     const QJsonObject& event,
                                     const QString& ownedUnitId = {});

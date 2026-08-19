@@ -64,6 +64,7 @@ private:
         qint64 userId = 0;
         QString username;
         QString displayName;
+        QString accountRole = QStringLiteral("player");
         QString role;
         QString roomId;
         QString seatId;
@@ -92,13 +93,22 @@ private:
     struct RoomStateBackup {
         QJsonObject authoritativeRoom;
         Scenario scenario;
+        Scenario runInitialScenario;
         QJsonArray runtimeUnits;
         QJsonObject engineState;
+        QJsonObject vmfState;
         double simTime = 0.0;
         bool running = false;
         double speed = 1.0;
         QString phase;
         QString roomStatus;
+        QString roomName;
+        QString roomDescription;
+        QString scenarioId;
+        QHash<QString, int> seatLimits;
+        QHash<QString, QJsonObject> seatParameters;
+        quint64 configVersion = 1;
+        QString lastRoomUpdate;
         bool redReady = false;
         bool blueReady = false;
         QJsonArray mapMarks;
@@ -170,6 +180,7 @@ private:
     void removeClient(QWebSocket* socket);
 
     void handleCommand(QWebSocket* socket, const QJsonObject& payload);
+    void handleRoomConfigCommand(QWebSocket* socket, const QJsonObject& payload);
     void handleControl(QWebSocket* socket, const QJsonObject& payload);
     void handleReady(QWebSocket* socket, const QJsonObject& payload);
     void handleChat(QWebSocket* socket, const QJsonObject& payload);
@@ -192,6 +203,9 @@ private:
                                    const QString& requestId);
     void handleMapMark(QWebSocket* socket, const QJsonObject& payload);
     void handleSetObserverTrajectories(QWebSocket* socket, const QJsonObject& payload);
+    void handleVmfMessage(QWebSocket* socket, const QJsonObject& payload,
+                          const QString& requestId);
+    void handleGeneratedVmfMessage(const QJsonObject& posted);
     void sendSeatDirectory(QWebSocket* socket);
     QString normalizedRole(const ClientSession& session) const;
     bool hasSeatPermission(const ClientSession& session, const QString& action) const;
@@ -199,6 +213,14 @@ private:
     void handleScenarioUpsert(QWebSocket* socket, const QJsonObject& payload);
     void handleScenarioRemove(QWebSocket* socket, const QJsonObject& payload);
     void handleScenarioReplace(QWebSocket* socket, const QJsonObject& payload);
+    bool canManageRoom(const ClientSession& session) const;
+    bool initialPositionForSeat(const QString& seatId, GeoPos* position,
+                                QString* error = nullptr) const;
+    bool applyInitialScenarioState(const Scenario& initialScenario,
+                                   const Scenario& runtimeScenario,
+                                   quint64 scenarioRevision,
+                                   QString* error = nullptr);
+    bool replaceInitialScenario(const Scenario& scenario, QString* error = nullptr);
     void handleFastDdsEnvelope(const QString& topic, const QJsonObject& payload);
     void runAiDecision();
     void applyAiConfiguration(const QJsonObject& config);
@@ -230,6 +252,7 @@ private:
     void broadcastSnapshots(bool forceFull = false);
     bool sendFullSnapshot(QWebSocket* socket);
     void broadcastEvent(const QJsonObject& event, const QString& side = QString());
+    void broadcastVmfEvent(const QJsonObject& event);
     void broadcastChat(const QJsonObject& message);
     void refreshIntelLedger();
     QJsonObject projectedIntelState(const ClientSession& session) const;
@@ -355,6 +378,12 @@ private:
     QHash<QString, QJsonObject> m_commandResults;
     QStringList m_commandResultOrder;
     QString m_recoveryError;
+    QSet<QString> m_vmfMessageIds;
+    QStringList m_vmfMessageIdOrder;
+    // Bus-generated VMF observations are durable inputs during normal
+    // operation, but replay must never append a second event while applying
+    // the original event log.
+    bool m_replayingDurableEvents = false;
     QElapsedTimer m_uptime;
     quint64 m_totalConnections = 0;
     quint64 m_totalDisconnects = 0;
@@ -390,12 +419,15 @@ private:
     QList<QPointer<QWebSocket>> m_roomListWaiters;
     QString m_roomId = QStringLiteral("main");
     QString m_roomName = QStringLiteral("主推演室");
+    QString m_roomDescription;
+    QString m_scenarioId = QStringLiteral("default");
     QString m_roomStatus = QStringLiteral("stopped");
     bool m_observerJoinAllowed = false;
     QString m_roomMode = QStringLiteral("pvp");
     QString m_aiDifficulty = QStringLiteral("normal");
     quint64 m_configVersion = 1;
     QString m_lastRoomUpdate;
+    QSet<QString> m_roomConfigCommandsInFlight;
     QString m_lifecycleOperationInFlight;
     QString m_lifecycleOperationAction;
     quint64 m_lifecycleOperationRequestedRevision = 0;

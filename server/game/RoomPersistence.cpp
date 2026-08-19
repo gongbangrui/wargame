@@ -35,7 +35,11 @@ constexpr int kCheckpointSchemaVersion = 6;
 constexpr int kOldestSupportedCheckpointSchemaVersion = 2;
 constexpr int kLegacyCheckpointProtocolVersion = 4;
 constexpr int kPreviousCheckpointProtocolVersion = 5;
-constexpr int kCurrentCheckpointProtocolVersion = Protocol::Version;
+// Checkpoint files retain the v6 storage contract while live WebSocket/DDS
+// envelopes move to protocol v7.  This keeps rollback/recovery compatible
+// with already-issued room data; the checkpoint schema carries the new
+// scenario communication policy independently.
+constexpr int kCurrentCheckpointProtocolVersion = 6;
 constexpr qint64 kMaxEventLogBytes = 16 * 1024 * 1024;
 constexpr qint64 kMaxCheckpointBytes = 64 * 1024 * 1024;
 
@@ -352,6 +356,15 @@ QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
         {QStringLiteral("authoritativeRoom"), checkpoint.authoritativeRoom},
         {QStringLiteral("roomState"),
          QJsonObject{{QStringLiteral("phase"), checkpoint.phase},
+                     {QStringLiteral("roomStatus"), checkpoint.roomStatus},
+                     {QStringLiteral("roomName"), checkpoint.roomName},
+                     {QStringLiteral("roomDescription"), checkpoint.roomDescription},
+                     {QStringLiteral("scenarioId"), checkpoint.scenarioId},
+                     {QStringLiteral("seatLimits"), checkpoint.seatLimits},
+                     {QStringLiteral("seatParameters"), checkpoint.seatParameters},
+                     {QStringLiteral("configVersion"),
+                      static_cast<qint64>(checkpoint.configVersion)},
+                     {QStringLiteral("lastRoomUpdate"), checkpoint.lastRoomUpdate},
                      {QStringLiteral("redReady"), checkpoint.redReady},
                      {QStringLiteral("blueReady"), checkpoint.blueReady},
                      {QStringLiteral("running"), checkpoint.running},
@@ -366,6 +379,9 @@ QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
                      {QStringLiteral("mapMarks"), checkpoint.mapMarks}}}};
     if (checkpoint.aiState.has_value()) {
         object[QStringLiteral("aiState")] = aiStateToJson(*checkpoint.aiState);
+    }
+    if (!checkpoint.vmfState.isEmpty()) {
+        object[QStringLiteral("vmfState")] = checkpoint.vmfState;
     }
     return object;
 }
@@ -399,6 +415,8 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
         || !object.value(QStringLiteral("commandHistory")).isArray()
         || (checkpointSchemaVersion >= 5
             && !object.value(QStringLiteral("intelLedger")).isObject())
+        || (object.contains(QStringLiteral("vmfState"))
+            && !object.value(QStringLiteral("vmfState")).isObject())
         || !object.value(QStringLiteral("authoritativeRoom")).isObject()
         || !object.value(QStringLiteral("roomState")).isObject()) {
         return fail(QStringLiteral("检查点必需字段类型无效"));
@@ -452,8 +470,39 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
     checkpoint->commandHistory = object.value(QStringLiteral("commandHistory")).toArray();
     checkpoint->intelLedger = checkpointSchemaVersion >= 5
         ? object.value(QStringLiteral("intelLedger")).toObject() : QJsonObject{};
+    checkpoint->vmfState = {};
+    if (object.contains(QStringLiteral("vmfState"))) {
+        vmf::RuntimeState vmfState;
+        QString vmfError;
+        if (!vmf::RuntimeState::fromJson(object.value(QStringLiteral("vmfState")).toObject(),
+                                         &vmfState, &vmfError)) {
+            return fail(QStringLiteral("VMF 检查点状态无效: %1").arg(vmfError));
+        }
+        checkpoint->vmfState = vmfState.toJson();
+    }
     checkpoint->authoritativeRoom = object.value(QStringLiteral("authoritativeRoom")).toObject();
     checkpoint->phase = phase;
+    checkpoint->roomStatus = room.value(QStringLiteral("roomStatus")).toString();
+    checkpoint->roomName = room.value(QStringLiteral("roomName")).toString();
+    checkpoint->roomDescription = room.value(QStringLiteral("roomDescription")).toString();
+    checkpoint->scenarioId = room.value(QStringLiteral("scenarioId")).toString(
+        QStringLiteral("default"));
+    if (room.contains(QStringLiteral("seatLimits"))
+        && !room.value(QStringLiteral("seatLimits")).isObject()) {
+        return fail(QStringLiteral("检查点战位容量结构无效"));
+    }
+    if (room.contains(QStringLiteral("seatParameters"))
+        && !room.value(QStringLiteral("seatParameters")).isObject()) {
+        return fail(QStringLiteral("检查点战位参数结构无效"));
+    }
+    checkpoint->seatLimits = room.value(QStringLiteral("seatLimits")).toObject();
+    checkpoint->seatParameters = room.value(QStringLiteral("seatParameters")).toObject();
+    checkpoint->configVersion = static_cast<quint64>(
+        room.value(QStringLiteral("configVersion")).toInteger(1));
+    if (checkpoint->configVersion == 0) {
+        return fail(QStringLiteral("检查点房间配置版本无效"));
+    }
+    checkpoint->lastRoomUpdate = room.value(QStringLiteral("lastRoomUpdate")).toString();
     checkpoint->redReady = room.value(QStringLiteral("redReady")).toBool();
     checkpoint->blueReady = room.value(QStringLiteral("blueReady")).toBool();
     checkpoint->running = running;

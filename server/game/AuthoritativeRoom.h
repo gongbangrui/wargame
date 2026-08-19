@@ -65,6 +65,7 @@ public:
     Result leaveRoom(qint64 userId);
     Result disconnect(qint64 userId);
     Result deploy(qint64 commanderUserId, const QString& seatId, const GeoPos& position);
+    Result deployInitial(const QString& seatId, const GeoPos& position);
     Result requestRedeploy(qint64 userId);
     Result redeploy(qint64 commanderUserId, const QString& seatId = {});
     Result setUnitName(qint64 userId, const QString& unitName);

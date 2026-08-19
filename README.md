@@ -27,6 +27,7 @@
 - CMake 3.25 或更高版本
 - Ninja
 - Python 3（账号服务及地图工具）
+- tinyxml2 开发包（构建 `design/EncoderDecoder` 的 VMF CLI；缺少时 CLI 会明确显示 disabled）
 - Docker Engine 与 Docker Compose（联网部署时需要）
 
 项目统一使用 CMake Presets 与 Ninja 构建。
@@ -52,6 +53,16 @@ ninja -C build appindex
 cmake --preset debug
 cmake --build --preset debug
 ```
+
+默认构建还会生成 `vmf_encode`、`vmf_decode`、`vmf_validate` 和 `xml_compare`。发布前可运行
+设计目录的真实 XML/bit 回归管线：
+
+```bash
+cmake --build build/debug --target vmf_design_regression
+```
+
+只构建客户端或服务器且未安装 tinyxml2 时，可设置
+`-DWARGAME_BUILD_VMF_TOOLS=OFF`；字典仍作为运行时 profile 安装，CLI 回归则标记为 disabled。
 
 客户端可在启动后选择本地模式或联网模式。默认情况下，联网模式连接本机的账号服务 `http://localhost:8080` 和推演 WebSocket 服务 `ws://localhost:8090`。
 
@@ -86,7 +97,7 @@ cmake --build build/debug --target all_qmllint
 发布时使用 `WARGAME_VERSION=2.0.0 ./tools/build-release.sh --clean` 生成统一的桌面客户端、
 根项目服务端和 Qt 6.4 独立服务端身份；服务器一键包随后由
 `WARGAME_VERSION=2.0.0 DIST_DIR=dist ./deploy/package-one-click.sh` 生成。包内身份文件会在
-全新主机安装前校验 v6/schema 6 和源码摘要，避免客户端与两个服务端错配。
+全新主机安装前校验 v7/schema 7 和源码摘要，避免客户端与两个服务端错配。
 
 ### 下载发布包部署
 

@@ -327,6 +327,50 @@ TEST(SimulationControllerTest, UnitsJsonUsesCanonicalScenarioShape) {
     EXPECT_TRUE(json.contains("notes"));
 }
 
+TEST(SimulationControllerTest, LocalVmfFacadeUsesAuthoritativeWorkflow) {
+    SimulationController controller;
+    Scenario scenario = controller.engine()->scenario();
+    scenario.communicationPolicy.format = QStringLiteral("vmf-design-v1");
+    scenario.communicationPolicy.vmfProfile = QStringLiteral("vmf-design-v1");
+    ASSERT_TRUE(controller.engine()->setScenario(scenario));
+
+    const QVariantMap result = controller.reportGuidedStrikeTarget(
+        QStringLiteral("red_r1"), QStringLiteral("blue_cp"),
+        QVariantMap{{QStringLiteral("x"), 24000.0}, {QStringLiteral("y"), 17000.0},
+                    {QStringLiteral("targetType"), QStringLiteral("commandpost")},
+                    {QStringLiteral("friendFoe"), QStringLiteral("enemy")} });
+    EXPECT_TRUE(result.value(QStringLiteral("accepted")).toBool());
+    EXPECT_EQ(controller.vmfWorkflow().value(QStringLiteral("stage")).toString(),
+              QStringLiteral("targetReported"));
+}
+
+TEST(SimulationControllerTest, LocalVmfFacadeRejectsNativeScenario) {
+    SimulationController controller;
+
+    const QVariantMap result = controller.reportGuidedStrikeTarget(
+        QStringLiteral("red_r1"), QStringLiteral("blue_cp"),
+        QVariantMap{{QStringLiteral("x"), 24000.0}, {QStringLiteral("y"), 17000.0}});
+    EXPECT_FALSE(result.value(QStringLiteral("accepted")).toBool());
+    EXPECT_EQ(result.value(QStringLiteral("code")).toString(), QStringLiteral("VMF_DISABLED"));
+}
+
+TEST(SimulationControllerTest, LocalVmfFacadeRejectsOutOfOrderDispatch) {
+    SimulationController controller;
+    Scenario scenario = controller.engine()->scenario();
+    scenario.communicationPolicy.format = QStringLiteral("vmf-design-v1");
+    scenario.communicationPolicy.vmfProfile = QStringLiteral("vmf-design-v1");
+    ASSERT_TRUE(controller.engine()->setScenario(scenario));
+
+    const QVariantMap result = controller.dispatchGuidedStrike(
+        QStringLiteral("red_a1"), QStringLiteral("blue_cp"),
+        QVariantList{QVariantMap{{QStringLiteral("x"), 1000.0},
+                                 {QStringLiteral("y"), 2000.0}}});
+    EXPECT_FALSE(result.value(QStringLiteral("accepted")).toBool());
+    EXPECT_EQ(result.value(QStringLiteral("code")).toString(), QStringLiteral("REJECTED"));
+    EXPECT_EQ(controller.vmfWorkflow().value(QStringLiteral("stage")).toString(),
+              QStringLiteral("idle"));
+}
+
 TEST(NetworkClientTest, RejectsOversizedUtf16TextBeforeParsing) {
     NetworkClient client;
     QString fatalError;

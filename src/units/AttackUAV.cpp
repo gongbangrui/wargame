@@ -490,7 +490,8 @@ void AttackUAV::fireOnTarget(const QString& targetId) {
 
 void AttackUAV::onMessage(const Message& m) {
     switch (m.type) {
-    case Message::Type::AttackOrder: {
+    case Message::Type::AttackOrder:
+    case Message::Type::GroundAttackConfirm: {
         if (m.payload.contains("x") && m.payload.contains("y")) {
             cancelService();
             m_targetId.clear();
@@ -530,7 +531,8 @@ void AttackUAV::onMessage(const Message& m) {
     case Message::Type::UnitOrder:
         setStatus(m.payload.value("text").toString());
         break;
-    case Message::Type::FlightPlan: {
+    case Message::Type::FlightPlan:
+    case Message::Type::StrikePlan: {
         cancelService();
         const QString payloadTarget = m.payload.value("targetId").toString();
         // Imperative flight plans temporarily own motion but do not erase the

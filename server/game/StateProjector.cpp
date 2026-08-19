@@ -24,7 +24,8 @@ namespace {
 bool hasFullVisibility(const QString& role) {
     // Kept for replay/import compatibility. The network server never assigns
     // these legacy values to a client account.
-    return role == QLatin1String("director") || role == QLatin1String("editor");
+    return role == QLatin1String("director") || role == QLatin1String("editor")
+        || role == QLatin1String("room_admin");
 }
 
 bool isObserver(const QString& role) {
@@ -409,6 +410,28 @@ QJsonObject observerScenario(const SimulationEngine& engine) {
                        {QStringLiteral("units"), units}};
 }
 
+QJsonObject workflowProjection(const QJsonObject& source) {
+    static const QStringList fields{
+        QStringLiteral("taskId"), QStringLiteral("stage"), QStringLiteral("side"),
+        QStringLiteral("reconId"), QStringLiteral("targetId"), QStringLiteral("attackerId"),
+        QStringLiteral("guideId"), QStringLiteral("correlationId"),
+        QStringLiteral("createdAt"), QStringLiteral("updatedAt")};
+    QJsonObject projected;
+    for (const QString& field : fields) {
+        if (source.contains(field)) projected.insert(field, source.value(field));
+    }
+    return projected;
+}
+
+QJsonObject workflowMapProjection(const QJsonObject& source) {
+    QJsonObject projected;
+    for (const QString& side : {QStringLiteral("red"), QStringLiteral("blue")}) {
+        const QJsonObject workflow = workflowProjection(source.value(side).toObject());
+        if (!workflow.isEmpty()) projected.insert(side, workflow);
+    }
+    return projected;
+}
+
 QJsonObject observerRoomState(const QJsonObject& source, quint64 stateRevision) {
     static const QStringList fields{
         QStringLiteral("phase"), QStringLiteral("roomId"), QStringLiteral("roomName"),
@@ -416,13 +439,17 @@ QJsonObject observerRoomState(const QJsonObject& source, quint64 stateRevision) 
         QStringLiteral("aiDifficulty"), QStringLiteral("aiEngine"),
         QStringLiteral("configVersion"),
         QStringLiteral("running"), QStringLiteral("simTime"), QStringLiteral("speed"),
-        QStringLiteral("scenarioRevision")};
+        QStringLiteral("scenarioRevision"), QStringLiteral("vmfWorkflows")};
     QJsonObject projected;
     for (const QString& field : fields) {
         if (source.contains(field)) projected.insert(field, source.value(field));
     }
     projected[QStringLiteral("observer")] = true;
     projected[QStringLiteral("stateRevision")] = static_cast<qint64>(stateRevision);
+    if (source.contains(QStringLiteral("vmfWorkflows"))) {
+        projected[QStringLiteral("vmfWorkflows")] = workflowMapProjection(
+            source.value(QStringLiteral("vmfWorkflows")).toObject());
+    }
     return projected;
 }
 
@@ -434,8 +461,68 @@ QJsonObject copyEventFields(const QJsonObject& event, const QStringList& fields)
     return projected;
 }
 
+bool isVmfMessage(const QJsonObject& message) {
+    return message.value(QStringLiteral("wireFormat")).toString()
+               == QLatin1String("vmf-design-v1")
+        || message.value(QStringLiteral("vmfMessage")).isString();
+}
+
+QJsonObject projectVmfMessage(const QJsonObject& message) {
+    static const QStringList fields{
+        QStringLiteral("id"), QStringLiteral("type"), QStringLiteral("sender"),
+        QStringLiteral("receiver"), QStringLiteral("time"),
+        QStringLiteral("requiresAck"), QStringLiteral("acked"),
+        QStringLiteral("automaticAck"), QStringLiteral("retryCount"),
+        QStringLiteral("traceId"), QStringLiteral("correlationId"),
+        QStringLiteral("wireFormat"), QStringLiteral("vmfMessage"),
+        QStringLiteral("wireBitLength"), QStringLiteral("catalogId"),
+        QStringLiteral("trigger"), QStringLiteral("informationValue"),
+        QStringLiteral("senderSide"),
+        QStringLiteral("receiverSide"), QStringLiteral("simulationTime")};
+    QJsonObject projected;
+    for (const QString& field : fields) {
+        if (message.contains(field)) projected.insert(field, message.value(field));
+    }
+    const QJsonObject payload = message.value(QStringLiteral("payload")).toObject();
+    if (payload.contains(QStringLiteral("vmfValidated"))) {
+        projected.insert(QStringLiteral("vmfValidated"),
+                         payload.value(QStringLiteral("vmfValidated")));
+    }
+    if (payload.contains(QStringLiteral("vmfFieldCount"))) {
+        projected.insert(QStringLiteral("fieldCount"),
+                         payload.value(QStringLiteral("vmfFieldCount")));
+    }
+    for (const QString& field : {QStringLiteral("vmfCatalogId"),
+                                 QStringLiteral("vmfTrigger"),
+                                 QStringLiteral("vmfInformationValue")}) {
+        if (!payload.contains(field)) continue;
+        const QString projectedName = field == QLatin1String("vmfCatalogId")
+            ? QStringLiteral("catalogId")
+            : field == QLatin1String("vmfTrigger")
+                ? QStringLiteral("trigger") : QStringLiteral("informationValue");
+        projected.insert(projectedName, payload.value(field));
+    }
+    return projected;
+}
+
 QJsonObject observerEvent(const QJsonObject& event) {
     const QString kind = event.value(QStringLiteral("kind")).toString();
+    if (kind == QLatin1String("vmfMessage")) {
+        QJsonObject projected = copyEventFields(event, {QStringLiteral("messageType"),
+                                       QStringLiteral("senderSide"),
+                                       QStringLiteral("receiverSide"),
+                                       QStringLiteral("catalogId"),
+                                       QStringLiteral("trigger"),
+                                       QStringLiteral("informationValue"),
+                                       QStringLiteral("direction"),
+                                       QStringLiteral("summary"),
+                                       QStringLiteral("validated")});
+        if (event.contains(QStringLiteral("workflow"))) {
+            projected.insert(QStringLiteral("workflow"), workflowProjection(
+                event.value(QStringLiteral("workflow")).toObject()));
+        }
+        return projected;
+    }
     if (kind == QLatin1String("roomClosed") || kind == QLatin1String("matchReset")
         || kind == QLatin1String("matchStarted") || kind == QLatin1String("matchEndedByAdmin")) {
         return copyEventFields(event, {QStringLiteral("message")});
@@ -483,7 +570,8 @@ quint64 StateProjector::reachabilityBfsTraversalCount() {
 
 bool StateProjector::canEditSide(const QString& role, const QString& side) {
     if (side != QLatin1String("red") && side != QLatin1String("blue")) return false;
-    if (role == QLatin1String("editor") || role == side) return true;
+    if (role == QLatin1String("editor") || role == QLatin1String("room_admin")
+        || role == side) return true;
     // Initial scenario and room configuration are controlled by the web
     // administrator. A commander can deploy units, but cannot mutate the
     // authoritative roster from a client seat.
@@ -701,14 +789,17 @@ QJsonArray filteredMessagesImpl(const SimulationEngine& engine, const QString& r
         : QSet<QString>{};
     for (const QVariant& value : engine.recentMessages()) {
         const QJsonObject message = QJsonObject::fromVariantMap(value.toMap());
+        const bool vmf = isVmfMessage(message);
         if (seat) {
             const QString sender = message.value(QStringLiteral("sender")).toString();
             const QString receiver = message.value(QStringLiteral("receiver")).toString();
             if (communicationVisible.contains(sender)
-                || communicationVisible.contains(receiver)) output.append(message);
+                || communicationVisible.contains(receiver)) {
+                output.append(vmf ? projectVmfMessage(message) : message);
+            }
         } else if (side.isEmpty() || message.value(QStringLiteral("senderSide")).toString() == side
                    || message.value(QStringLiteral("receiverSide")).toString() == side) {
-            output.append(message);
+            output.append(vmf ? projectVmfMessage(message) : message);
         }
     }
     return output;
@@ -751,11 +842,53 @@ QJsonArray StateProjector::filteredMessages(const SimulationEngine& engine,
     return filteredMessagesImpl(engine, role, ownedUnitId, 0);
 }
 
+QJsonObject StateProjector::projectWorkflow(const QJsonObject& workflow) {
+    return workflowProjection(workflow);
+}
+
 QJsonObject StateProjector::projectEvent(const SimulationEngine& engine, const QString& role,
                                          const QJsonObject& event,
                                          const QString& ownedUnitId) {
     if (isObserver(role)) return observerEvent(event);
     const QString kind = event.value(QStringLiteral("kind")).toString();
+    if (kind == QLatin1String("vmfMessage")) {
+        const QString side = sideForRole(role);
+        if (side.isEmpty() && !hasFullVisibility(role)) return {};
+        const QString senderId = event.value(QStringLiteral("senderUnitId")).toString();
+        const QString receiverId = event.value(QStringLiteral("receiverUnitId")).toString();
+        const UnitBase* sender = engine.unit(senderId);
+        const UnitBase* receiver = receiverId == QLatin1String("*")
+            ? nullptr : engine.unit(receiverId);
+        const QString senderSide = event.value(QStringLiteral("senderSide")).toString(
+            sender ? sender->sideStr() : QString());
+        const QString receiverSide = event.value(QStringLiteral("receiverSide")).toString(
+            receiver ? receiver->sideStr() : senderSide);
+        const QSet<QString> visible = visibleUnitIds(engine, role, ownedUnitId);
+        if (!hasFullVisibility(role)) {
+            if (senderSide != side && !visible.contains(senderId)) return {};
+            if (receiverId != QLatin1String("*") && receiverSide != side
+                && !visible.contains(receiverId)) return {};
+        }
+        QJsonObject projected = copyEventFields(event, {
+            QStringLiteral("messageId"), QStringLiteral("traceId"),
+            QStringLiteral("correlationId"), QStringLiteral("vmfMessage"),
+            QStringLiteral("wireFormat"), QStringLiteral("wireBitLength"),
+            QStringLiteral("senderUnitId"), QStringLiteral("receiverUnitId"),
+            QStringLiteral("messageType"), QStringLiteral("validated"),
+            QStringLiteral("fieldCount"), QStringLiteral("retryCount"),
+            QStringLiteral("acked"), QStringLiteral("catalogId"),
+            QStringLiteral("trigger"), QStringLiteral("informationValue"),
+            QStringLiteral("summary")});
+        projected.insert(QStringLiteral("kind"), kind);
+        projected.insert(QStringLiteral("senderSide"), senderSide);
+        projected.insert(QStringLiteral("receiverSide"), receiverSide);
+        if (event.contains(QStringLiteral("workflow"))
+            && (hasFullVisibility(role) || senderSide == side)) {
+            projected.insert(QStringLiteral("workflow"), workflowProjection(
+                event.value(QStringLiteral("workflow")).toObject()));
+        }
+        return projected;
+    }
     if (kind == QLatin1String("roomClosed") || kind == QLatin1String("matchReset")) {
         return event;
     }
@@ -891,6 +1024,12 @@ QJsonObject StateProjector::snapshotFor(const SimulationEngine& engine, const QS
     const QSet<QString> friendlyVisibleIds = friendlyVisibleUnitIdsImpl(
         engine, role, ownedUnitId, stateRevision);
     QJsonObject projectedRoomState = roomState;
+    if (!fullVisibility) {
+        projectedRoomState.remove(QStringLiteral("roomDescription"));
+        projectedRoomState.remove(QStringLiteral("scenarioId"));
+        projectedRoomState.remove(QStringLiteral("seatLimits"));
+        projectedRoomState.remove(QStringLiteral("seatParameters"));
+    }
     if (isSeat(role) && !role.contains(QLatin1String("_commander"))) {
         QString subordinateUnitId = ownedUnitId;
         if (subordinateUnitId.isEmpty()) {

@@ -2,6 +2,7 @@
 
 #include "AiPlan.h"
 #include "core/Scenario.h"
+#include "vmf/VmfRuntimeState.h"
 
 #include <QJsonArray>
 #include <QJsonObject>
@@ -53,8 +54,19 @@ struct RoomCheckpoint {
     QJsonArray commandHistory;
     QJsonArray mapMarks;
     QJsonObject intelLedger;
+    /// VMF workflow/ACK state contains metadata only; raw XML and bit streams
+    /// are deliberately excluded by RuntimeState validation.
+    QJsonObject vmfState;
     QJsonObject authoritativeRoom;
     QString phase = QStringLiteral("preparing");
+    QString roomStatus;
+    QString roomName;
+    QString roomDescription;
+    QString scenarioId = QStringLiteral("default");
+    QJsonObject seatLimits;
+    QJsonObject seatParameters;
+    quint64 configVersion = 1;
+    QString lastRoomUpdate;
     bool redReady = false;
     bool blueReady = false;
     bool running = false;

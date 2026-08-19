@@ -1,0 +1,110 @@
+<MessageContent message="NetworkMonitoring" case="C1">
+  <Header>
+    <Field name="version">1</Field>
+    <Field name="length">0</Field>
+    <Field name="messageId">100</Field>
+    <Field name="originator">66051</Field>
+    <Field name="destination">263430</Field>
+  </Header>
+  <Body>
+    <DataUnit DFI="4029" DUI="125" name="NumberOfSubNetworks">2</DataUnit>
+    <DataUnit DFI="4093" DUI="042" name="NetworkMonitoringMessageType">1</DataUnit>
+    <DataUnit DFI="4004" DUI="012" name="URN">703710</DataUnit>
+
+    <Group name="NetworkInfo">
+      <GRI DFI="4045" DUI="001">1</GRI>
+      <DataUnit DFI="4085" DUI="059" name="NetworkIdNumber">1</DataUnit>
+
+      <Group name="DataCollectionTime">
+        <GRI DFI="4045" DUI="001">0</GRI>
+        <DataUnit DFI="4019" DUI="044" name="DataCollectionDay">12</DataUnit>
+        <DataUnit DFI="792" DUI="452" name="DataCollectionHour">10</DataUnit>
+        <DataUnit DFI="797" DUI="449" name="DataCollectionMinutes">35</DataUnit>
+        <DataUnit DFI="380" DUI="417" name="DataCollectionSecond">20</DataUnit>
+      </Group>
+
+      <Group name="NetworkCharacteristics">
+        <GPI DFI="4014" DUI="001">1</GPI>
+        <DataUnit DFI="4093" DUI="044" name="DataMeasurementIndicator">2</DataUnit>
+
+        <Group name="NetworkType">
+          <GRI DFI="4045" DUI="001">0</GRI>
+          <DataUnit DFI="4093" DUI="045" name="ProtocolType">1</DataUnit>
+
+          <Group name="TrafficStatus">
+            <GRI DFI="4045" DUI="001">0</GRI>
+            <DataUnit DFI="4093" DUI="046" name="TrafficType">1</DataUnit>
+            <DataUnit DFI="4082" DUI="012" name="CurrentNetworkLoad">9</DataUnit>
+            <DataUnit DFI="4082" DUI="013" name="AverageNetworkLoad">7</DataUnit>
+          </Group>
+        </Group>
+
+        <Field name="ServerId">
+          <FPI DFI="4014" DUI="002">1</FPI>
+          <DataUnit DFI="4004" DUI="012" name="URN">1193046</DataUnit>
+        </Field>
+
+        <DataUnit DFI="4082" DUI="014" name="NetworkStatus">2</DataUnit>
+
+        <Group name="ServerNetworkUsage">
+          <GPI DFI="4014" DUI="001">1</GPI>
+          <DataUnit DFI="4029" DUI="116" name="SADataDown">1000</DataUnit>
+          <DataUnit DFI="4029" DUI="117" name="C2DataDown">2000</DataUnit>
+          <DataUnit DFI="4029" DUI="118" name="localCsmaSAUp">3000</DataUnit>
+          <DataUnit DFI="4029" DUI="119" name="localCsmaC2Up">4000</DataUnit>
+          <DataUnit DFI="4029" DUI="123" name="numberOfServerClient">12</DataUnit>
+
+          <Group name="ClientConfig">
+            <GRI DFI="4045" DUI="001">0</GRI>
+            <DataUnit DFI="4004" DUI="012" name="URN">74565</DataUnit>
+            <DataUnit DFI="4093" DUI="043" name="clientConfiguartoin">5</DataUnit>
+          </Group>
+
+          <Group name="LocalMonitorStation">
+            <GPI DFI="4014" DUI="001">1</GPI>
+            <DataUnit DFI="4029" DUI="120" name="wideAreaCsmaC2Up">5000</DataUnit>
+            <Field name="SAQuantity">
+              <FPI DFI="4014" DUI="002">0</FPI>
+            </Field>
+          </Group>
+
+          <Group name="SVCStatus">
+            <GPI DFI="4014" DUI="001">1</GPI>
+            <DataUnit DFI="4029" DUI="121" name="svcC2DataUp">6000</DataUnit>
+            <DataUnit DFI="4029" DUI="122" name="SVCsUp">7000</DataUnit>
+          </Group>
+
+          <Group name="MulticastGroupInfo">
+            <GPI DFI="4014" DUI="001">1</GPI>
+            <DataUnit DFI="4029" DUI="124" name="numberOfMulticastGroups">2</DataUnit>
+            <Field name="MulticastGroup">
+              <FRI DFI="4045" DUI="002">1</FRI>
+              <DataUnit DFI="4085" DUI="061" name="MulticastGroupId">101</DataUnit>
+            </Field>
+            <Field name="MulticastGroup">
+              <FRI DFI="4045" DUI="002">0</FRI>
+              <DataUnit DFI="4085" DUI="061" name="MulticastGroupId">102</DataUnit>
+            </Field>
+          </Group>
+        </Group>
+      </Group>
+    </Group>
+
+    <Group name="NetworkInfo">
+      <GRI DFI="4045" DUI="001">0</GRI>
+      <DataUnit DFI="4085" DUI="059" name="NetworkIdNumber">259</DataUnit>
+
+      <Group name="DataCollectionTime">
+        <GRI DFI="4045" DUI="001">0</GRI>
+        <DataUnit DFI="4019" DUI="044" name="DataCollectionDay">12</DataUnit>
+        <DataUnit DFI="792" DUI="452" name="DataCollectionHour">11</DataUnit>
+        <DataUnit DFI="797" DUI="449" name="DataCollectionMinutes">5</DataUnit>
+        <DataUnit DFI="380" DUI="417" name="DataCollectionSecond">30</DataUnit>
+      </Group>
+
+      <Group name="NetworkCharacteristics">
+        <GPI DFI="4014" DUI="001">0</GPI>
+      </Group>
+    </Group>
+  </Body>
+</MessageContent>

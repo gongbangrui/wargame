@@ -1,0 +1,152 @@
+<Message name="NetworkMonitoring" number="0.1">
+
+    <Header>
+        <Field name="version" bits="4"/>
+        <Field name="length" bits="16"/>
+        <Field name="messageId" bits="16"/>
+        <Field name="originator" bits="24"/>
+        <Field name="destination" bits="24"/>
+    </Header>
+
+    <Body>
+		<!-- Number of sub-networks -->
+		<DataUnit name="NumberOfSubNetworks" bits="3"/>
+		
+		<!-- Network monitoring message type -->
+		<DataUnit name="NetworkMonitoringMessageType" bits="2"/>
+		
+		<!-- Report Unit -->
+		<DataUnit name="URN" bits="24"/>
+		
+		<!-- Network info -->
+		<Group name="NetworkInfo" repeatable="True">
+			<GRI bits="1"/>
+			
+			<DataUnit name="NetworkIdNumber" bits="16"/>
+			
+			<Group name="DataCollectionTime" repeatable="True">
+				<GRI bits="1"/>
+				<DataUnit name="DataCollectionDay" bits="5"/>
+				<DataUnit name="DataCollectionHour" bits="5"/>
+				<DataUnit name="DataCollectionMinutes" bits="6"/>
+				<DataUnit name="DataCollectionSecond" bits="6"/>
+			</Group>
+			
+			<Group name="NetworkCharacteristics" selectable="True">
+				<GPI bits="1"/>
+				<DataUnit name="DataMeasurementIndicator" bits="2"/>
+				
+				<Group name="NetworkType" repeatable="True">
+					<GRI bits="1"/>
+					<DataUnit name="ProtocolType" bits="3"/>
+					
+					<Group name="TrafficStatus" repeatable="True">
+						<GRI bits="1"/>
+						<DataUnit name="TrafficType" bits="2"/>
+						<DataUnit name="CurrentNetworkLoad" bits="4"/>
+						<DataUnit name="AverageNetworkLoad" bits="4"/>
+					</Group>
+				</Group>
+				
+				<Field name="ServerId" bits="24" selectable="True">
+					<FPI bits="1"/>
+					<DataUnit name="URN" bits="24"/>
+				</Field>
+				
+				<DataUnit name="NetworkStatus" bits="2"/>
+				
+				<Group name="ServerNetworkUsage" selectable="True">
+					<GPI bits="1"/>
+					<DataUnit name="SADataDown" bits="24"/>
+					<DataUnit name="C2DataDown" bits="24"/>
+					<DataUnit name="localCsmaSAUp" bits="24"/>
+					<DataUnit name="localCsmaC2Up" bits="24"/>
+					<DataUnit name="numberOfServerClient" bits="8"/>
+					
+					<Group name="ClientConfig" repeatable="True">
+						<GRI bits="1"/>
+						<DataUnit name="URN" bits="24"/>
+						<DataUnit name="clientConfiguartoin" bits="3"/>
+					</Group>
+					
+					<Group name="LocalMonitorStation" selectable="True">
+						<GPI bits="1"/>
+						<DataUnit name="wideAreaCsmaC2Up" bits="24"/>
+						
+						<Field name="SAQuantity" selectable="True">
+							<FPI bits="1"/>
+							<DataUnit name="wideAreaCsmaSAUp" bits="24"/>
+						</Field>
+					</Group>
+					
+					<Group name="SVCStatus" selectable="True">
+						<GPI bits="1"/>
+						<DataUnit name="svcC2DataUp" bits="24"/>
+						<DataUnit name="SVCsUp" bits="24"/>
+					</Group>
+					
+					<Group name="MulticastGroupInfo" selectable="True">
+						<GPI bits="1"/>
+						<DataUnit name="numberOfMulticastGroups" bits="8"/>
+						<Field name="MulticastGroup" repeatable="True">
+							<FRI bits="1"/>
+							<DataUnit name="MulticastGroupId" bits="16"/>
+						</Field>
+					</Group>
+				</Group>
+			</Group>
+		</Group>
+    </Body>
+
+	<!--
+		Rules 说明（示例）：
+		1) CaseRules：定义消息适用场景（Case 命中后才认为消息满足场景条件）。
+		2) ConditionRules：定义 If-Then 依赖约束；If 为真时 Then 必须为真。
+		3) 本示例规则仅用于校验，不自动推导或改写 GPI/GRI/FPI/FRI。
+		4) 逻辑节点：<All> / <Any> / <Not>；比较节点：<Cmp path op value>。
+		5) 比较操作符：eq/ne/gt/ge/lt/le/in/not_in。
+		6) Path 简写语法：
+		   H=Header, B=Body;
+		   G(name)=Group, F(name)=Field, D(name)=DataUnit, I(name)=指示位(GRI/GPI/FRI/FPI)。
+		   repeatable 节点使用显式下标 [0]/[1]/...。
+	-->
+	<Rules>
+		<!-- 别名用于简化长路径，提高可读性 -->
+		<Aliases>
+			<Alias name="NI0" path="B.G(NetworkInfo)[0]"/>
+		</Aliases>
+
+		<CaseRules>
+			<!-- Case C1: URN != 10 且第1个 Network info 的 Network id number == 1 -->
+			<Case id="C1">
+				<All>
+					<Cmp path="B.D(URN)" op="ne" value="10"/>
+					<Cmp path="$NI0.D(NetworkIdNumber)" op="eq" value="1"/>
+				</All>
+			</Case>
+		</CaseRules>
+
+		<ConditionRules>
+			<!--
+				R1: 若满足条件（Network id number == 1 且 URN != 10），
+				则要求该 Network info 的 GRI == 1，且 Network characteristics 的 GPI == 1。
+				通过caseRef绑定C1，如果没有caseRef，则是全局规则
+			-->
+			<Condition id="R1" caseRef="C1">
+				<If>
+					<All>
+						<Cmp path="$NI0.D(NetworkIdNumber)" op="eq" value="1"/>
+						<Cmp path="B.D(URN)" op="ne" value="10"/>
+					</All>
+				</If>
+				<Then>
+					<All>
+						<Cmp path="$NI0.I(GRI)" op="eq" value="1"/>
+						<Cmp path="$NI0.G(NetworkCharacteristics).I(GPI)" op="eq" value="1"/>
+					</All>
+				</Then>
+			</Condition>
+		</ConditionRules>
+	</Rules>
+
+</Message>

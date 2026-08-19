@@ -1085,7 +1085,7 @@ Item {
         height: root.height
         modal: true
         interactive: root.compactLayout && enabled
-        enabled: root.compactLayout && stages.currentIndex === 2
+        enabled: root.compactLayout && stages.currentIndex === 3
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         onEnabledChanged: if (!enabled) close()
         background: Rectangle {
@@ -1099,7 +1099,7 @@ Item {
             RowLayout {
                 Layout.fillWidth: true; Layout.preferredHeight: 54; spacing: 14
                 ColumnLayout { Layout.fillWidth: true; spacing: 2
-                Text { Layout.fillWidth: true; text: root.controller.onlineStage === "roomSelect" ? "选择推演房间" : root.controller.isObserver ? "只读观战" : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? "选择战位" : "联网实战席"; color: root.ink; font.pixelSize: root.compactLayout ? 20 : 23; font.bold: true; elide: Text.ElideRight }
+                Text { Layout.fillWidth: true; text: root.controller.onlineStage === "roomSelect" ? "选择推演房间" : root.controller.onlineStage === "roomAdmin" ? "房间管理" : root.controller.isObserver ? "只读观战" : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? "选择战位" : "联网实战席"; color: root.ink; font.pixelSize: root.compactLayout ? 20 : 23; font.bold: true; elide: Text.ElideRight }
                 Text { Layout.fillWidth: true; text: root.controller.currentRoomId ? root.controller.currentRoomId + " · " + root.roomConfigurationLabel() : "选择准备中的房间"; color: root.dim; font.pixelSize: 12; elide: Text.ElideRight }
             }
             Rectangle { Layout.preferredWidth: root.compactLayout ? 148 : 180; Layout.preferredHeight: 34; color: root.panelAlt; border.color: root.line; radius: 5
@@ -1174,7 +1174,7 @@ Item {
             Behavior on opacity { NumberAnimation { duration: 220 } }
         }
 
-        StackLayout { id: stages; Layout.fillWidth: true; Layout.fillHeight: true; currentIndex: root.controller.onlineStage === "roomSelect" ? 0 : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? 1 : 2
+        StackLayout { id: stages; Layout.fillWidth: true; Layout.fillHeight: true; currentIndex: root.controller.onlineStage === "roomSelect" ? 0 : root.controller.onlineStage === "roomAdmin" ? 2 : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? 1 : 3
             Item {
                 ColumnLayout { anchors.centerIn: parent; width: Math.min(parent.width - 40, 760); spacing: 14
                     Text { text: "可用推演室"; color: root.ink; font.pixelSize: 16; font.bold: true }
@@ -1276,6 +1276,13 @@ Item {
                             }
                         }
                     }
+                }
+            }
+            Item {
+                RoomAdminView {
+                    anchors.fill: parent
+                    controller: root.controller
+                    editor: root.editor
                 }
             }
             Item {
@@ -1749,6 +1756,16 @@ Item {
                                     root.deploymentNotice = "地图选点中。按 Escape 或在右侧取消，不会发送命令。"
                                 }
                                 onPointSelectionCancelled: root.cancelCommanderPointSelection()
+                            }
+                            GuidedStrikeWorkflowPanel {
+                                id: onlineGuidedStrikePanel
+                                visible: !root.controller.isObserver && root.tacticalViewIndex === 1
+                                         && onlineGuidedStrikePanel.vmfAvailable
+                                controller: root.controller
+                                side: root.controller.currentSeatSide
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? Math.min(370, implicitHeight) : 0
+                                Layout.maximumHeight: 370
                             }
                             Rectangle {
                                 visible: !root.controller.isObserver && !root.isCommander && root.controller.matchPhase === "running"

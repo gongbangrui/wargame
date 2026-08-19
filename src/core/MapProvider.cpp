@@ -184,4 +184,21 @@ QPointF MapProvider::toMercator(const GeoPos& logical) const {
                    m_mercatorOrigin.y() + logical.y);
 }
 
+GeoPos MapProvider::fromMercator(const QPointF& mercator) const {
+    if (!std::isfinite(mercator.x()) || !std::isfinite(mercator.y())) {
+        return GeoPos{m_center.x, m_center.y, 0.0};
+    }
+    return GeoPos{mercator.x() - m_mercatorOrigin.x(),
+                  mercator.y() - m_mercatorOrigin.y(), 0.0};
+}
+
+GeoCoord MapProvider::logicalToGeo(const GeoPos& logical) const {
+    return Mercator::metersToLatLon(toMercator(logical).x(), toMercator(logical).y());
+}
+
+GeoPos MapProvider::geoToLogical(const GeoCoord& coordinate) const {
+    const QPointF mercator = Mercator::latLonToMeters(coordinate.lat, coordinate.lon);
+    return fromMercator(mercator);
+}
+
 } // namespace gbr

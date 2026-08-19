@@ -18,6 +18,17 @@
       }
     },
     {
+      "name": "release",
+      "displayName": "Release client and server",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "WARGAME_BUILD_SERVER": "ON"
+      }
+    },
+    {
       "name": "sanitizers",
       "displayName": "ASan and UBSan",
       "inherits": "debug",
@@ -34,9 +45,37 @@
       "jobs": 2
     },
     {
+      "name": "release",
+      "configurePreset": "release",
+      "jobs": 2
+    },
+    {
       "name": "sanitizers",
       "configurePreset": "sanitizers",
       "jobs": 2
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "sanitizers",
+      "configurePreset": "sanitizers",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

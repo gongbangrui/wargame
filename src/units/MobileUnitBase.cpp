@@ -104,7 +104,7 @@ void MobileUnitBase::stepMotion(QVariantList& waypoints, int& idx, double dt,
 }
 
 void MobileUnitBase::onMobileMessage(const Message& m) {
-    if (m.type == Message::Type::Withdraw) {
+    if (m.type == Message::Type::Withdraw || m.type == Message::Type::WithdrawOrder) {
         cancelService();
         setStatus("撤离中");
         // Withdraw is an abort command, not a temporary waypoint override.

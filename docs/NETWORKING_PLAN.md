@@ -166,7 +166,7 @@ wargame_integration_tests
 }
 ```
 
-当前发布默认使用 v6/schema 6；服务端可在协商阶段兼容 v5/v4，但同一连接内不得混用
+当前发布默认使用 v7/schema 7；服务端可在协商阶段兼容 v6/v4，但同一连接内不得混用
 不同 wire/schema 版本。场景、AI 计划和地图元数据中的局部 `schemaVersion` 属于各自
 子格式版本，不与联网 envelope 的 schema 版本混淆。
 

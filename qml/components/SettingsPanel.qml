@@ -180,7 +180,7 @@ Dialog {
                     Rectangle { Layout.preferredWidth: 9; Layout.preferredHeight: 9; radius: 5; color: root.controller.networked && root.controller.networkState === "connected" ? t.green : root.controller.networked ? "#e1a94c" : t.textMuted }
                     ColumnLayout {
                         spacing: 2; Layout.fillWidth: true
-                        Text { text: root.controller.networked ? "联网模式 · " + (root.controller.displayName || root.controller.username) : "本地模式"; color: t.text; font.pixelSize: 13; font.bold: true }
+                        Text { text: root.controller.networked ? "联网模式 · " + (root.controller.username || root.controller.displayName) : "本地模式"; color: t.text; font.pixelSize: 13; font.bold: true }
                         Text { text: root.controller.networked ? root.controller.serverAddress + " · " + root.controller.networkStatus : "推演状态仅保存在当前客户端"; color: t.textMuted; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
                         Text { visible: root.controller.networked; text: root.controller.gameLatencyMs >= 0 ? "延迟  " + root.controller.gameLatencyMs + " ms" : "延迟  --"; color: t.textMuted; font.pixelSize: 10; font.family: "Consolas" }
                     }

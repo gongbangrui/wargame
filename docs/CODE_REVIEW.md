@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | High | 情报曾以临时 `targetId` 共享，客户端可伪造目标关联或跨战位复用。 | `IntelLedger` 按战位保存当前记录和历史；服务器按来源台账、阵营、通信链重投影，协议测试和服务器单测通过。 |
 | High | 观察员快照/历史接口若附带台账会泄露战位备注和传播链。 | 观察员不附加 `intelState`，历史请求明确拒绝；观察员服务器测试通过。 |
-| High | v4/v5/v6 混用会导致状态字段解释不一致。 | 协议/检查点统一到 v6/schema 6，旧检查点和 v5/v4 客户端按兼容投影恢复；Debug、ASan/UBSan、独立 server 构建通过。 |
+| High | v4/v5/v6/v7 混用会导致状态字段解释不一致。 | 协议/检查点统一到 v7/schema 7，旧检查点和 v6/v4 客户端按兼容投影恢复；Debug、ASan/UBSan、独立 server 构建通过。 |
 | High | 独立服务器最低 Qt 6.4 不支持 `QHash::tryInsert`，Docker 发布构建会失败。 | 台账战位初始化改用 Qt 6.4 可用的 `contains`/`insert`；独立 Qt 6.4 构建和隔离 Docker 恢复验证通过。 |
 | High | `QWebSocket::disconnected` 回调捕获裸指针，析构顺序可能触发段错误。 | 使用 `QPointer` 守护回调；服务器 CTest 和 ASan/UBSan 通过。 |
 | Medium | 管理员 PUT 房间时省略情报阈值会把已配置值重置为默认值。 | 按 `model_fields_set` 保留数据库值，新增账号回归测试覆盖自定义阈值。 |

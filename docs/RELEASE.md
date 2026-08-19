@@ -1,12 +1,12 @@
 # 发布流程
 
-联网协议当前为 v6/schema 6。客户端和权威 `game-server` 优先使用 v6；服务端仍支持 v5/v4
+联网协议当前为 v7/schema 7。客户端和权威 `game-server` 优先使用 v7；服务端仍支持 v6/v4
 降级协商。升级前先停止写入、备份账号数据库以及房间 `room-checkpoint.json`、`room-commands.jsonl`
 和全部轮转日志，确认备份可在隔离卷恢复后再替换服务。
 
 本流程适用于桌面客户端和 Docker 联网服务的同一版本发布。发布前先将
 `WARGAME_VERSION` 更新为目标语义版本，保证 CMake 服务端、Docker 镜像标签和部署配置一致。
-`deploy/release-manifest.env` 固定 v6/schema 6、`appindex`、`account-web`、`game-server` 和
+`deploy/release-manifest.env` 固定 v7/schema 7、`appindex`、`account-web`、`game-server` 和
 WebSocket 权威数据面；`release-identity.txt` 保存一次计算的版本、源码摘要和协议身份。
 
 ### 三端统一构建
@@ -94,7 +94,7 @@ Docker 演练会验证联网认证、权限、消息幂等、优雅停止最终�
 1. 记录目标 commit、`WARGAME_VERSION`、CI 链接和人工验收结果。
 2. 在 staging 使用与生产相同的 `.env` 字段和持久卷配置部署候选镜像。
 3. 对生产数据卷执行归档备份，验证归档可还原到隔离卷。
-4. 确认桌面客户端已切换到 v6，再更新生产 `.env` 的 `WARGAME_VERSION` 并执行
+4. 确认桌面客户端已切换到 v7，再更新生产 `.env` 的 `WARGAME_VERSION` 并执行
    `docker compose --project-name wargame --env-file /path/to/.env -f /path/to/current/deploy/compose.yml up -d --build`。
 5. 通过管理员“服务器监控”确认 game-server 状态为 `healthy`，再执行联网冒烟验证。
 6. 出现回归时，停止服务但保留卷，将 `WARGAME_VERSION` 回退到上一已验证版本并重新部署。

@@ -11,6 +11,8 @@
 #include "CommandResult.h"
 #include "CombatResolver.h"
 #include "UnitBase.h"
+#include "vmf/VmfMessageGateway.h"
+#include "GuidedStrikeWorkflow.h"
 
 #include <QObject>
 #include <QTimer>
@@ -124,6 +126,29 @@ public:
     QStringList unitIds() const;
     QJsonObject unitIdentityCatalog() const { return m_unitIdentityCatalog; }
     const Scenario& scenario() const { return m_scenario; }
+    bool vmfEnabled() const { return m_vmfGateway != nullptr; }
+    QString vmfProfileError() const { return m_vmfProfileError; }
+    QJsonObject collectVmfRuntimeState() const;
+    bool restoreVmfRuntimeState(const QJsonObject& state, QString* error = nullptr);
+    /// Accept an already encoded VMF envelope after dictionary validation.
+    /// The caller remains responsible for seat/side authorization.
+    bool postVmfMessage(Message message, QString* error = nullptr);
+    /// Encode a domain message with the active VMF profile without posting it.
+    /// Online clients use this to build the server-validated VMF envelope;
+    /// local workflows continue to post through MessageBus directly.
+    bool prepareVmfMessage(const Message& input, Message* output,
+                           QString* error = nullptr) const;
+    bool validateVmfMessage(const Message& message, QString* error = nullptr) const;
+    bool validateVmfMessageForRoles(const Message& message, const QString& senderRole,
+                                    const QString& receiverRole = {},
+                                    QString* error = nullptr) const;
+    /// Apply the active guided-strike stage/association rules without mutating
+    /// the workflow.  The authoritative server calls this before persisting a
+    /// VMF event; generic non-workflow traffic remains valid.
+    bool validateVmfWorkflowMessage(const Message& message,
+                                    QString* error = nullptr) const;
+    QJsonObject vmfMessageCatalogSummary(const Message& message) const;
+    GuidedStrikeWorkflow* guidedStrikeWorkflow(const QString& side) const;
     /// @brief Lookup index for scenario unit by id; returns nullptr if not found.
     ScenarioUnit* findScenarioUnit(const QString& id);
     /// @brief Persist current scenario to a JSON file.
@@ -192,6 +217,9 @@ signals:
     void timelineChanged();
     void projectilesChanged();
     void scanContactsChanged();
+    /// VMF guided-strike state is exposed as a projection; QML never receives
+    /// the workflow object or MessageBus directly.
+    void vmfWorkflowChanged();
 
 private slots:
     void onMessagePosted(const QJsonObject& msg);
@@ -210,6 +238,8 @@ private:
     void createSingleUnit(const ScenarioUnit& u);
     void connectUnitSignals(UnitBase* unit, const QString& id);
     void updateMessageCache(const QJsonObject& msg);
+    void updateMessageAckState(const QString& messageId, bool acknowledged,
+                               int retryCount, const QString& reason);
     void onTickInternal(bool manual, double manualDt);
     void tickUnits(double dt, const QHash<QString, GeoPos>& previousPositions);
     void resolveUnitCollisions(double dt, const QHash<QString, GeoPos>& previousPositions);
@@ -221,6 +251,8 @@ private:
     void applyEcmJamming();
     void scanReconDetections(double dt);
     void broadcastPositionReports(bool manual);
+    void sendReconDestructionConfirmations(const QString& targetId,
+                                           const QString& attackerId);
     void refreshDetectionCache();
     void applySchedules(double simTime, double dt);
     void markUnitsDirty();
@@ -234,6 +266,12 @@ private:
     std::unique_ptr<MapProvider> m_map;
     std::unique_ptr<IClock> m_clock;
     std::unique_ptr<MessageLogRecorder> m_recorder;
+    std::shared_ptr<const vmf::DictionarySet> m_vmfDictionaries;
+    std::shared_ptr<const vmf::VmfMessageCatalog> m_vmfCatalog;
+    std::unique_ptr<vmf::VmfMessageGateway> m_vmfGateway;
+    std::unique_ptr<GuidedStrikeWorkflow> m_redGuidedStrikeWorkflow;
+    std::unique_ptr<GuidedStrikeWorkflow> m_blueGuidedStrikeWorkflow;
+    QString m_vmfProfileError;
     std::map<QString, std::unique_ptr<UnitBase>> m_units;
     Scenario m_scenario;
     /// Index into m_scenario.units by unit id — avoids O(N) std::find_if on
@@ -321,6 +359,8 @@ private:
     void checkWinLoseCondition();
     void initCommandDispatch();
     CommandResult validateCommand(const QString& action, const QVariantMap& args) const;
+    bool configureCommunication(const Scenario& scenario, QString* error);
+    static QString locateVmfProfileRoot();
 };
 
 } // namespace gbr

@@ -1,0 +1,202 @@
+<dic name="contentDic" version="0.1">
+    <DFI num="281" name="Latitude">
+		<DUI num="014" name="Latitude00051" bits="22">
+			
+		</DUI>
+	</DFI>
+	
+	<DFI num="282" name="Longtitude">
+		<DUI num="014" name="Longtitude00051" bits="23">
+			
+		</DUI>
+	</DFI>
+	
+	
+    <DFI num="380" name="Second">
+		<DUI num="417" name="DataCollectionSecond" bits="6">
+		
+		</DUI>
+		
+	</DFI>
+	
+	<DFI num="792" name="Hour">
+		<DUI num="001" name="Hour" bits="5">
+		
+		</DUI>
+		
+		<DUI num="452" name="DataCollectionHour" bits="5">
+		
+		</DUI>
+	</DFI>
+	<DFI num="797" name="Minute">
+		<DUI num="004" name="Minute" bits="6">
+		
+		</DUI>
+		<DUI num="449" name="DataCollectionMinutes" bits="6">
+		
+		</DUI>
+	</DFI>
+	
+    <DFI num="4004" name="MilitaryIdentification">
+		<DUI num="012" name="URN" bits="24">
+		
+		</DUI>
+		
+	</DFI>
+
+    <DFI num="4014" name="PresenceIndicator">
+		<DUI num="001" name="GPI" bits="1">
+		
+		</DUI>
+		<DUI num="002" name="FPI" bits="1">
+		
+		</DUI>
+	</DFI>	
+
+    <DFI num="4019" name="Day">
+		<DUI num="001" name="DayOfMonth" bits="5">
+		
+		</DUI>
+		
+		<DUI num="004" name="EffictiveDay" bits="5">
+		
+		</DUI>
+		<DUI num="044" name="DataCollectionDay" bits="5">
+		
+		</DUI>
+	</DFI>
+
+	<DFI num="4029" name="Quantity">
+		<DUI num="116" name="SADataDown" bits="24">
+
+		</DUI>
+		<DUI num="117" name="C2DataDown" bits="24">
+
+		</DUI>
+		<DUI num="118" name="localCsmaSAUp" bits="24">
+
+		</DUI>
+		<DUI num="119" name="localCsmaC2Up" bits="24">
+			
+		</DUI>
+		<DUI num="120" name="wideAreaCsmaC2Up" bits="24">
+
+		</DUI>
+		<DUI num="121" name="svcC2DataUp" bits="24">
+		
+		</DUI>
+		<DUI num="122" name="SVCsUp" bits="24">
+		
+		</DUI>
+		<DUI num="123" name="numberOfServerClient" bits="8">
+		
+		</DUI>
+		<DUI num="124" name="numberOfMulticastGroups" bits="8">
+		
+		</DUI>
+		<DUI num="125" name="NumberOfSubNetworks" bits="3">
+		
+		</DUI>
+		<DUI num="126" name="wideAreaCsmaSAUp" bits="24">
+		
+		</DUI>
+	</DFI>
+	
+    <DFI num="4045" name="RecurrenceIndicator">
+		<DUI num="001" name="GRI" bits="1">
+		
+		</DUI>
+		<DUI num="002" name="FRI" bits="1">
+		
+		</DUI>
+	</DFI>
+	
+    <DFI num="4082" name="StatusCode">
+		<DUI num="012" name="CurrentNetworkLoad" bits="4">
+		
+		</DUI>
+		<DUI num="013" name="AverageNetworkLoad" bits="4">
+		
+		</DUI>
+		<DUI num="014" name="NetworkStatus" bits="2">
+		
+		</DUI>
+	</DFI>
+	
+    <DFI num="4085" name="Number">
+		<DUI num="059" name="NetworkIdNumber" bits="16">
+		
+		</DUI>
+		<DUI num="061" name="MulticastGroupId" bits="16">
+		
+		</DUI>
+	</DFI>
+	
+    <DFI num="4093" name="DataTypeDesignator">
+		<DUI num="042" name="NetworkMonitoringMessageType" bits="2">
+		
+		</DUI>
+		<DUI num="043" name="clientConfiguartoin" bits="3" >
+		
+		</DUI>
+		<DUI num="044" name="DataMeasurementIndicator" bits="2" >
+		
+		</DUI>
+		<DUI num="045" name="ProtocolType" bits="3" >
+			<Constraints>
+				<AllowList>
+					<Value v="0" name=""/>
+					<Value v="1"/>
+					<Value v="2"/>
+					<Range from="4" to="6"/>
+					<Value v="7"/>
+				</AllowList>
+			</Constraints>
+			<!--Handle>
+			    <function f="handle_ProtocalType"/>
+			</Handle-->
+		</DUI>
+		<DUI num="046" name="TrafficType" bits="2" >
+		
+		</DUI>
+	</DFI>	
+
+    <DFI num="4099" name="Month">
+		<DUI num="001" name="Month" bits="4">
+		
+		</DUI>
+	</DFI>	
+	
+	<DFI num="4156" name="Route">
+		<DUI num="004" name="RouteConstriction" bits="5">
+		
+		</DUI>
+	</DFI>	
+	
+    <!-- vmf-design-v1 guided-strike target report extension -->
+    <DFI num="4200" name="TargetType">
+        <DUI num="001" name="TargetType" bits="3">
+            <Constraints><AllowList><Range from="0" to="7"/></AllowList></Constraints>
+        </DUI>
+    </DFI>
+    <DFI num="4201" name="TargetQuantity">
+        <DUI num="001" name="TargetQuantity" bits="8">
+            <Constraints><AllowList><Range from="1" to="255"/></AllowList></Constraints>
+        </DUI>
+    </DFI>
+    <DFI num="4202" name="IdentificationFriendOrFoe">
+        <DUI num="001" name="IdentificationFriendOrFoe" bits="2">
+            <Constraints><AllowList><Range from="0" to="3"/></AllowList></Constraints>
+        </DUI>
+    </DFI>
+    <DFI num="4203" name="TargetStatus">
+        <DUI num="001" name="TargetStatus" bits="2">
+            <Constraints><AllowList><Range from="0" to="3"/></AllowList></Constraints>
+        </DUI>
+    </DFI>
+    <DFI num="4204" name="Direction">
+        <DUI num="001" name="Direction" bits="9">
+            <Constraints><AllowList><Range from="0" to="511"/></AllowList></Constraints>
+        </DUI>
+    </DFI>
+</dic>

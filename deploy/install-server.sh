@@ -234,6 +234,12 @@ required_source_paths=(
   cmake
   src
   server
+  'design/vmf设计.docx'
+  design/EncoderDecoder/README.txt
+  design/EncoderDecoder/dic.xml
+  design/EncoderDecoder/dic_content.xml
+  design/EncoderDecoder/message_catalog.json
+  design/EncoderDecoder/msgStruct
   deploy/compose.yml
   deploy/install-server.sh
   deploy/account.Dockerfile
@@ -417,7 +423,11 @@ copy_source_inputs() {
   local source="$1" destination="$2" input
   validate_source_tree "$source"
   mkdir -p -- "$destination"
-  for input in CMakeLists.txt Main.qml main.cpp qml cmake src server deploy map/metadata.json \
+  for input in CMakeLists.txt Main.qml main.cpp qml cmake src server \
+      'design/vmf设计.docx' design/EncoderDecoder/README.txt \
+      design/EncoderDecoder/dic.xml design/EncoderDecoder/dic_content.xml \
+      design/EncoderDecoder/message_catalog.json design/EncoderDecoder/msgStruct \
+      deploy map/metadata.json \
       .dockerignore README.md docs release-identity.txt; do
     [[ -e "$source/$input" ]] || continue
     [[ "$input" != */* ]] || mkdir -p -- "$destination/${input%/*}"
@@ -1116,7 +1126,7 @@ main() {
       "$STAGING_DIR/deploy/release-manifest.env" "$WARGAME_VERSION" "$WARGAME_SOURCE_DIGEST" \
       || die "发布包三端身份校验失败"
   else
-    warn "发布输入未提供 release-identity.txt；将只校验 v6/schema 6 清单"
+    warn "发布输入未提供 release-identity.txt；将只校验 v7/schema 7 清单"
   fi
   WARGAME_RELEASE_ID="${WARGAME_VERSION}-${WARGAME_SOURCE_DIGEST:0:12}"
   migrate_legacy_env

@@ -199,6 +199,14 @@ function showAdmin(username) {
   $("adminIdentity").textContent = username;
 }
 
+function normalizeAccountRole(value) {
+  return value === "room_admin" || value === "editor" ? "room_admin" : "player";
+}
+
+function accountRoleLabel(value) {
+  return normalizeAccountRole(value) === "room_admin" ? "房间管理员" : "普通用户";
+}
+
 function logout(callServer = true) {
   if (callServer && state.token) api("/api/admin/logout", { method: "POST" }).catch(() => {});
   closeTerminal();
@@ -248,9 +256,10 @@ function renderUsers() {
   for (const [index, user] of state.users.entries()) {
     const tr = document.createElement("tr");
     tr.style.setProperty("--row-index", index);
+    const role = normalizeAccountRole(user.role);
     tr.innerHTML = `
       <td class="user-cell"></td><td class="display"></td>
-      <td><span class="badge role-player">联网账号</span></td>
+      <td><span class="badge ${role === "room_admin" ? "role-admin" : "role-player"}">${accountRoleLabel(role)}</span></td>
       <td><span class="${user.enabled ? "enabled" : "disabled"}">${user.enabled ? "已启用" : "已停用"}</span><span class="${user.online ? "online" : "offline"}">${user.online ? "在线" : "离线"}</span></td>
       <td class="updated"></td>
       <td class="actions"><button class="row-button edit">编辑</button><button class="row-button kick-user" ${user.online ? "" : "disabled"}>踢下线</button><button class="row-button delete">删除</button></td>`;
@@ -1369,6 +1378,7 @@ function openUserModal(user = null) {
   $("modalTitle").textContent = user ? "编辑账号" : "创建账号";
   $("username").value = user ? user.username : "";
   $("displayName").value = user ? user.displayName : "";
+  $("userRole").value = normalizeAccountRole(user?.role);
   $("enabled").checked = user ? user.enabled : true;
   $("userPassword").required = false;
   $("passwordHint").textContent = user ? "留空表示不修改密码" : "";
@@ -1437,7 +1447,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.preventDefault();
     const id = $("userId").value;
     const enteredPassword = $("userPassword").value;
-    const body = { username: $("username").value.trim(), display_name: $("displayName").value.trim(), password: id && enteredPassword === "" ? null : enteredPassword, enabled: $("enabled").checked };
+    const body = { username: $("username").value.trim(), display_name: $("displayName").value.trim(), role: $("userRole").value, password: id && enteredPassword === "" ? null : enteredPassword, enabled: $("enabled").checked };
     try {
       await api(id ? `/api/admin/users/${id}` : "/api/admin/users", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
       closeUserModal();

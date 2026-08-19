@@ -173,9 +173,9 @@ LOGIN_SUBJECT_IP_FAILURE_LIMIT = max(
 LOGIN_IP_FAILURE_LIMIT = max(1, min(int(os.getenv("LOGIN_IP_FAILURE_LIMIT", "20")), 20))
 ACTIVE_GAME_ROOM_ID = os.getenv("GAME_ROOM_ID", "main").strip() or "main"
 MIN_PASSWORD_LENGTH: Final = 8
-# 联网账号不再绑定红方、蓝方或导演身份。旧数据库保留 role 列仅用于平滑迁移，
-# 服务端统一写入 player，战位由房间运行时分配。
-ROLES = {"player"}
+# 联网账号角色与房间战位是两套独立身份。旧版本的 editor 角色保留为
+# 兼容输入，但 API 和游戏会话统一使用 room_admin。
+ROLES = {"player", "room_admin"}
 SEAT_TYPES = {"commander", "attack", "recon", "ground", "jammer"}
 SEAT_BASE_KEYS = {f"{side}_{seat_type}" for side in ("red", "blue") for seat_type in SEAT_TYPES}
 DEFAULT_SEAT_LIMITS = {
@@ -260,6 +260,7 @@ class LoginBody(BaseModel):
 class UserBody(BaseModel):
     username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     display_name: str = Field(min_length=1, max_length=64)
+    role: Literal["player", "room_admin", "editor"] = "player"
     password: str | None = Field(default=None)
     enabled: bool = True
 
@@ -275,6 +276,13 @@ class UserBody(BaseModel):
             return None
         if isinstance(value, str) and len(value) < MIN_PASSWORD_LENGTH:
             raise ValueError(f"password must contain at least {MIN_PASSWORD_LENGTH} characters")
+        return value
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalize_role_value(cls, value: object) -> object:
+        if value == "editor":
+            return "room_admin"
         return value
 
 
@@ -356,7 +364,8 @@ class RoomBody(BaseModel):
         for key, parameters in value.items():
             parts = key.split("_")
             base_key = "_".join(parts[:2])
-            if base_key not in SEAT_BASE_KEYS or (len(parts) > 2 and not parts[2].isdigit()):
+            if base_key not in SEAT_BASE_KEYS or len(parts) not in (2, 3) \
+                    or (len(parts) == 3 and (not parts[2].isdigit() or int(parts[2]) <= 0)):
                 raise ValueError("战位参数包含未知战位")
             unknown = set(parameters) - allowed_fields
             if unknown:
@@ -444,6 +453,62 @@ class InternalPresenceBody(BaseModel):
     occupants: list[dict[str, object]] = Field(default_factory=list, max_length=128)
 
 
+class InternalRoomConfigBody(BaseModel):
+    expected_config_version: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=96)
+    description: str = Field(default="", max_length=512)
+    scenario_id: str = Field(default="default", max_length=128)
+    seat_limits: dict[str, int] = Field(default_factory=dict)
+    seat_parameters: dict[str, dict[str, float | int | bool]] = Field(default_factory=dict)
+
+    @field_validator("name", "description", "scenario_id", mode="before")
+    @classmethod
+    def strip_room_config_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("seat_limits")
+    @classmethod
+    def validate_internal_seat_limits(cls, value: dict[str, int]) -> dict[str, int]:
+        for key, count in value.items():
+            if key not in SEAT_BASE_KEYS:
+                raise ValueError("不支持的战位类型")
+            if count < 0 or count > 64:
+                raise ValueError("战位数量必须在 0 到 64 之间")
+            if key.endswith("_commander") and count != 1:
+                raise ValueError("红蓝双方指挥官数量必须固定为 1")
+        return value
+
+    @model_validator(mode="after")
+    def validate_complete_internal_seat_limits(self) -> "InternalRoomConfigBody":
+        # Omitted fields remain backwards compatible; a supplied capacity map
+        # must be complete so the authority cannot silently drop seat types.
+        if "seat_limits" in self.model_fields_set and set(self.seat_limits) != SEAT_BASE_KEYS:
+            raise ValueError("战位容量必须包含红蓝双方完整配置")
+        return self
+
+    @field_validator("seat_parameters")
+    @classmethod
+    def validate_internal_seat_parameters(
+        cls, value: dict[str, dict[str, float | int | bool]]
+    ) -> dict[str, dict[str, float | int | bool]]:
+        allowed_fields = {"communicationRange", "detectRange"}
+        for key, parameters in value.items():
+            parts = key.split("_")
+            base_key = "_".join(parts[:2])
+            if base_key not in SEAT_BASE_KEYS or len(parts) not in (2, 3) \
+                    or (len(parts) == 3 and (not parts[2].isdigit() or int(parts[2]) <= 0)):
+                raise ValueError("战位参数包含未知战位")
+            unknown = set(parameters) - allowed_fields
+            if unknown:
+                raise ValueError(f"不支持的战位参数: {', '.join(sorted(unknown))}")
+            for name, parameter in parameters.items():
+                if isinstance(parameter, bool) or not isinstance(parameter, (int, float)):
+                    raise ValueError(f"{name} 必须是数值")
+                if parameter < 0 or parameter > 1_000_000:
+                    raise ValueError(f"{name} 必须在 0 到 1000000 米之间")
+        return value
+
+
 class KickBody(BaseModel):
     reason: str = Field(default="管理员移出房间", max_length=256)
 
@@ -460,11 +525,13 @@ def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def storage_user_role(db: sqlite3.Connection) -> str:
-    """Return a migration-safe value for legacy databases with a role CHECK."""
-    row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
-    schema = (row[0] if row else "") or ""
-    return "player" if "'player'" in schema or '"player"' in schema else "red"
+def normalize_user_role(value: object) -> str:
+    return "room_admin" if str(value or "").strip().lower() in {"room_admin", "editor"} else "player"
+
+
+def normalized_display_name(username: object, display_name: object) -> str:
+    candidate = str(display_name or "").strip()
+    return candidate or str(username or "").strip()
 
 
 def queue_user_invalidation(
@@ -513,7 +580,7 @@ def initialize_database() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 display_name TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'player',
+                role TEXT NOT NULL DEFAULT 'player' CHECK(role IN ('player','room_admin')),
                 password_hash TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
@@ -731,14 +798,36 @@ def initialize_database() -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_single_pending_room_operation "
             "ON room_operations(room_id) WHERE state='pending'"
         )
-        # 旧安装的用户表可能带有席位 CHECK 约束。保留列但将所有账号视为普通用户，
-        # 避免升级时因为旧角色值阻断登录；新的 API 永远不返回 role。
-        try:
-            db.execute("UPDATE users SET role='player' WHERE role IS NULL OR role != 'player'")
-        except sqlite3.IntegrityError:
-            # The old CHECK constraint is left intact until a maintenance
-            # migration rewrites the table. The column is never exposed.
-            pass
+        # 旧安装可能把 role 限制为红蓝席位。重建 users 表后保留账号、密码和
+        # 时间戳，并把 editor 平滑迁移为 room_admin，其余历史席位迁移为 player。
+        users_schema_row = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'"
+        ).fetchone()
+        users_schema = (users_schema_row[0] if users_schema_row else "") or ""
+        if "room_admin" not in users_schema:
+            db.execute(
+                "CREATE TABLE users_migrated ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "username TEXT NOT NULL UNIQUE COLLATE NOCASE,"
+                "display_name TEXT NOT NULL,"
+                "role TEXT NOT NULL DEFAULT 'player' CHECK(role IN ('player','room_admin')),"
+                "password_hash TEXT NOT NULL,"
+                "enabled INTEGER NOT NULL DEFAULT 1,"
+                "created_at TEXT NOT NULL,"
+                "updated_at TEXT NOT NULL)"
+            )
+            db.execute(
+                "INSERT INTO users_migrated(id,username,display_name,role,password_hash,enabled,created_at,updated_at) "
+                "SELECT id,username,display_name,CASE WHEN lower(role)='editor' THEN 'room_admin' ELSE 'player' END,"
+                "password_hash,enabled,created_at,updated_at FROM users"
+            )
+            db.execute("DROP TABLE users")
+            db.execute("ALTER TABLE users_migrated RENAME TO users")
+        db.execute(
+            "UPDATE users SET role=CASE WHEN lower(role) IN ('room_admin','editor') "
+            "THEN 'room_admin' ELSE 'player' END, "
+            "display_name=CASE WHEN trim(display_name)='' THEN username ELSE display_name END"
+        )
         username = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
         password = os.getenv("ADMIN_PASSWORD", "")
         existing = db.execute("SELECT id FROM admins LIMIT 1").fetchone()
@@ -1067,7 +1156,8 @@ def public_user(row: sqlite3.Row) -> dict:
     result = {
         "id": row["id"],
         "username": row["username"],
-        "displayName": row["display_name"],
+        "displayName": normalized_display_name(row["username"], row["display_name"]),
+        "role": normalize_user_role(row["role"]),
         "enabled": bool(row["enabled"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -1284,7 +1374,7 @@ def public_presence(row: sqlite3.Row) -> dict:
     return {
         "userId": row["user_id"],
         "username": row["username"],
-        "displayName": row["display_name"],
+        "displayName": normalized_display_name(row["username"], row["display_name"]),
         "seatId": row["seat_id"],
         "seatType": row["seat_type"],
         "side": row["side"],
@@ -1306,7 +1396,7 @@ def sync_presence(db: sqlite3.Connection, room_id: str, occupants: list[dict[str
         if user_id <= 0 or user_id in seen:
             continue
         username = str(occupant.get("username", ""))[:64]
-        display_name = str(occupant.get("displayName", ""))[:64]
+        display_name = normalized_display_name(username, occupant.get("displayName", ""))[:64]
         if not username:
             continue
         seen.add(user_id)
@@ -1569,7 +1659,8 @@ def client_login(body: LoginBody, request: Request) -> dict:
     return {
         "token": token,
         "username": row["username"],
-        "displayName": row["display_name"],
+        "displayName": normalized_display_name(row["username"], row["display_name"]),
+        "role": normalize_user_role(row["role"]),
         "gameWebSocketUrl": PUBLIC_WS_URL,
         "gameDataPlane": "websocket-authoritative",
         "sessionPolicy": "single-client",
@@ -1968,7 +2059,7 @@ def create_user(body: UserBody, _: sqlite3.Row = Depends(require_admin)) -> dict
                 (
                     body.username,
                     body.display_name,
-                    storage_user_role(db),
+                    normalize_user_role(body.role),
                     password_hasher.hash(body.password),
                     int(body.enabled),
                     now,
@@ -1991,13 +2082,18 @@ def update_user(user_id: int, body: UserBody, admin: sqlite3.Row = Depends(requi
             password_hash = existing["password_hash"]
             if body.password is not None:
                 password_hash = password_hasher.hash(body.password)
+            stored_role = (
+                normalize_user_role(body.role)
+                if "role" in body.model_fields_set
+                else normalize_user_role(existing["role"])
+            )
             db.execute(
                 "UPDATE users SET username=?, display_name=?, role=?, password_hash=?, enabled=?, updated_at=? "
                 "WHERE id=?",
                 (
                     body.username,
                     body.display_name,
-                    storage_user_role(db),
+                    stored_role,
                     password_hash,
                     int(body.enabled),
                     iso_time(utc_now()),
@@ -2009,6 +2105,7 @@ def update_user(user_id: int, body: UserBody, admin: sqlite3.Row = Depends(requi
                 or not body.enabled
                 or body.username.casefold() != existing["username"].casefold()
                 or body.display_name != existing["display_name"]
+                or stored_role != normalize_user_role(existing["role"])
             )
             if invalidates_session:
                 active = db.execute(
@@ -2171,6 +2268,21 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
         existing = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
         if existing is None:
             raise HTTPException(status_code=404, detail="房间不存在")
+        try:
+            current_limits = json.loads(existing["seat_limits"])
+            current_parameters = json.loads(existing["seat_parameters"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=503, detail="房间配置数据损坏") from exc
+        seat_limits = (
+            body.seat_limits
+            if "seat_limits" in body.model_fields_set
+            else current_limits
+        )
+        seat_parameters = (
+            body.seat_parameters
+            if "seat_parameters" in body.model_fields_set
+            else current_parameters
+        )
         intel_stale_after_sec = (
             body.intel_stale_after_sec
             if "intel_stale_after_sec" in body.model_fields_set
@@ -2224,8 +2336,8 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
             body.name != existing["name"]
             or body.description != existing["description"]
             or body.scenario_id != existing["scenario_id"]
-            or body.seat_limits != json.loads(existing["seat_limits"])
-            or body.seat_parameters != json.loads(existing["seat_parameters"])
+            or seat_limits != current_limits
+            or seat_parameters != current_parameters
             or bool(body.enabled) != bool(existing["enabled"])
             or mode != existing["mode"]
             or ai_difficulty != existing["ai_difficulty"]
@@ -2240,8 +2352,8 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
         db.execute(
             "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,mode=?,ai_difficulty=?,ai_provider=?,ai_model=?,ai_resolved_model=?,config_version=?,intel_stale_after_sec=?,intel_archive_after_sec=?,enabled=?,updated_at=? WHERE room_id=?",
             (body.name, body.description, body.scenario_id,
-             json.dumps(body.seat_limits, ensure_ascii=False),
-             json.dumps(body.seat_parameters, ensure_ascii=False), mode, ai_difficulty,
+             json.dumps(seat_limits, ensure_ascii=False),
+             json.dumps(seat_parameters, ensure_ascii=False), mode, ai_difficulty,
              provider, model, "" if ai_changed or mode_changed else existing["ai_resolved_model"],
              config_version, intel_stale_after_sec, intel_archive_after_sec,
              int(body.enabled), now, room_id),
@@ -2405,7 +2517,7 @@ def internal_session(
         raise HTTPException(status_code=403, detail="内部认证失败")
     with database() as db:
         row = db.execute(
-            "SELECT u.id, u.username, u.display_name, u.enabled, s.expires_at "
+            "SELECT u.id, u.username, u.display_name, u.role, u.enabled, s.expires_at "
             "FROM sessions s JOIN users u ON u.id=s.subject_id "
             "WHERE s.token_hash=? AND s.subject_type='player' AND s.expires_at>?",
             (token_digest(body.token), iso_time(utc_now())),
@@ -2416,7 +2528,8 @@ def internal_session(
         "valid": True,
         "userId": row["id"],
         "username": row["username"],
-        "displayName": row["display_name"],
+        "displayName": normalized_display_name(row["username"], row["display_name"]),
+        "role": normalize_user_role(row["role"]),
         "expiresAt": row["expires_at"],
     }
 
@@ -2444,6 +2557,59 @@ def internal_rooms(x_internal_key: str | None = Header(default=None)) -> dict:
         "logoutRequests": [{"id": row["id"], "userId": row["user_id"], "reason": row["reason"],
                             "requestedAt": row["requested_at"]} for row in logout_requests],
     }
+
+
+@app.put("/api/internal/rooms/{room_id}/config")
+def internal_room_config(
+    room_id: str,
+    body: InternalRoomConfigBody,
+    x_internal_key: str | None = Header(default=None),
+) -> dict:
+    require_internal_key(x_internal_key)
+    with database() as db:
+        existing = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="房间不存在")
+        if int(existing["config_version"]) != body.expected_config_version:
+            raise HTTPException(status_code=409, detail="ROOM_CONFIG_VERSION_CONFLICT")
+        if existing["status"] != "preparing":
+            raise HTTPException(status_code=409, detail="只有准备阶段可以编辑房间配置")
+        try:
+            current_limits = json.loads(existing["seat_limits"])
+            current_parameters = json.loads(existing["seat_parameters"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=503, detail="房间配置数据损坏") from exc
+        seat_limits = (
+            body.seat_limits
+            if "seat_limits" in body.model_fields_set
+            else current_limits
+        )
+        seat_parameters = (
+            body.seat_parameters
+            if "seat_parameters" in body.model_fields_set
+            else current_parameters
+        )
+        changed = (
+            body.name != existing["name"]
+            or body.description != existing["description"]
+            or body.scenario_id != existing["scenario_id"]
+            or seat_limits != current_limits
+            or seat_parameters != current_parameters
+        )
+        next_version = int(existing["config_version"]) + (1 if changed else 0)
+        now = iso_time(utc_now())
+        update = db.execute(
+            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,config_version=?,updated_at=? "
+            "WHERE room_id=? AND config_version=?",
+            (body.name, body.description, body.scenario_id,
+             json.dumps(seat_limits, ensure_ascii=False),
+             json.dumps(seat_parameters, ensure_ascii=False), next_version, now,
+             room_id, body.expected_config_version),
+        )
+        if update.rowcount != 1:
+            raise HTTPException(status_code=409, detail="ROOM_CONFIG_VERSION_CONFLICT")
+        row = db.execute("SELECT * FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+    return {"room": public_room(row)}
 
 
 class InternalKickAckBody(BaseModel):

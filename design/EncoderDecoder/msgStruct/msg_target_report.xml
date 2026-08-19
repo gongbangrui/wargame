@@ -1,0 +1,36 @@
+<Message name="Target Report" number="0.2">
+
+    <Header>
+        <Field name="version" bits="16"/>
+        <Field name="length" bits="16"/>
+        <Field name="messageId" bits="16"/>
+        <Field name="originator" bits="24"/>
+        <Field name="destination" bits="24"/>
+    </Header>
+
+    <Body>
+        <Group name="TargetReport" repeatable="True" max="8">
+            <GRI DFI="4045" DUI="001" bits="1"/>
+            <DataUnit DFI="4200" DUI="001" name="TargetType" bits="3"/>
+            <DataUnit DFI="4201" DUI="001" name="TargetQuantity" bits="8"/>
+            <DataUnit DFI="4202" DUI="001" name="IdentificationFriendOrFoe" bits="2"/>
+            <DataUnit DFI="281" DUI="014" name="Latitude00051" bits="22"/>
+            <DataUnit DFI="282" DUI="014" name="Longtitude00051" bits="23"/>
+            <DataUnit DFI="4203" DUI="001" name="TargetStatus" bits="2"/>
+
+            <Field name="Motion" selectable="True">
+                <FPI DFI="4014" DUI="002" bits="1"/>
+                <DataUnit DFI="4204" DUI="001" name="Direction" bits="9"/>
+            </Field>
+
+            <Group name="ObservationTime" selectable="True">
+                <GPI DFI="4014" DUI="001" bits="1"/>
+                <DataUnit DFI="4099" DUI="001" name="Month" bits="4"/>
+                <DataUnit DFI="4019" DUI="001" name="DayOfMonth" bits="5"/>
+                <DataUnit DFI="792" DUI="001" name="Hour" bits="5"/>
+                <DataUnit DFI="797" DUI="004" name="Minute" bits="6"/>
+                <DataUnit DFI="380" DUI="417" name="DataCollectionSecond" bits="6"/>
+            </Group>
+        </Group>
+    </Body>
+</Message>

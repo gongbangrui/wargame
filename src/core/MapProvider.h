@@ -40,6 +40,10 @@ public:
 
     /// @brief Convert simulation logical coordinates (meters) to Mercator meters.
     QPointF toMercator(const GeoPos& logical) const;
+    /// @brief Convert Mercator meters to simulation logical coordinates (meters).
+    GeoPos fromMercator(const QPointF& mercator) const;
+    GeoCoord logicalToGeo(const GeoPos& logical) const;
+    GeoPos geoToLogical(const GeoCoord& coordinate) const;
 
     /// @brief Tile zoom level for current map view.
     int tileZoomForView() const { return m_tileZoom; }

@@ -1,5 +1,23 @@
 include_guard(GLOBAL)
 
+function(wargame_add_vmf_library target source_root)
+    add_library(${target} STATIC
+        ${source_root}/src/vmf/VmfCodec.h
+        ${source_root}/src/vmf/VmfCodec.cpp
+        ${source_root}/src/vmf/VmfProfile.h
+        ${source_root}/src/vmf/VmfProfile.cpp
+        ${source_root}/src/vmf/VmfRuntimeState.h
+        ${source_root}/src/vmf/VmfRuntimeState.cpp
+        ${source_root}/src/vmf/VmfMessageCatalog.h
+        ${source_root}/src/vmf/VmfMessageCatalog.cpp
+    )
+    target_link_libraries(${target} PUBLIC Qt6::Core)
+    target_include_directories(${target} PUBLIC ${source_root}/src)
+    target_compile_definitions(${target} PRIVATE
+        WARGAME_DESIGN_ROOT="${source_root}/design/EncoderDecoder")
+    set_target_properties(${target} PROPERTIES AUTOMOC ON)
+endfunction()
+
 function(wargame_add_domain_library target source_root)
     add_library(${target} STATIC
         ${source_root}/src/core/SimulationEngine.h
@@ -12,6 +30,8 @@ function(wargame_add_domain_library target source_root)
         ${source_root}/src/core/UnitBase.cpp
         ${source_root}/src/core/MessageBus.h
         ${source_root}/src/core/MessageBus.cpp
+        ${source_root}/src/core/GuidedStrikeWorkflow.h
+        ${source_root}/src/core/GuidedStrikeWorkflow.cpp
         ${source_root}/src/core/Scenario.h
         ${source_root}/src/core/Scenario.cpp
         ${source_root}/src/core/Geo.h
@@ -26,6 +46,8 @@ function(wargame_add_domain_library target source_root)
         ${source_root}/src/core/RealTimeClock.h
         ${source_root}/src/core/MessageLogRecorder.h
         ${source_root}/src/core/MessageLogRecorder.cpp
+        ${source_root}/src/vmf/VmfMessageGateway.h
+        ${source_root}/src/vmf/VmfMessageGateway.cpp
         ${source_root}/src/core/SnapshotCodec.h
         ${source_root}/src/core/SnapshotCodec.cpp
         ${source_root}/src/core/LockedStepClock.h
@@ -43,8 +65,10 @@ function(wargame_add_domain_library target source_root)
         ${source_root}/src/units/JammerUAV.h
         ${source_root}/src/units/JammerUAV.cpp
     )
-    target_link_libraries(${target} PUBLIC Qt6::Core)
+    target_link_libraries(${target} PUBLIC Qt6::Core wargame_vmf)
     target_include_directories(${target} PUBLIC ${source_root}/src)
+    target_compile_definitions(${target} PRIVATE
+        WARGAME_DESIGN_ROOT="${source_root}/design/EncoderDecoder")
     set_target_properties(${target} PROPERTIES AUTOMOC ON)
 endfunction()
 

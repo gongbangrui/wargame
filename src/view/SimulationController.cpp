@@ -16,10 +16,12 @@
 #include <QCoreApplication>
 #include <QTimer>
 #include <QUrl>
+#include <QUuid>
 
 #include <qt6keychain/keychain.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace gbr {
@@ -33,11 +35,28 @@ QString rememberedPasswordKey(const QString& server, const QString& username) {
     return QString::fromLatin1(QCryptographicHash::hash(identity, QCryptographicHash::Sha256).toHex());
 }
 
+QJsonObject projectVmfWorkflow(const QJsonObject& source) {
+    static const QStringList fields{
+        QStringLiteral("taskId"), QStringLiteral("stage"), QStringLiteral("side"),
+        QStringLiteral("targetId"), QStringLiteral("attackerId"),
+        QStringLiteral("guideId"), QStringLiteral("correlationId"),
+        QStringLiteral("createdAt"), QStringLiteral("updatedAt")};
+    QJsonObject projected;
+    for (const QString& field : fields) {
+        if (source.contains(field)) projected.insert(field, source.value(field));
+    }
+    return projected;
+}
+
 ScenarioUnit scenarioUnitFromVariantMap(const QVariantMap& data, bool generateId) {
     ScenarioUnit unit;
     unit.id = data.value(QStringLiteral("id")).toString().trimmed();
     if (generateId && unit.id.isEmpty()) {
         unit.id = QStringLiteral("u_%1").arg(QDateTime::currentMSecsSinceEpoch());
+    }
+    unit.vmfUrn = data.value(QStringLiteral("vmfUrn")).toString().trimmed();
+    if (unit.vmfUrn.isEmpty() && !unit.id.isEmpty()) {
+        unit.vmfUrn = QStringLiteral("urn:gbr:wargame:unit:%1").arg(unit.id);
     }
     unit.callsign = data.value(QStringLiteral("callsign")).toString();
     unit.kind = data.value(QStringLiteral("kind"), QStringLiteral("commandpost")).toString();
@@ -114,6 +133,8 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
         if (!isNetworked()) emit projectilesForward();
     });
     connect(&m_engine, &SimulationEngine::messagesChanged, this, &SimulationController::messagesForward);
+    connect(&m_engine, &SimulationEngine::vmfWorkflowChanged, this,
+            &SimulationController::vmfWorkflowChanged);
     connect(&m_engine, &SimulationEngine::timelineChanged, this, &SimulationController::timelineForward);
     connect(&m_engine, &SimulationEngine::mapChanged, this, &SimulationController::mapInfoForward);
     connect(&m_engine, &SimulationEngine::readyForSimChanged, this, &SimulationController::readyForSimForward);
@@ -148,17 +169,30 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
             });
     connect(&m_networkClient, &NetworkClient::authenticated, this,
             [this](const QString& username, const QString& displayName,
-                   const QString& seatId, const QString& server) {
+                   const QString& role, const QString& seatId, const QString& server) {
                 const bool wasNetworked = isNetworked();
                 m_username = username;
                 m_displayName = displayName;
-                m_userRole.clear();
+                const QString normalizedRole = role.trimmed().toLower();
+                m_userRole = normalizedRole == QLatin1String("room_admin")
+                        || normalizedRole == QLatin1String("editor")
+                    ? QStringLiteral("room_admin") : QStringLiteral("player");
                 m_currentSeatId = seatId;
                 m_isObserver = false;
                 m_observerJoinPending = false;
                 m_currentRoomId.clear();
                 m_currentSeatType.clear();
                 m_currentSeatSide.clear();
+                m_roomName.clear();
+                m_roomDescription.clear();
+                m_scenarioId = QStringLiteral("default");
+                m_onlineSeatLimits = {};
+                m_onlineSeatParameters = {};
+                m_lastCommandId.clear();
+                m_lastCommandCode.clear();
+                m_lastCommandAction.clear();
+                m_lastCommandStatus.clear();
+                m_lastCommandMessage.clear();
                 m_communicationState = QStringLiteral("disconnected");
                 m_onlineStage = QStringLiteral("roomSelect");
                 m_serverAddress = server;
@@ -167,6 +201,7 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 m_sessionMode = QStringLiteral("online");
                 applyRoleView();
                 emit sessionChanged();
+                emit roomStateChanged();
                 if (!wasNetworked) emit networkedChanged();
                 emit onlineStateChanged();
                 m_networkClient.requestRooms();
@@ -201,7 +236,14 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 m_onlineSeats = Protocol::seatVariants(directory.seats);
                 m_currentRoomId = directory.roomId;
                 const QString& yours = directory.yourSeatId;
-                if (!yours.isEmpty()) {
+                if (isRoomAdmin()) {
+                    m_currentSeatId.clear();
+                    m_currentSeatType.clear();
+                    m_currentSeatSide.clear();
+                    m_seatReady = false;
+                    m_isObserver = false;
+                    m_onlineStage = QStringLiteral("roomAdmin");
+                } else if (!yours.isEmpty()) {
                     m_currentSeatId = yours;
                     const QStringList parts = yours.split(QLatin1Char('_'));
                     m_currentSeatSide = parts.value(0);
@@ -229,8 +271,11 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                     m_onlineStage = m_currentRoomId.isEmpty()
                         ? QStringLiteral("roomSelect") : QStringLiteral("seatSelect");
                 }
+                applyRoleView();
                 emit onlineSeatsChanged();
+                emit roomStateChanged();
                 emit onlineStateChanged();
+                emit sessionChanged();
             });
     connect(&m_networkClient, &NetworkClient::deploymentPromptReceived, this,
             [this](const QJsonObject& prompt) {
@@ -336,6 +381,13 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
             });
     connect(&m_networkClient, &NetworkClient::snapshotReceived,
             this, &SimulationController::applyRemoteSnapshot);
+    connect(&m_networkClient, &NetworkClient::vmfEventReceived, this,
+            [this](const QJsonObject& event) {
+                const QJsonObject workflow = event.value(QStringLiteral("workflow")).toObject();
+                if (workflow.isEmpty() || workflow == m_remoteVmfWorkflow) return;
+                m_remoteVmfWorkflow = workflow;
+                emit vmfWorkflowChanged();
+            });
     connect(&m_networkClient, &NetworkClient::deltaSnapshotReceived, this,
             [this](const QJsonObject& payload, const QStringList& changedUnitIds) {
                 applyRemoteState(payload, changedUnitIds, true);
@@ -435,6 +487,8 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
             [this](const QString& commandId, const QString& action, const QString& status,
                    const QString& code, const QString& message) {
                 m_lastCommandId = commandId;
+                m_lastCommandCode = code;
+                m_lastCommandAction = action;
                 m_lastCommandStatus = status;
                 m_lastCommandMessage = message;
                 emit commandStatusChanged();
@@ -475,10 +529,11 @@ void SimulationController::setViewMode(const QString& m) {
     if (!viewModeOptions().contains(m)) return;
     if (isNetworked()) {
         QString expected;
-        if (m_userRole == QLatin1String("editor")) expected = QStringLiteral("editor");
-        else if (m_userRole == QLatin1String("director")) expected = QStringLiteral("director");
-        else if (m_userRole == QLatin1String("red")) expected = QStringLiteral("commandpost-red");
-        else if (m_userRole == QLatin1String("blue")) expected = QStringLiteral("commandpost-blue");
+        if (isRoomAdmin()) expected = QStringLiteral("editor");
+        else if (m_currentSeatSide == QLatin1String("red")
+                 || m_currentSeatSide == QLatin1String("blue")) {
+            expected = QStringLiteral("commandpost-%1").arg(m_currentSeatSide);
+        }
         if (!expected.isEmpty() && m != expected) return;
     }
     if (m == m_viewMode) return;
@@ -491,8 +546,8 @@ void SimulationController::setViewMode(const QString& m) {
 
 void SimulationController::setFocusedSide(const QString& s) {
     if (s != QLatin1String("red") && s != QLatin1String("blue")) return;
-    if (isNetworked() && (m_userRole == QLatin1String("red") || m_userRole == QLatin1String("blue"))
-        && s != m_userRole) return;
+    if (isNetworked() && !isRoomAdmin() && !m_currentSeatSide.isEmpty()
+        && s != m_currentSeatSide) return;
     if (m_focusedSide == s) return;
     const QString previousSide = m_focusedSide;
     m_focusedSide = s;
@@ -511,10 +566,17 @@ QString SimulationController::focusedKind() const {
     return snap.value("kind").toString();
 }
 
+QJsonObject SimulationController::vmfWorkflow() const {
+    if (isNetworked()) return projectVmfWorkflow(m_remoteVmfWorkflow);
+    const QString side = m_focusedSide == QLatin1String("blue")
+        ? QStringLiteral("blue") : QStringLiteral("red");
+    const GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(side);
+    return workflow ? projectVmfWorkflow(workflow->snapshot()) : QJsonObject{};
+}
+
 void SimulationController::loadDefault() {
     if (isNetworked()) {
-        if (!m_isObserver && m_userRole == QLatin1String("editor")
-            && m_matchPhase == QLatin1String("preparing"))
+        if (canEditScenario())
             m_networkClient.sendScenarioReplace(ScenarioIo::toJson(ScenarioIo::defaultScenario()));
         return;
     }
@@ -551,8 +613,7 @@ void SimulationController::loadScenario(const QString& path) {
         return;
     }
     if (isNetworked()) {
-        if (!m_isObserver && m_userRole == QLatin1String("editor")
-            && m_matchPhase == QLatin1String("preparing"))
+        if (canEditScenario())
             m_networkClient.sendScenarioReplace(ScenarioIo::toJson(s));
         return;
     }
@@ -564,19 +625,14 @@ void SimulationController::setRunning(bool r) {
         m_engine.setRunning(r);
         return;
     }
-    if (m_isObserver || m_userRole != QLatin1String("director")) return;
-    if (r) {
-        m_networkClient.sendControl(m_matchPhase == QLatin1String("preparing")
-                                        ? QStringLiteral("start") : QStringLiteral("resume"));
-    } else {
-        m_networkClient.sendControl(QStringLiteral("pause"));
-    }
+    Q_UNUSED(r);
+    emit errorForward(QStringLiteral("联网推演生命周期由网页管理员控制"));
 }
 
 void SimulationController::setSpeed(double s) {
     if (isNetworked()) {
-        if (!m_isObserver && m_userRole == QLatin1String("director"))
-            m_networkClient.sendControl(QStringLiteral("speed"), s);
+        Q_UNUSED(s);
+        emit errorForward(QStringLiteral("联网推演生命周期由网页管理员控制"));
     } else {
         m_engine.setSpeedMul(s);
     }
@@ -584,8 +640,7 @@ void SimulationController::setSpeed(double s) {
 
 void SimulationController::stepOnce() {
     if (isNetworked()) {
-        if (!m_isObserver && m_userRole == QLatin1String("director"))
-            m_networkClient.sendControl(QStringLiteral("step"));
+        emit errorForward(QStringLiteral("联网推演生命周期由网页管理员控制"));
     } else {
         m_engine.stepOnce(1.0);
     }
@@ -603,6 +658,280 @@ void SimulationController::command(const QString& action, const QVariantMap& arg
     emit commandExecuted(action, args);
 }
 
+QString SimulationController::guidedStrikeSide() const {
+    if (isNetworked()) return m_currentSeatSide;
+    return m_focusedSide == QLatin1String("blue") ? QStringLiteral("blue")
+                                                    : QStringLiteral("red");
+}
+
+QVariantMap SimulationController::guidedStrikeResult(bool accepted, const QString& code,
+                                                     const QString& message,
+                                                     const QString& requestId) const {
+    QVariantMap result{{QStringLiteral("accepted"), accepted},
+                       {QStringLiteral("code"), code},
+                       {QStringLiteral("message"), message}};
+    if (!requestId.isEmpty()) result.insert(QStringLiteral("requestId"), requestId);
+    return result;
+}
+
+QVariantMap SimulationController::sendGuidedStrikeVmf(Message message) {
+    if (!isNetworked()) {
+        return guidedStrikeResult(false, QStringLiteral("LOCAL_ONLY"),
+                                  QStringLiteral("本地 VMF 消息应通过工作流提交"));
+    }
+    if (m_isObserver || m_currentSeatSide.isEmpty() || m_currentSeatId.isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("SEAT_REQUIRED"),
+                                  QStringLiteral("当前会话没有可用战位"));
+    }
+    if (!m_engine.vmfEnabled()
+        || m_engine.scenario().communicationPolicy.format
+               != QLatin1String("vmf-design-v1")) {
+        return guidedStrikeResult(false, QStringLiteral("VMF_DISABLED"),
+                                  QStringLiteral("当前场景未启用 VMF profile"));
+    }
+    if (message.sender.isEmpty() || message.receiver.isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_ARGUMENT"),
+                                  QStringLiteral("VMF 消息缺少发送方或接收方"));
+    }
+    if (message.traceId.isEmpty()) {
+        message.traceId = QStringLiteral("guided-strike-%1")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    }
+    if (message.correlationId.isEmpty()) {
+        message.correlationId = m_remoteVmfWorkflow
+            .value(QStringLiteral("correlationId")).toString();
+    }
+    if (message.correlationId.isEmpty()) message.correlationId = message.traceId;
+    message.requiresAck = true;
+    message.automaticAck = true;
+    message.timestamp = QDateTime::currentDateTimeUtc();
+
+    Message encoded;
+    QString error;
+    if (!m_engine.prepareVmfMessage(message, &encoded, &error)) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_VMF"), error);
+    }
+    const QJsonObject payload{
+        {QStringLiteral("messageType"), Message::typeName(encoded.type)},
+        {QStringLiteral("senderUnitId"), encoded.sender},
+        {QStringLiteral("receiverUnitId"), encoded.receiver},
+        {QStringLiteral("traceId"), encoded.traceId},
+        {QStringLiteral("correlationId"), encoded.correlationId},
+        {QStringLiteral("vmfMessage"), encoded.vmfMessage},
+        {QStringLiteral("wireBytes"), QString::fromLatin1(encoded.wireBytes.toBase64())},
+        {QStringLiteral("wireBitLength"), encoded.wireBitLength},
+        {QStringLiteral("requiresAck"), encoded.requiresAck},
+        {QStringLiteral("retryCount"), encoded.retryCount},
+        {QStringLiteral("fieldCount"), encoded.payload.value(QStringLiteral("vmfFieldCount"))},
+        {QStringLiteral("payload"), encoded.payload}};
+    const QString requestId = m_networkClient.sendVmfMessage(payload);
+    if (requestId.isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("NETWORK_UNAVAILABLE"),
+                                  QStringLiteral("联网会话尚未建立"));
+    }
+    return guidedStrikeResult(true, QStringLiteral("PENDING"),
+                              QStringLiteral("VMF 消息已发送，等待服务器回执"), requestId);
+}
+
+QVariantMap SimulationController::reportGuidedStrikeTarget(const QString& reconId,
+                                                           const QString& targetId,
+                                                           const QVariantMap& report) {
+    const QString side = guidedStrikeSide();
+    if (side.isEmpty() || reconId.trimmed().isEmpty() || targetId.trimmed().isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_ARGUMENT"),
+                                  QStringLiteral("目标报告缺少侦察机或目标"));
+    }
+    QJsonObject payload = QJsonObject::fromVariantMap(report);
+    payload.insert(QStringLiteral("targetId"), targetId.trimmed());
+    const QJsonObject targetSnapshot = m_engine.unitSnapshot(targetId.trimmed());
+    if (!payload.contains(QStringLiteral("x")) && !payload.contains(QStringLiteral("latitude"))) {
+        const QJsonArray position = targetSnapshot.value(QStringLiteral("position")).toArray();
+        if (position.size() >= 2) {
+            payload.insert(QStringLiteral("x"), position.at(0));
+            payload.insert(QStringLiteral("y"), position.at(1));
+        }
+    }
+    if (!payload.contains(QStringLiteral("targetType"))) {
+        payload.insert(QStringLiteral("targetType"),
+                       targetSnapshot.value(QStringLiteral("kind")).toString(
+                           QStringLiteral("unknown")));
+    }
+    if (!payload.contains(QStringLiteral("targetCount"))) payload.insert(QStringLiteral("targetCount"), 1);
+    if (!payload.contains(QStringLiteral("friendFoe"))) payload.insert(QStringLiteral("friendFoe"), QStringLiteral("enemy"));
+    if (!payload.contains(QStringLiteral("status"))) {
+        payload.insert(QStringLiteral("status"), targetSnapshot.value(QStringLiteral("alive")).toBool(true)
+                           ? QStringLiteral("intact") : QStringLiteral("destroyed"));
+    }
+    if (payload.isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_ARGUMENT"),
+                                  QStringLiteral("目标报告字段不完整"));
+    }
+    if (!isNetworked()) {
+        GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(side);
+        if (!workflow) return guidedStrikeResult(false, QStringLiteral("VMF_DISABLED"), QStringLiteral("当前场景未启用 VMF"));
+        QString error;
+        const bool accepted = workflow->reportTarget(reconId.trimmed(), targetId.trimmed(), payload, &error);
+        return guidedStrikeResult(accepted, accepted ? QStringLiteral("ACCEPTED") : QStringLiteral("REJECTED"),
+                                  accepted ? QStringLiteral("目标报告已进入 VMF 工作流") : error);
+    }
+    Message message;
+    message.type = Message::Type::TargetReport;
+    message.sender = reconId.trimmed();
+    message.receiver = commandPostIdFor(side);
+    message.payload = payload;
+    return sendGuidedStrikeVmf(message);
+}
+
+QVariantMap SimulationController::dispatchGuidedStrike(const QString& attackerId,
+                                                       const QString& targetId,
+                                                       const QVariantList& waypoints) {
+    const QString side = guidedStrikeSide();
+    const QString cpId = commandPostIdFor(side);
+    const QJsonArray points = QJsonArray::fromVariantList(waypoints);
+    if (side.isEmpty() || attackerId.trimmed().isEmpty() || targetId.trimmed().isEmpty()
+        || points.isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_ARGUMENT"),
+                                  QStringLiteral("派单需要攻击机、目标和至少一个航点"));
+    }
+    if (!isNetworked()) {
+        GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(side);
+        if (!workflow) return guidedStrikeResult(false, QStringLiteral("VMF_DISABLED"), QStringLiteral("当前场景未启用 VMF"));
+        QString error;
+        const bool accepted = workflow->confirmDispatch(cpId, attackerId.trimmed(), targetId.trimmed(), points, &error);
+        return guidedStrikeResult(accepted, accepted ? QStringLiteral("ACCEPTED") : QStringLiteral("REJECTED"),
+                                  accepted ? QStringLiteral("打击派单已进入 VMF 工作流") : error);
+    }
+    Message plan;
+    plan.type = Message::Type::StrikePlan;
+    plan.sender = cpId;
+    plan.receiver = attackerId.trimmed();
+    // StrikePlan and AttackOrder are two catalogued edges of one task.  They
+    // must share the workflow correlation, while each envelope still gets a
+    // distinct trace ID so server-side deduplication treats both deliveries
+    // as separate messages.
+    QString correlationId = m_remoteVmfWorkflow
+                                .value(QStringLiteral("correlationId"))
+                                .toString()
+                                .trimmed();
+    if (correlationId.isEmpty()) {
+        correlationId = QStringLiteral("guided-strike-%1")
+                            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    }
+    plan.correlationId = correlationId;
+    plan.payload = QJsonObject{{QStringLiteral("targetId"), targetId.trimmed()},
+                               {QStringLiteral("waypoints"), points}};
+    QVariantMap result = sendGuidedStrikeVmf(plan);
+    if (!result.value(QStringLiteral("accepted")).toBool()) return result;
+    Message order;
+    order.type = Message::Type::AttackOrder;
+    order.sender = cpId;
+    order.receiver = attackerId.trimmed();
+    order.correlationId = correlationId;
+    order.payload = QJsonObject{{QStringLiteral("targetId"), targetId.trimmed()},
+                                {QStringLiteral("waypoints"), points}};
+    order.payload.insert(QStringLiteral("fireNow"), false);
+    const QVariantMap orderResult = sendGuidedStrikeVmf(order);
+    if (!orderResult.value(QStringLiteral("accepted")).toBool()) return orderResult;
+    result.insert(QStringLiteral("requestId"), orderResult.value(QStringLiteral("requestId")));
+    result.insert(QStringLiteral("message"), QStringLiteral("派单与航路已发送，等待服务器工作流事件"));
+    return result;
+}
+
+QVariantMap SimulationController::commandGuidedStrikeGroundGuidance(
+    const QString& guideId, const QString& attackerId, const QString& targetId) {
+    const QString side = guidedStrikeSide();
+    const QString cpId = commandPostIdFor(side);
+    if (side.isEmpty() || guideId.trimmed().isEmpty() || attackerId.trimmed().isEmpty()
+        || targetId.trimmed().isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_ARGUMENT"),
+                                  QStringLiteral("地面引导命令字段不完整"));
+    }
+    if (!isNetworked()) {
+        GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(side);
+        if (!workflow) return guidedStrikeResult(false, QStringLiteral("VMF_DISABLED"), QStringLiteral("当前场景未启用 VMF"));
+        QString error;
+        const bool accepted = workflow->commandGroundGuidance(cpId, guideId.trimmed(), attackerId.trimmed(), targetId.trimmed(), &error);
+        return guidedStrikeResult(accepted, accepted ? QStringLiteral("ACCEPTED") : QStringLiteral("REJECTED"),
+                                  accepted ? QStringLiteral("地面引导命令已进入 VMF 工作流") : error);
+    }
+    Message message;
+    message.type = Message::Type::GroundGuideOrder;
+    message.sender = cpId;
+    message.receiver = guideId.trimmed();
+    message.payload = QJsonObject{{QStringLiteral("attackerId"), attackerId.trimmed()},
+                                  {QStringLiteral("targetId"), targetId.trimmed()}};
+    return sendGuidedStrikeVmf(message);
+}
+
+QVariantMap SimulationController::confirmGuidedStrikeAttack(
+    const QString& guideId, const QString& attackerId, const QString& targetId,
+    const QVariantList& waypoints) {
+    const QString side = guidedStrikeSide();
+    const QJsonArray points = QJsonArray::fromVariantList(waypoints);
+    if (side.isEmpty() || guideId.trimmed().isEmpty() || attackerId.trimmed().isEmpty()
+        || targetId.trimmed().isEmpty() || points.isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_ARGUMENT"),
+                                  QStringLiteral("地面确认攻击需要引导单元、攻击机、目标和航点"));
+    }
+    if (!isNetworked()) {
+        GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(side);
+        if (!workflow) return guidedStrikeResult(false, QStringLiteral("VMF_DISABLED"), QStringLiteral("当前场景未启用 VMF"));
+        QString error;
+        const bool accepted = workflow->confirmGroundAttack(guideId.trimmed(), attackerId.trimmed(), targetId.trimmed(), points, &error);
+        return guidedStrikeResult(accepted, accepted ? QStringLiteral("ACCEPTED") : QStringLiteral("REJECTED"),
+                                  accepted ? QStringLiteral("地面确认已进入 VMF 工作流") : error);
+    }
+    Message message;
+    message.type = Message::Type::GroundAttackConfirm;
+    message.sender = guideId.trimmed();
+    message.receiver = attackerId.trimmed();
+    message.payload = QJsonObject{{QStringLiteral("targetId"), targetId.trimmed()},
+                                  {QStringLiteral("waypoints"), points},
+                                  {QStringLiteral("fireNow"), true}};
+    return sendGuidedStrikeVmf(message);
+}
+
+QVariantMap SimulationController::withdrawGuidedStrike(const QString& attackerId,
+                                                       const QVariantMap& home) {
+    const QString side = guidedStrikeSide();
+    const QString cpId = commandPostIdFor(side);
+    const QJsonObject homeObject = QJsonObject::fromVariantMap(home);
+    double homeX = homeObject.value(QStringLiteral("x")).toDouble(
+        std::numeric_limits<double>::quiet_NaN());
+    double homeY = homeObject.value(QStringLiteral("y")).toDouble(
+        std::numeric_limits<double>::quiet_NaN());
+    if (!std::isfinite(homeX) || !std::isfinite(homeY)) {
+        const QJsonArray position = m_engine.unitSnapshot(attackerId.trimmed())
+                                        .value(QStringLiteral("position")).toArray();
+        if (position.size() >= 2) {
+            homeX = position.at(0).toDouble();
+            homeY = position.at(1).toDouble();
+        }
+    }
+    if (side.isEmpty() || attackerId.trimmed().isEmpty() || !std::isfinite(homeX)
+        || !std::isfinite(homeY)) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_ARGUMENT"),
+                                  QStringLiteral("撤离需要攻击机和有效返航位置"));
+    }
+    if (!isNetworked()) {
+        GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(side);
+        if (!workflow) return guidedStrikeResult(false, QStringLiteral("VMF_DISABLED"), QStringLiteral("当前场景未启用 VMF"));
+        QString error;
+        const bool accepted = workflow->confirmWithdraw(cpId, attackerId.trimmed(), homeX, homeY, &error);
+        return guidedStrikeResult(accepted, accepted ? QStringLiteral("ACCEPTED") : QStringLiteral("REJECTED"),
+                                  accepted ? QStringLiteral("撤离命令已进入 VMF 工作流") : error);
+    }
+    Message message;
+    message.type = Message::Type::WithdrawOrder;
+    message.sender = cpId;
+    message.receiver = attackerId.trimmed();
+    message.payload = QJsonObject{{QStringLiteral("homeX"), homeX},
+                                  {QStringLiteral("homeY"), homeY},
+                                  {QStringLiteral("x"), homeX},
+                                  {QStringLiteral("y"), homeY}};
+    return sendGuidedStrikeVmf(message);
+}
+
 QJsonObject SimulationController::unitsJson() const {
     return ScenarioIo::toJson(m_engine.scenario());
 }
@@ -610,15 +939,8 @@ QJsonObject SimulationController::unitsJson() const {
 QString SimulationController::upsertUnit(const QVariantMap& data) {
     ScenarioUnit u = scenarioUnitFromVariantMap(data, true);
     if (isNetworked()) {
-        if (m_isObserver) return {};
-        if (m_matchPhase != QLatin1String("preparing")) return {};
-        const bool ownsSide = m_userRole == QLatin1String("editor")
-            || m_userRole == u.side;
-        if (!ownsSide || (u.side != QLatin1String("red") && u.side != QLatin1String("blue"))) return {};
-        if (!u.id.isEmpty()) {
-            const UnitBase* existing = m_engine.unit(u.id);
-            if (existing && existing->sideStr() != m_userRole && m_userRole != QLatin1String("editor")) return {};
-        }
+        if (!canEditScenario()
+            || (u.side != QLatin1String("red") && u.side != QLatin1String("blue"))) return {};
         m_networkClient.sendScenarioUpsert(scenarioUnitJson(u));
         return u.id;
     }
@@ -635,8 +957,7 @@ bool SimulationController::replaceUnits(const QVariantList& units) {
         replacement.units.push_back(scenarioUnitFromVariantMap(value.toMap(), false));
     }
     if (isNetworked()) {
-        if (m_isObserver || m_userRole != QLatin1String("editor")
-            || m_matchPhase != QLatin1String("preparing")) return false;
+        if (!canEditScenario()) return false;
         m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
         return true;
     }
@@ -649,8 +970,7 @@ bool SimulationController::replaceUnits(const QVariantList& units) {
 bool SimulationController::replaceScenario(const QVariantMap& scenario) {
     const Scenario replacement = ScenarioIo::fromJson(QJsonObject::fromVariantMap(scenario));
     if (isNetworked()) {
-        if (m_isObserver || m_userRole != QLatin1String("editor")
-            || m_matchPhase != QLatin1String("preparing")) return false;
+        if (!canEditScenario()) return false;
         m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
         return true;
     }
@@ -662,10 +982,7 @@ bool SimulationController::replaceScenario(const QVariantMap& scenario) {
 
 void SimulationController::removeUnit(const QString& id) {
     if (isNetworked()) {
-        if (m_isObserver) return;
-        if (m_matchPhase != QLatin1String("preparing")) return;
-        const UnitBase* unit = m_engine.unit(id);
-        if (!unit || (m_userRole != QLatin1String("editor") && unit->sideStr() != m_userRole)) return;
+        if (!canEditScenario() || !m_engine.unit(id)) return;
         m_networkClient.sendScenarioRemove(id);
         return;
     }
@@ -679,7 +996,7 @@ void SimulationController::removeUnit(const QString& id) {
 
 bool SimulationController::applyScenarioReplacement(const Scenario& replacement) {
     if (isNetworked()) {
-        if (m_isObserver || m_matchPhase != QLatin1String("preparing")) return false;
+        if (!canEditScenario()) return false;
         m_networkClient.sendScenarioReplace(ScenarioIo::toJson(replacement));
         return true;
     }
@@ -691,16 +1008,7 @@ bool SimulationController::applyScenarioReplacement(const Scenario& replacement)
 
 bool SimulationController::removeUnits(const QStringList& ids) {
     if (ids.isEmpty()) return false;
-    if (isNetworked() && m_isObserver) return false;
-    if (isNetworked() && m_userRole != QLatin1String("editor")) {
-        if (m_matchPhase != QLatin1String("preparing")) return false;
-        for (const QString& id : ids) {
-            const UnitBase* unit = m_engine.unit(id);
-            if (!unit || unit->sideStr() != m_userRole) return false;
-        }
-        for (const QString& id : ids) m_networkClient.sendScenarioRemove(id);
-        return true;
-    }
+    if (isNetworked() && !canEditScenario()) return false;
     const QSet<QString> selected(ids.cbegin(), ids.cend());
     Scenario replacement = m_engine.scenario();
     std::erase_if(replacement.units, [&selected](const ScenarioUnit& unit) {
@@ -712,25 +1020,9 @@ bool SimulationController::removeUnits(const QStringList& ids) {
 bool SimulationController::batchUpdateUnits(const QStringList& ids,
                                             const QVariantMap& changes) {
     if (ids.isEmpty() || changes.isEmpty()) return false;
-    if (isNetworked() && m_isObserver) return false;
+    if (isNetworked() && !canEditScenario()) return false;
     const QSet<QString> selected(ids.cbegin(), ids.cend());
     Scenario replacement = m_engine.scenario();
-    if (isNetworked() && m_userRole != QLatin1String("editor")) {
-        if (m_matchPhase != QLatin1String("preparing")) return false;
-        for (ScenarioUnit& unit : replacement.units) {
-            if (!selected.contains(unit.id)) continue;
-            if (unit.side != m_userRole) return false;
-            QVariantMap data = scenarioUnitJson(unit).toVariantMap();
-            data[QStringLiteral("x")] = unit.pos.x + changes.value(QStringLiteral("offsetX"), 0.0).toDouble();
-            data[QStringLiteral("y")] = unit.pos.y + changes.value(QStringLiteral("offsetY"), 0.0).toDouble();
-            for (auto it = changes.constBegin(); it != changes.constEnd(); ++it) {
-                if (it.key() != QLatin1String("offsetX") && it.key() != QLatin1String("offsetY")
-                    && it.key() != QLatin1String("side")) data[it.key()] = it.value();
-            }
-            upsertUnit(data);
-        }
-        return true;
-    }
     const double offsetX = changes.value(QStringLiteral("offsetX"), 0.0).toDouble();
     const double offsetY = changes.value(QStringLiteral("offsetY"), 0.0).toDouble();
     static const QSet<QString> editableFields{
@@ -761,12 +1053,9 @@ bool SimulationController::transformUnits(const QStringList& ids,
                                           const QString& operation,
                                           double value) {
     if (ids.isEmpty()) return false;
-    if (isNetworked() && m_isObserver) return false;
+    if (isNetworked() && !canEditScenario()) return false;
     const QSet<QString> selected(ids.cbegin(), ids.cend());
     Scenario replacement = m_engine.scenario();
-    if (isNetworked() && m_userRole != QLatin1String("editor")) {
-        return false;
-    }
     std::vector<ScenarioUnit*> units;
     for (ScenarioUnit& unit : replacement.units) {
         if (selected.contains(unit.id)) units.push_back(&unit);
@@ -839,7 +1128,7 @@ QStringList SimulationController::pasteUnits(const QVariantList& copied, double 
                                              double offsetY,
                                              const QString& sideOverride) {
     if (copied.isEmpty() || !std::isfinite(offsetX) || !std::isfinite(offsetY)) return {};
-    if (isNetworked() && m_isObserver) return {};
+    if (isNetworked() && !canEditScenario()) return {};
     Scenario replacement = m_engine.scenario();
     QSet<QString> existing;
     for (const ScenarioUnit& unit : replacement.units) existing.insert(unit.id);
@@ -867,14 +1156,7 @@ QStringList SimulationController::pasteUnits(const QVariantList& copied, double 
         existing.insert(id);
         created.append(id);
     }
-    if (isNetworked() && m_userRole != QLatin1String("editor")) {
-        if (m_matchPhase != QLatin1String("preparing")) return {};
-        for (const QVariant& value : copied) {
-            const QVariantMap source = value.toMap();
-            if (source.value(QStringLiteral("side")).toString() != m_userRole) return {};
-        }
-        for (const ScenarioUnit& unit : newUnits) upsertUnit(scenarioUnitJson(unit).toVariantMap());
-    } else if (!applyScenarioReplacement(replacement)) return {};
+    if (!applyScenarioReplacement(replacement)) return {};
     return created;
 }
 
@@ -960,9 +1242,9 @@ Q_INVOKABLE void SimulationController::setUnitSchedule(const QString& uid, const
                                                     {QStringLiteral("schedule"), schedule}});
             return;
         }
+        if (!canEditScenario()) return;
         for (const auto& unit : m_engine.scenario().units) {
             if (unit.id != uid) continue;
-            if (m_userRole != QLatin1String("editor") && unit.side != m_userRole) return;
             QVariantMap data = scenarioUnitJson(unit).toVariantMap();
             data[QStringLiteral("schedule")] = schedule;
             m_networkClient.sendScenarioUpsert(QJsonObject::fromVariantMap(data));
@@ -1467,10 +1749,14 @@ void SimulationController::useLocalMode() {
     m_userRole.clear();
     m_serverAddress.clear();
     m_remoteMessages.clear();
+    const bool hadVmfWorkflow = !m_remoteVmfWorkflow.isEmpty();
+    m_remoteVmfWorkflow = {};
     m_remoteProjectiles.clear();
     m_chatMessages.clear();
     m_remoteScenarioRevision = -1;
     m_lastCommandId.clear();
+    m_lastCommandCode.clear();
+    m_lastCommandAction.clear();
     m_lastCommandStatus.clear();
     m_lastCommandMessage.clear();
     m_onlineRooms.clear();
@@ -1484,6 +1770,11 @@ void SimulationController::useLocalMode() {
     m_observerTrajectories = {};
     m_pendingSeatTransfers.clear();
     m_communicationState = QStringLiteral("disconnected");
+    m_roomName.clear();
+    m_roomDescription.clear();
+    m_scenarioId = QStringLiteral("default");
+    m_onlineSeatLimits = {};
+    m_onlineSeatParameters = {};
     m_currentRoomId.clear();
     m_currentSeatId.clear();
     m_currentSeatType.clear();
@@ -1496,6 +1787,7 @@ void SimulationController::useLocalMode() {
     emit sessionChanged();
     emit networkStatusChanged();
     emit messagesForward();
+    if (hadVmfWorkflow) emit vmfWorkflowChanged();
     emit projectilesForward();
     emit chatMessagesChanged();
     emit commandStatusChanged();
@@ -1546,6 +1838,7 @@ void SimulationController::logoutOnline() {
     m_sessionMode = QStringLiteral("unselected");
     m_networkStatus = QStringLiteral("请选择运行模式");
     emit sessionChanged();
+    emit roomStateChanged();
     emit networkStatusChanged();
     if (!wasNetworked) emit networkedChanged();
 }
@@ -1647,6 +1940,20 @@ void SimulationController::leaveOnlineRoom() {
 void SimulationController::setSeatReady(bool ready) {
     if (!isNetworked() || m_isObserver || m_currentSeatId.isEmpty()) return;
     m_networkClient.sendSeatReady(ready);
+}
+
+void SimulationController::updateOnlineRoomConfig(const QVariantMap& config) {
+    if (!isNetworked() || !isRoomAdmin() || m_currentRoomId.isEmpty()
+        || m_matchPhase != QLatin1String("preparing")) {
+        emit errorForward(QStringLiteral("只有已进入准备阶段房间的房间管理员可以保存配置"));
+        return;
+    }
+    QVariantMap args = config;
+    if (!args.contains(QStringLiteral("expectedConfigVersion"))) {
+        args.insert(QStringLiteral("expectedConfigVersion"), m_configVersion);
+    }
+    m_networkClient.sendCommand(QStringLiteral("updateRoomConfig"), args);
+    emit commandExecuted(QStringLiteral("updateRoomConfig"), args);
 }
 
 void SimulationController::deployOnlineUnit(const QString& unitId, const QVariantMap& position) {
@@ -1752,11 +2059,16 @@ void SimulationController::disconnectFromPeer() {
 }
 
 void SimulationController::applyRoleView() {
+    if (!isNetworked()) {
+        ensureFocusedConsistent();
+        return;
+    }
     QString target;
-    if (m_userRole == QLatin1String("editor")) target = QStringLiteral("editor");
-    else if (m_userRole == QLatin1String("director")) target = QStringLiteral("director");
-    else if (m_userRole == QLatin1String("red")) target = QStringLiteral("commandpost-red");
-    else if (m_userRole == QLatin1String("blue")) target = QStringLiteral("commandpost-blue");
+    if (isRoomAdmin()) target = QStringLiteral("editor");
+    else if (m_currentSeatSide == QLatin1String("red")
+             || m_currentSeatSide == QLatin1String("blue")) {
+        target = QStringLiteral("commandpost-%1").arg(m_currentSeatSide);
+    }
     if (!target.isEmpty()) setViewMode(target);
     ensureFocusedConsistent();
 }
@@ -1775,6 +2087,11 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_aiDifficulty = QStringLiteral("normal");
     m_aiEffectiveEngine = QStringLiteral("rules");
     m_configVersion = 1;
+    m_roomName.clear();
+    m_roomDescription.clear();
+    m_scenarioId = QStringLiteral("default");
+    m_onlineSeatLimits = {};
+    m_onlineSeatParameters = {};
     m_remoteReadyForSim = false;
     m_remoteCpIssues.clear();
     m_communicationState = QStringLiteral("disconnected");
@@ -1793,13 +2110,17 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_chatMessages.clear();
     m_remoteScenarioRevision = -1;
     m_lastCommandId.clear();
+    m_lastCommandCode.clear();
+    m_lastCommandAction.clear();
     m_lastCommandStatus.clear();
     m_lastCommandMessage.clear();
     m_isObserver = preserveRoomId && wasObserver;
     m_observerJoinPending = false;
     m_onlineStage = m_isObserver ? QStringLiteral("observer")
         : preserveRoomId && !m_currentRoomId.isEmpty()
-            ? QStringLiteral("seatSelect") : QStringLiteral("roomSelect");
+            ? (isRoomAdmin() ? QStringLiteral("roomAdmin")
+                             : QStringLiteral("seatSelect"))
+            : QStringLiteral("roomSelect");
 
     Scenario emptyProjection = m_engine.scenario();
     emptyProjection.units.clear();
@@ -1817,6 +2138,7 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     emit readyForSimForward();
     emit roomStateChanged();
     emit onlineStateChanged();
+    emit sessionChanged();
     emit mapInfoForward();
     emit onlineIntelChanged();
 }
@@ -1859,8 +2181,14 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     const QString previousAiDifficulty = m_aiDifficulty;
     const QString previousAiEffectiveEngine = m_aiEffectiveEngine;
     const qint64 previousConfigVersion = m_configVersion;
+    const QString previousRoomName = m_roomName;
+    const QString previousRoomDescription = m_roomDescription;
+    const QString previousScenarioId = m_scenarioId;
+    const QJsonObject previousSeatLimits = m_onlineSeatLimits;
+    const QJsonObject previousSeatParameters = m_onlineSeatParameters;
     const QString previousCommunicationState = m_communicationState;
     const QVariantList previousMessages = m_remoteMessages;
+    const QJsonObject previousVmfWorkflow = m_remoteVmfWorkflow;
     const QVariantList previousMapMarks = m_onlineMapMarks;
     const QVariantList previousIntelRecords = m_onlineIntelRecords;
     const qint64 previousIntelRevision = m_onlineIntelRevision;
@@ -1898,6 +2226,11 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     m_aiDifficulty = room.aiDifficulty;
     m_aiEffectiveEngine = room.aiEngine;
     m_configVersion = room.configVersion;
+    m_roomName = room.roomName;
+    m_roomDescription = room.roomDescription;
+    m_scenarioId = room.scenarioId;
+    m_onlineSeatLimits = room.seatLimits;
+    m_onlineSeatParameters = room.seatParameters;
     const QString projectedCommunication = payload.value(QStringLiteral("roomState"))
                                                .toObject()
                                                .value(QStringLiteral("communicationState"))
@@ -1911,9 +2244,19 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     } else {
         m_communicationState = QStringLiteral("disconnected");
     }
+    const QJsonObject incomingRoomState = payload.value(QStringLiteral("roomState")).toObject();
+    QJsonObject incomingVmfWorkflow = incomingRoomState.value(QStringLiteral("vmfWorkflow")).toObject();
+    if (incomingVmfWorkflow.isEmpty()) {
+        const QJsonObject workflows = incomingRoomState.value(QStringLiteral("vmfWorkflows")).toObject();
+        incomingVmfWorkflow = workflows.value(
+            m_focusedSide == QLatin1String("blue") ? QStringLiteral("blue")
+                                                    : QStringLiteral("red")).toObject();
+    }
+    m_remoteVmfWorkflow = incomingVmfWorkflow;
     const QVariantList roomSeats = Protocol::seatVariants(room.seats);
+    const bool roomAdminSession = !room.observer && isRoomAdmin() && roomSelectionConfirmed;
     bool currentSeatPresent = room.observer;
-    if (roomSelectionConfirmed && !m_currentSeatId.isEmpty()) {
+    if (!roomAdminSession && roomSelectionConfirmed && !m_currentSeatId.isEmpty()) {
         for (const QVariant& value : roomSeats) {
             const QVariantMap seat = value.toMap();
             if (seat.value(QStringLiteral("seatId")).toString() == m_currentSeatId
@@ -1924,7 +2267,7 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
             }
         }
     }
-    if (!currentSeatPresent) {
+    if (!roomAdminSession && !currentSeatPresent) {
         m_currentSeatId.clear();
         m_currentSeatType.clear();
         m_currentSeatSide.clear();
@@ -1937,6 +2280,8 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
         || m_matchPhase == QLatin1String("finished");
     if (room.observer) {
         m_onlineStage = QStringLiteral("observer");
+    } else if (roomAdminSession) {
+        m_onlineStage = QStringLiteral("roomAdmin");
     } else if (roomSelectionConfirmed && currentSeatPresent && activePhase) {
         m_onlineStage = QStringLiteral("battle");
     } else if (roomSelectionConfirmed && currentSeatPresent) {
@@ -2035,10 +2380,17 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
                                      room.simTime, room.running, room.speed,
                                      partialRuntime);
     invalidateCaches();
+    applyRoleView();
     ensureFocusedConsistent();
     if (m_remoteMessages != previousMessages) emit messagesForward();
+    if (m_remoteVmfWorkflow != previousVmfWorkflow) emit vmfWorkflowChanged();
     if (m_onlineMapMarks != previousMapMarks) emit onlineMapMarksChanged();
-    if (m_onlineSeats != previousSeats) emit onlineSeatsChanged();
+    if (m_onlineSeats != previousSeats) {
+        emit onlineSeatsChanged();
+        // canEditScenario is also a server-confirmed permission gate: a room
+        // admin may edit the initial scene only while no seat is occupied.
+        emit roomStateChanged();
+    }
     if (m_remoteReadyForSim != previousReadyForSim
         || m_remoteCpIssues != previousCpIssues) {
         emit readyForSimForward();
@@ -2048,6 +2400,11 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
         || m_aiDifficulty != previousAiDifficulty
         || m_aiEffectiveEngine != previousAiEffectiveEngine
         || m_configVersion != previousConfigVersion
+        || m_roomName != previousRoomName
+        || m_roomDescription != previousRoomDescription
+        || m_scenarioId != previousScenarioId
+        || m_onlineSeatLimits != previousSeatLimits
+        || m_onlineSeatParameters != previousSeatParameters
         || m_communicationState != previousCommunicationState) {
         emit roomStateChanged();
     }

@@ -15,6 +15,7 @@ source_globs=(
   --glob '*.mjs'
   --glob '*.sh'
   --glob '!build/**'
+  --glob '!**/build/**'
   --glob '!map/**'
 )
 

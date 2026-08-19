@@ -2,6 +2,8 @@
 #include "UnitBase.h"
 #include "SnapshotCodec.h"
 #include "LocalTransport.h"
+#include "vmf/VmfProfile.h"
+#include "vmf/VmfRuntimeState.h"
 #include "../units/AttackUAV.h"
 
 #include <QCoreApplication>
@@ -126,12 +128,42 @@ ScenarioUnit normalizeScenarioUnitDefaults(ScenarioUnit unit) {
     if (std::isfinite(unit.collisionHalfHeight) && unit.collisionHalfHeight == 0.0) {
         unit.collisionHalfHeight = UnitBase::defaultCollisionHalfHeightM(kind);
     }
+    // A copied editor DTO may carry the generated URN of its old id.  Only
+    // regenerate the repository-owned default; an explicit external URN is
+    // stable identity and must survive an id rename.
+    const QString generatedPrefix = QStringLiteral("urn:gbr:wargame:unit:");
+    if (!unit.id.isEmpty()
+        && (unit.vmfUrn.trimmed().isEmpty()
+            || (unit.vmfUrn.startsWith(generatedPrefix)
+                && unit.vmfUrn.mid(generatedPrefix.size()) != unit.id))) {
+        unit.vmfUrn = QStringLiteral("urn:gbr:wargame:unit:%1").arg(unit.id);
+    }
     return unit;
 }
 
 bool isHostileTarget(const UnitBase* attacker, const UnitBase* target) {
     return attacker && target && attacker->alive() && target->alive()
         && attacker->side() != target->side();
+}
+
+QString defaultVmfProfileRoot() {
+    const QString configured = qEnvironmentVariable("WARGAME_VMF_ROOT").trimmed();
+    if (!configured.isEmpty()) return configured;
+    const QStringList candidates{
+#ifdef WARGAME_DESIGN_ROOT
+        QStringLiteral(WARGAME_DESIGN_ROOT),
+#endif
+        QDir(QCoreApplication::applicationDirPath())
+            .filePath(QStringLiteral("design/EncoderDecoder")),
+        QDir::current().filePath(QStringLiteral("design/EncoderDecoder")),
+        QDir::current().filePath(QStringLiteral("../design/EncoderDecoder")),
+        QDir::current().filePath(QStringLiteral("../../design/EncoderDecoder"))};
+    for (const QString& candidate : candidates) {
+        if (QFileInfo(QDir(candidate).filePath(QStringLiteral("msgStruct/msg0_1.xml"))).exists()) {
+            return QFileInfo(candidate).absoluteFilePath();
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -161,6 +193,13 @@ SimulationEngine::SimulationEngine(ITransport* transport, QObject* parent)
     // message cache and QML signals stay in sync regardless of which
     // transport is in use.
     m_transport->setMessageSink([this](const QJsonObject& obj) { onMessagePosted(obj); });
+    if (m_transport->bus()) {
+        connect(m_transport->bus(), &MessageBus::ackStateChanged, this,
+                [this](const QString& messageId, bool acknowledged, int retryCount,
+                       const QString& reason) {
+                    updateMessageAckState(messageId, acknowledged, retryCount, reason);
+                });
+    }
 
     m_dirtyTimer.setInterval(16);
     m_dirtyTimer.setSingleShot(true);
@@ -173,11 +212,327 @@ SimulationEngine::~SimulationEngine() {
     m_dirtyTimer.stop();
     // An externally-owned transport can outlive the engine. Do not leave its
     // message sink pointing at this destroyed object.
-    if (m_transport) m_transport->setMessageSink({});
+    if (m_transport) {
+        m_transport->setMessageSink({});
+        // The encoder captures this engine through the VMF gateway.  Clear it
+        // before an externally owned transport can outlive the engine.
+        if (m_transport->bus()) m_transport->bus()->setVmfEncoder({});
+    }
 }
 
 void SimulationEngine::loadDefaultScenario() {
     setScenario(ScenarioIo::defaultScenario());
+}
+
+QString SimulationEngine::locateVmfProfileRoot() {
+    return defaultVmfProfileRoot();
+}
+
+bool SimulationEngine::configureCommunication(const Scenario& scenario, QString* error) {
+    if (error) error->clear();
+    if (scenario.communicationPolicy.format == QLatin1String("native")) {
+        if (m_transport && m_transport->bus()) m_transport->bus()->setVmfEncoder({});
+        m_vmfGateway.reset();
+        m_vmfDictionaries.reset();
+        m_vmfCatalog.reset();
+        m_vmfProfileError.clear();
+        m_redGuidedStrikeWorkflow.reset();
+        m_blueGuidedStrikeWorkflow.reset();
+        emit vmfWorkflowChanged();
+        return true;
+    }
+    QList<vmf::Diagnostic> diagnostics;
+    const QString root = locateVmfProfileRoot();
+    const auto dictionaries = vmf::VmfProfile::load(
+        scenario.communicationPolicy.vmfProfile.isEmpty()
+            ? QString::fromLatin1(vmf::VmfProfile::DesignV1)
+            : scenario.communicationPolicy.vmfProfile,
+        root, &diagnostics);
+    if (!dictionaries) {
+        m_vmfProfileError = vmf::Codec::diagnosticsToString(diagnostics);
+        if (error) *error = m_vmfProfileError.isEmpty()
+            ? QStringLiteral("无法加载 VMF profile: %1").arg(root) : m_vmfProfileError;
+        return false;
+    }
+    QList<vmf::Diagnostic> catalogDiagnostics;
+    const auto catalog = vmf::VmfProfile::loadCatalog(
+        scenario.communicationPolicy.vmfProfile.isEmpty()
+            ? QString::fromLatin1(vmf::VmfProfile::DesignV1)
+            : scenario.communicationPolicy.vmfProfile,
+        root, &catalogDiagnostics);
+    if (!catalog) {
+        m_vmfProfileError = vmf::Codec::diagnosticsToString(catalogDiagnostics);
+        if (error) *error = m_vmfProfileError.isEmpty()
+            ? QStringLiteral("无法加载 VMF 消息目录: %1").arg(root) : m_vmfProfileError;
+        return false;
+    }
+    m_vmfDictionaries = dictionaries;
+    m_vmfCatalog = catalog;
+    m_vmfGateway = std::make_unique<vmf::VmfMessageGateway>(
+        m_transport ? m_transport->bus() : nullptr, m_vmfDictionaries, m_vmfCatalog, this);
+    m_vmfGateway->setAutomaticAckEnabled(scenario.communicationPolicy.automaticAck);
+    m_vmfGateway->setCoordinateResolver([this](double x, double y)
+        -> std::optional<GeoCoord> {
+        if (!m_map || m_map->metadataRevision() <= 0
+            || !m_map->contains(GeoPos{x, y, 0.0})) {
+            return std::nullopt;
+        }
+        const GeoCoord coordinate = m_map->logicalToGeo(GeoPos{x, y, 0.0});
+        if (!std::isfinite(coordinate.lat) || !std::isfinite(coordinate.lon)
+            || coordinate.lat < -90.0 || coordinate.lat > 90.0
+            || coordinate.lon < -180.0 || coordinate.lon > 180.0) {
+            return std::nullopt;
+        }
+        return coordinate;
+    });
+    if (m_transport && m_transport->bus()) {
+        m_transport->bus()->setVmfEncoder(
+            [this](const Message& input, Message* output, QString* encodeError) {
+                return m_vmfGateway && m_vmfGateway->prepareDomainMessage(
+                    input, output, encodeError);
+            });
+    }
+    m_vmfProfileError.clear();
+    return true;
+}
+
+QJsonObject SimulationEngine::collectVmfRuntimeState() const {
+    if (!m_vmfGateway || !m_transport || !m_transport->bus()) return {};
+
+    vmf::RuntimeState state;
+    state.profileId = m_scenario.communicationPolicy.vmfProfile.isEmpty()
+        ? QString::fromLatin1(vmf::RuntimeState::ProfileId)
+        : m_scenario.communicationPolicy.vmfProfile;
+    for (GuidedStrikeWorkflow* workflow : {m_redGuidedStrikeWorkflow.get(),
+                                            m_blueGuidedStrikeWorkflow.get()}) {
+        if (workflow && workflow->stage() != GuidedStrikeWorkflow::Stage::Idle) {
+            state.activeTasks.append(workflow->snapshot());
+        }
+    }
+    const QJsonArray pending = m_transport->bus()->pendingAckState();
+    for (const QJsonValue& value : pending) {
+        const QJsonObject entry = value.toObject();
+        const QJsonObject message = entry.value(QStringLiteral("message")).toObject();
+        QJsonObject ack{
+            {QStringLiteral("messageId"), message.value(QStringLiteral("id"))},
+            {QStringLiteral("type"), message.value(QStringLiteral("type"))},
+            {QStringLiteral("traceId"), message.value(QStringLiteral("traceId"))},
+            {QStringLiteral("correlationId"), message.value(QStringLiteral("correlationId"))},
+            {QStringLiteral("sender"), message.value(QStringLiteral("sender"))},
+            {QStringLiteral("receiver"), message.value(QStringLiteral("receiver"))},
+            {QStringLiteral("sentAt"), entry.value(QStringLiteral("sentAt"))},
+            {QStringLiteral("retries"), entry.value(QStringLiteral("retries"))},
+            {QStringLiteral("retryCount"), message.value(QStringLiteral("retryCount"))},
+            {QStringLiteral("requiresAck"), message.value(QStringLiteral("requiresAck"))},
+            {QStringLiteral("automaticAck"), message.value(QStringLiteral("automaticAck"))},
+            {QStringLiteral("payload"), message.value(QStringLiteral("payload"))},
+            {QStringLiteral("vmfMessage"), message.value(QStringLiteral("vmfMessage"))},
+            {QStringLiteral("wireFormat"), message.value(QStringLiteral("wireFormat"))}};
+        if (message.contains(QStringLiteral("wireBytes"))) {
+            ack.insert(QStringLiteral("wireBytes"), message.value(QStringLiteral("wireBytes")));
+            ack.insert(QStringLiteral("wireBitLength"), message.value(QStringLiteral("wireBitLength")));
+        }
+        state.pendingAcks.append(ack);
+    }
+    state.seenMessageIds = m_transport->bus()->automaticMessageState();
+    state.traceSummaries = m_vmfGateway->recentTraceSummaries();
+    QString validationError;
+    if (!state.validate(&validationError)) {
+        qWarning() << "SimulationEngine: refusing to export invalid VMF runtime state"
+                   << validationError;
+        return {};
+    }
+    return state.toJson();
+}
+
+bool SimulationEngine::restoreVmfRuntimeState(const QJsonObject& json, QString* error) {
+    if (error) error->clear();
+    if (json.isEmpty()) return true;
+    if (!m_vmfGateway || !m_transport || !m_transport->bus()) {
+        if (error) *error = QStringLiteral("当前场景未启用 VMF，不能恢复 VMF 状态");
+        return false;
+    }
+    vmf::RuntimeState state;
+    QString stateError;
+    if (!vmf::RuntimeState::fromJson(json, &state, &stateError)) {
+        if (error) *error = stateError;
+        return false;
+    }
+    const QString expectedProfile = m_scenario.communicationPolicy.vmfProfile.isEmpty()
+        ? QString::fromLatin1(vmf::RuntimeState::ProfileId)
+        : m_scenario.communicationPolicy.vmfProfile;
+    if (state.profileId != expectedProfile) {
+        if (error) *error = QStringLiteral("VMF 运行时状态 profile 与场景不一致");
+        return false;
+    }
+
+    // Validate every workflow against a detached instance before touching the
+    // live workflows.  A malformed second task must not leave the first side
+    // half-restored.
+    QSet<QString> restoredSides;
+    for (const QJsonValue& value : state.activeTasks) {
+        const QJsonObject task = value.toObject();
+        const QString side = task.value(QStringLiteral("side")).toString();
+        GuidedStrikeWorkflow* workflow = guidedStrikeWorkflow(side);
+        if (!workflow) {
+            if (error) *error = QStringLiteral("VMF 活动任务阵营无对应工作流");
+            return false;
+        }
+        if (restoredSides.contains(side)) {
+            if (error) *error = QStringLiteral("VMF 活动任务同一阵营重复");
+            return false;
+        }
+        const QJsonObject current = workflow->snapshot();
+        if (task.value(QStringLiteral("commandPostId")).toString()
+                != current.value(QStringLiteral("commandPostId")).toString()) {
+            if (error) *error = QStringLiteral("VMF 活动任务指挥所与场景不一致");
+            return false;
+        }
+        GuidedStrikeWorkflow candidate(nullptr, side,
+                                       current.value(QStringLiteral("commandPostId")).toString());
+        QString workflowError;
+        if (!candidate.restoreSnapshot(task, &workflowError)) {
+            if (error) *error = workflowError;
+            return false;
+        }
+        restoredSides.insert(side);
+    }
+
+    QJsonArray pending;
+    for (const QJsonValue& value : state.pendingAcks) {
+        const QJsonObject ack = value.toObject();
+        QJsonObject message{
+            {QStringLiteral("id"), ack.value(QStringLiteral("messageId"))},
+            {QStringLiteral("type"), ack.value(QStringLiteral("type"))},
+            {QStringLiteral("sender"), ack.value(QStringLiteral("sender"))},
+            {QStringLiteral("receiver"), ack.value(QStringLiteral("receiver"))},
+            {QStringLiteral("requiresAck"), ack.value(QStringLiteral("requiresAck"))},
+            {QStringLiteral("automaticAck"), ack.value(QStringLiteral("automaticAck"))},
+            {QStringLiteral("retryCount"), ack.value(QStringLiteral("retryCount"))},
+            {QStringLiteral("traceId"), ack.value(QStringLiteral("traceId"))},
+            {QStringLiteral("correlationId"), ack.value(QStringLiteral("correlationId"))},
+            {QStringLiteral("wireFormat"), ack.value(QStringLiteral("wireFormat"))},
+            {QStringLiteral("payload"), ack.value(QStringLiteral("payload"))}};
+        if (ack.contains(QStringLiteral("vmfMessage"))) {
+            message.insert(QStringLiteral("vmfMessage"), ack.value(QStringLiteral("vmfMessage")));
+        }
+        if (ack.contains(QStringLiteral("wireBytes"))) {
+            message.insert(QStringLiteral("wireBytes"), ack.value(QStringLiteral("wireBytes")));
+            message.insert(QStringLiteral("wireBitLength"), ack.value(QStringLiteral("wireBitLength")));
+        }
+        pending.append(QJsonObject{{QStringLiteral("message"), message},
+                                   {QStringLiteral("sentAt"), ack.value(QStringLiteral("sentAt"))},
+                                   {QStringLiteral("retries"), ack.value(QStringLiteral("retries"))}});
+    }
+    // Run the exact bus decoders on detached state first.  This keeps restore
+    // atomic even when a future MessageBus validation rule is stricter than
+    // RuntimeState's structural validation.
+    MessageBus pendingValidator;
+    QString restoreError;
+    if (!pendingValidator.restorePendingAckState(pending, &restoreError)) {
+        if (error) *error = restoreError;
+        return false;
+    }
+    MessageBus automaticValidator;
+    if (!automaticValidator.restoreAutomaticMessageState(state.seenMessageIds,
+                                                         &restoreError)) {
+        if (error) *error = restoreError;
+        return false;
+    }
+    for (const QJsonValue& value : state.activeTasks) {
+        const QJsonObject task = value.toObject();
+        GuidedStrikeWorkflow* workflow = guidedStrikeWorkflow(
+            task.value(QStringLiteral("side")).toString());
+        QString workflowError;
+        if (!workflow->restoreSnapshot(task, &workflowError)) {
+            if (error) *error = workflowError;
+            return false;
+        }
+    }
+    if (!m_transport->bus()->restorePendingAckState(pending, &restoreError)
+        || !m_transport->bus()->restoreAutomaticMessageState(state.seenMessageIds, &restoreError)
+        || !m_vmfGateway->restoreTraceSummaries(state.traceSummaries, &restoreError)) {
+        if (error) *error = restoreError;
+        return false;
+    }
+    return true;
+}
+
+bool SimulationEngine::validateVmfMessage(const Message& message, QString* error) const {
+    if (error) error->clear();
+    if (!m_vmfGateway) {
+        if (error) *error = QStringLiteral("当前场景未启用 VMF");
+        return false;
+    }
+    if (message.wireFormat != Message::WireFormat::VmfDesignV1
+        || message.wireBytes.isEmpty() || message.wireBitLength <= 0) {
+        if (error) *error = QStringLiteral("VMF 消息缺少完整 wire 数据");
+        return false;
+    }
+    if (!vmf::VmfMessageGateway::isMessageNameCompatible(message)) {
+        if (error) *error = QStringLiteral("VMF 消息名与领域消息类型不匹配");
+        return false;
+    }
+    if (!m_vmfGateway->validateCatalog(message, {}, {}, error)) return false;
+    vmf::DecodedMessage decoded;
+    QList<vmf::Diagnostic> diagnostics;
+    if (!m_vmfGateway->decode(message, &decoded, &diagnostics)) {
+        if (error) *error = vmf::Codec::diagnosticsToString(diagnostics);
+        return false;
+    }
+    return true;
+}
+
+bool SimulationEngine::validateVmfMessageForRoles(const Message& message,
+                                                  const QString& senderRole,
+                                                  const QString& receiverRole,
+                                                  QString* error) const {
+    if (!validateVmfMessage(message, error)) return false;
+    return m_vmfGateway && m_vmfGateway->validateCatalog(message, senderRole,
+                                                          receiverRole, error);
+}
+
+bool SimulationEngine::validateVmfWorkflowMessage(const Message& message,
+                                                   QString* error) const {
+    if (error) error->clear();
+    const UnitBase* sender = unit(message.sender);
+    if (!sender) {
+        if (error) *error = QStringLiteral("VMF 发送单元不存在");
+        return false;
+    }
+    GuidedStrikeWorkflow* workflow = guidedStrikeWorkflow(sender->sideStr());
+    return !workflow || workflow->validateIncomingMessage(message, error);
+}
+
+QJsonObject SimulationEngine::vmfMessageCatalogSummary(const Message& message) const {
+    return m_vmfGateway ? m_vmfGateway->catalogSummary(message) : QJsonObject{};
+}
+
+GuidedStrikeWorkflow* SimulationEngine::guidedStrikeWorkflow(const QString& side) const {
+    if (side == QLatin1String("red")) return m_redGuidedStrikeWorkflow.get();
+    if (side == QLatin1String("blue")) return m_blueGuidedStrikeWorkflow.get();
+    return nullptr;
+}
+
+bool SimulationEngine::postVmfMessage(Message message, QString* error) {
+    if (error) error->clear();
+    if (!m_vmfGateway || !m_transport || !m_transport->bus()) {
+        if (error) *error = QStringLiteral("当前场景未启用 VMF");
+        return false;
+    }
+    if (!validateVmfMessage(message, error)) return false;
+    message.vmfEncoded = true;
+    return m_transport->bus()->send(message);
+}
+
+bool SimulationEngine::prepareVmfMessage(const Message& input, Message* output,
+                                         QString* error) const {
+    if (error) error->clear();
+    if (!m_vmfGateway) {
+        if (error) *error = QStringLiteral("当前场景未启用 VMF");
+        return false;
+    }
+    return m_vmfGateway->prepareDomainMessage(input, output, error);
 }
 
 bool SimulationEngine::setScenario(const Scenario& s) {
@@ -202,6 +557,26 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
         emit errorOccurred(m_lastError);
         return false;
     }
+    if (s.communicationPolicy.format != QLatin1String("native")
+        && s.communicationPolicy.format != QLatin1String("vmf-design-v1")) {
+        m_lastError = QStringLiteral("通信格式无效，场景未应用");
+        emit errorOccurred(m_lastError);
+        return false;
+    }
+    if (!std::isfinite(s.communicationPolicy.ackTimeoutSec)
+        || s.communicationPolicy.ackTimeoutSec <= 0.0
+        || s.communicationPolicy.maxRetries < 0
+        || s.communicationPolicy.maxRetries > 16) {
+        m_lastError = QStringLiteral("通信 ACK 策略无效，场景未应用");
+        emit errorOccurred(m_lastError);
+        return false;
+    }
+    QString communicationError;
+    if (!configureCommunication(s, &communicationError)) {
+        m_lastError = communicationError;
+        emit errorOccurred(m_lastError);
+        return false;
+    }
     if (s.units.size() > kMaxScenarioUnits) {
         m_lastError = QStringLiteral("场景单元数量不能超过 %1，未应用").arg(kMaxScenarioUnits);
         emit errorOccurred(m_lastError);
@@ -212,6 +587,7 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
         unit = normalizeScenarioUnitDefaults(unit);
     }
     QSet<QString> ids;
+    QSet<QString> vmfUrns;
     for (const auto& unit : normalized.units) {
         const QString validationError = validateScenarioUnit(unit, normalized.map);
         if (!validationError.isEmpty()) {
@@ -225,9 +601,22 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
             return false;
         }
         ids.insert(unit.id);
+        if (vmfUrns.contains(unit.vmfUrn)) {
+            m_lastError = QStringLiteral("VMF URN重复: %1，场景未应用").arg(unit.vmfUrn);
+            emit errorOccurred(m_lastError);
+            return false;
+        }
+        vmfUrns.insert(unit.vmfUrn);
     }
     setRunning(false);
     m_scenario = std::move(normalized);
+    if (m_transport && m_transport->bus()) {
+        // Native unit messages retain their existing explicit ACK handlers;
+        // VMF envelopes opt into automatic ACK on the gateway itself.
+        m_transport->bus()->setAckPolicy(m_scenario.communicationPolicy.ackTimeoutSec,
+                                         m_scenario.communicationPolicy.maxRetries, false);
+        m_transport->bus()->setSimulationTime(0.0);
+    }
     rebuildScenarioIndex();
     m_map->setLogicalSizeMeters(s.map.widthMeters, s.map.heightMeters);
     m_map->setName(s.map.name);
@@ -259,6 +648,28 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
         m_battleSeed = QRandomGenerator::system()->generate64();
     } while (m_battleSeed == 0);
     rebuildUnitsFromScenario();
+    m_redGuidedStrikeWorkflow.reset();
+    m_blueGuidedStrikeWorkflow.reset();
+    if (m_vmfGateway) {
+        m_redGuidedStrikeWorkflow = std::make_unique<GuidedStrikeWorkflow>(
+            m_transport ? m_transport->bus() : nullptr, QStringLiteral("red"),
+            m_units.find(QStringLiteral("red_cp")) != m_units.end()
+                ? QStringLiteral("red_cp") : QString());
+        m_blueGuidedStrikeWorkflow = std::make_unique<GuidedStrikeWorkflow>(
+            m_transport ? m_transport->bus() : nullptr, QStringLiteral("blue"),
+            m_units.find(QStringLiteral("blue_cp")) != m_units.end()
+                ? QStringLiteral("blue_cp") : QString());
+        const auto connectWorkflow = [this](GuidedStrikeWorkflow* workflow) {
+            if (!workflow) return;
+            connect(workflow, &GuidedStrikeWorkflow::stageChanged, this,
+                    [this](GuidedStrikeWorkflow::Stage) { emit vmfWorkflowChanged(); });
+            connect(workflow, &GuidedStrikeWorkflow::workflowEvent, this,
+                    [this](const QJsonObject&) { emit vmfWorkflowChanged(); });
+        };
+        connectWorkflow(m_redGuidedStrikeWorkflow.get());
+        connectWorkflow(m_blueGuidedStrikeWorkflow.get());
+    }
+    emit vmfWorkflowChanged();
     if (!m_replaying) {
         m_timeline = {};
         m_timelineSequence = 0;
@@ -447,6 +858,9 @@ void SimulationEngine::onTickInternal(bool manual, double manualDt) {
     const double dt = manual ? manualDt : m_clock->tickInterval() * m_clock->speedMul();
     if (!manual && dt <= 0.0) return;
     m_clock->advance(dt);
+    if (m_transport && m_transport->bus()) {
+        m_transport->bus()->advanceSimulationTime(dt);
+    }
 
     // Resolve all combat in the same simulation step before deciding the
     // winner. Otherwise unordered unit iteration can turn a simultaneous
@@ -1198,8 +1612,60 @@ void SimulationEngine::onMessagePosted(const QJsonObject& msg) {
                 "warn",
                 targetId
             );
+            sendReconDestructionConfirmations(targetId, attackerId);
             recomputeReadyForSim();
         }
+    }
+}
+
+void SimulationEngine::sendReconDestructionConfirmations(const QString& targetId,
+                                                          const QString& attackerId) {
+    // The design scenario requires the reconnaissance aircraft to confirm a
+    // kill before the command post orders withdrawal.  This is an observation
+    // message only: combat has already set the target HP to zero, and the
+    // message cannot create or alter damage.
+    if (!m_vmfGateway || !m_transport || !m_transport->bus()
+        || targetId.isEmpty() || attackerId.isEmpty()) return;
+    UnitBase* target = unit(targetId);
+    UnitBase* attacker = unit(attackerId);
+    if (!target || !attacker || !attacker->alive()
+        || target->side() == attacker->side()) return;
+    const QString commandPostId = commandSenderIdFor(attacker);
+    UnitBase* commandPost = unit(commandPostId);
+    if (!commandPost || !commandPost->alive()) return;
+    const GuidedStrikeWorkflow* workflow = guidedStrikeWorkflow(attacker->sideStr());
+    const QString correlationId = workflow ? workflow->correlationId() : QString();
+    const QString registeredReconId = workflow ? workflow->reconId() : QString();
+
+    for (const auto& [id, candidate] : m_units) {
+        if (!candidate || candidate->kind() != UnitKind::ReconUAV
+            || candidate->side() != attacker->side() || !candidate->alive()) continue;
+        if (!registeredReconId.isEmpty() && id != registeredReconId) continue;
+        if (candidate->pos().distanceTo2D(target->pos()) > candidate->detectRange()) continue;
+        if (!m_transport->canCommunicate(candidate->id(), commandPostId)) continue;
+
+        Message confirmation;
+        confirmation.type = Message::Type::TargetDestroyed;
+        confirmation.sender = candidate->id();
+        confirmation.receiver = commandPostId;
+        confirmation.correlationId = correlationId;
+        confirmation.requiresAck = true;
+        confirmation.automaticAck = true;
+        confirmation.payload = QJsonObject{
+            {QStringLiteral("targetId"), targetId},
+            {QStringLiteral("attackerId"), attackerId},
+            {QStringLiteral("x"), target->pos().x},
+            {QStringLiteral("y"), target->pos().y},
+            {QStringLiteral("alt"), target->pos().alt},
+            {QStringLiteral("targetType"), target->kindStr()},
+            {QStringLiteral("targetCount"), 1},
+            {QStringLiteral("friendFoe"), QStringLiteral("enemy")},
+            {QStringLiteral("status"), QStringLiteral("destroyed")},
+            {QStringLiteral("confirmationSource"), QStringLiteral("recon-observation")}};
+        m_transport->send(confirmation);
+        // One authoritative observation is sufficient.  A second recon
+        // aircraft must not create duplicate workflow edges or ACK traffic.
+        break;
     }
 }
 
@@ -1248,6 +1714,30 @@ void SimulationEngine::recomputeReadyForSim() {
 void SimulationEngine::updateMessageCache(const QJsonObject& msg) {
     m_messageCache.prepend(msg);
     if (m_messageCache.size() > 200) m_messageCache.removeLast();
+}
+
+void SimulationEngine::updateMessageAckState(const QString& messageId, bool acknowledged,
+                                             int retryCount, const QString& reason) {
+    if (messageId.isEmpty()) return;
+    bool changed = false;
+    for (QVariant& value : m_messageCache) {
+        QVariantMap message = value.toMap();
+        if (message.value(QStringLiteral("id")).toString() != messageId) continue;
+        if (message.value(QStringLiteral("acked")).toBool() != acknowledged) {
+            message.insert(QStringLiteral("acked"), acknowledged);
+            changed = true;
+        }
+        if (message.value(QStringLiteral("retryCount")).toInt() != retryCount) {
+            message.insert(QStringLiteral("retryCount"), retryCount);
+            changed = true;
+        }
+        if (message.value(QStringLiteral("ackReason")).toString() != reason) {
+            message.insert(QStringLiteral("ackReason"), reason);
+            changed = true;
+        }
+        value = message;
+    }
+    if (changed) emit messagesChanged();
 }
 
 QJsonObject SimulationEngine::unitSnapshot(const QString& id) const {

@@ -52,7 +52,7 @@ Dialog {
             SettingsSection { title: "会话"; iconName: "network"
                 GridLayout { columns: 2; Layout.fillWidth: true
                     Label { text: "账号"; color: AppContext.muted }
-                    Label { text: root.controller ? (root.controller.displayName || root.controller.username) : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Label { text: root.controller ? (root.controller.username || root.controller.displayName) : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
                     Label { text: "服务器"; color: AppContext.muted }
                     Label { text: root.controller ? root.controller.serverAddress : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
                     Label { text: "房间 / 战位"; color: AppContext.muted }

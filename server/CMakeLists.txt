@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     project(wargame_server VERSION 2.0.0 LANGUAGES CXX)
+    include(GNUInstallDirs)
     set(CMAKE_CXX_STANDARD 20)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     option(WARGAME_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -34,6 +35,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         endif()
     endif()
     include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/WargameTargets.cmake)
+    wargame_add_vmf_library(wargame_vmf ${CMAKE_CURRENT_SOURCE_DIR}/..)
     wargame_add_domain_library(wargame_domain ${CMAKE_CURRENT_SOURCE_DIR}/..)
     wargame_add_protocol_library(wargame_protocol ${CMAKE_CURRENT_SOURCE_DIR}/..)
     if(WARGAME_HAS_FASTDDS)
@@ -104,7 +106,7 @@ add_library(wargame_serverlib STATIC
 )
 target_include_directories(wargame_serverlib PUBLIC ../src game)
 target_link_libraries(wargame_serverlib PUBLIC
-    wargame_domain wargame_protocol Qt6::Core Qt6::Network Qt6::WebSockets)
+    wargame_domain wargame_protocol wargame_vmf Qt6::Core Qt6::Network Qt6::WebSockets)
 target_compile_definitions(wargame_serverlib PRIVATE
     WARGAME_VERSION="${WARGAME_VERSION}"
     WARGAME_SOURCE_DIGEST="${WARGAME_SOURCE_DIGEST}")
@@ -123,3 +125,16 @@ target_compile_definitions(wargame_server PRIVATE
 wargame_enable_sanitizers(wargame_server)
 
 install(TARGETS wargame_server RUNTIME DESTINATION bin)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    # Standalone server builds do not traverse the root CMakeLists.txt.
+    set(WARGAME_VMF_INSTALL_DIR "${CMAKE_INSTALL_BINDIR}/design/EncoderDecoder")
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/../design/EncoderDecoder/dic.xml"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../design/EncoderDecoder/dic_content.xml"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../design/EncoderDecoder/message_catalog.json"
+        DESTINATION "${WARGAME_VMF_INSTALL_DIR}")
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../design/EncoderDecoder/msgStruct"
+        DESTINATION "${WARGAME_VMF_INSTALL_DIR}"
+        FILES_MATCHING PATTERN "*.xml")
+endif()

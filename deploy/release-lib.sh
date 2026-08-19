@@ -45,8 +45,8 @@ release_validate_manifest() {
 
   for expected in \
     'releaseManifestVersion=1' \
-    'protocolVersion=6' \
-    'schemaVersion=6' \
+    'protocolVersion=7' \
+    'schemaVersion=7' \
     'clientArtifact=appindex' \
     'accountArtifact=account-web' \
     'serverArtifact=game-server' \
@@ -67,6 +67,9 @@ release_compute_source_digest() {
     local input
     local -a digest_inputs=()
     for input in CMakeLists.txt Main.qml main.cpp qml cmake src server deploy \
+        'design/vmf设计.docx' design/EncoderDecoder/README.txt \
+        design/EncoderDecoder/dic.xml design/EncoderDecoder/dic_content.xml \
+        design/EncoderDecoder/message_catalog.json design/EncoderDecoder/msgStruct \
         map/metadata.json .dockerignore README.md docs; do
       [[ -e "$input" ]] && digest_inputs+=("$input")
     done
@@ -141,8 +144,8 @@ release_validate_identity() {
     "wargameVersion=$expected_version" \
     "sourceDigest=$expected_digest" \
     "releaseId=$expected_version-${expected_digest:0:12}" \
-    'protocolVersion=6' \
-    'schemaVersion=6' \
+    'protocolVersion=7' \
+    'schemaVersion=7' \
     'clientArtifact=appindex' \
     'accountArtifact=account-web' \
     'serverArtifact=game-server' \

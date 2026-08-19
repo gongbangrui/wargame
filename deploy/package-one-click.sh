@@ -33,6 +33,12 @@ PACKAGE_INPUTS=(
     cmake
     src
     server
+    'design/vmf设计.docx'
+    design/EncoderDecoder/README.txt
+    design/EncoderDecoder/dic.xml
+    design/EncoderDecoder/dic_content.xml
+    design/EncoderDecoder/message_catalog.json
+    design/EncoderDecoder/msgStruct
     map/metadata.json
     deploy
     .dockerignore
@@ -141,6 +147,11 @@ for required in \
     "$PACKAGE_ROOT/server/account/static/app.css" \
     "$PACKAGE_ROOT/server/game/main.cpp" \
     "$PACKAGE_ROOT/map/metadata.json" \
+    "$PACKAGE_ROOT/design/vmf设计.docx" \
+    "$PACKAGE_ROOT/design/EncoderDecoder/dic.xml" \
+    "$PACKAGE_ROOT/design/EncoderDecoder/dic_content.xml" \
+    "$PACKAGE_ROOT/design/EncoderDecoder/message_catalog.json" \
+    "$PACKAGE_ROOT/design/EncoderDecoder/msgStruct/msg0_1.xml" \
     "$PACKAGE_ROOT/deploy/QUICK_START.md" \
     "$PACKAGE_ROOT/src"; do
     if [[ "$required" == "$PACKAGE_ROOT/src" ]]; then

@@ -189,6 +189,38 @@ TEST(ProtocolTest, RejectsFractionalVersionsAndRevisions) {
               QStringLiteral("INVALID_PAYLOAD"));
 }
 
+TEST(ProtocolTest, VmfWireRequiresCanonicalBase64AndZeroPadding) {
+    QJsonObject payload{
+        {QStringLiteral("traceId"), QStringLiteral("trace-1")},
+        {QStringLiteral("vmfMessage"), QStringLiteral("NetworkMonitoring")},
+        {QStringLiteral("wireFormat"), QStringLiteral("vmf-design-v1")},
+        {QStringLiteral("wireBytes"), QStringLiteral("AA==")},
+        {QStringLiteral("wireBitLength"), 1},
+        {QStringLiteral("senderUnitId"), QStringLiteral("red_cp")},
+        {QStringLiteral("receiverUnitId"), QStringLiteral("red_a1")},
+        {QStringLiteral("messageType"), QStringLiteral("PositionReport")},
+        {QStringLiteral("payload"), QJsonObject{}},
+        {QStringLiteral("fieldCount"), 1}};
+    EXPECT_TRUE(Protocol::validateClientEnvelope(
+                    Protocol::makeClientEnvelope(QString::fromLatin1(Protocol::VmfMessage),
+                                                 QStringLiteral("vmf-1"), payload))
+                    .valid);
+
+    QJsonObject nonCanonical = payload;
+    nonCanonical[QStringLiteral("wireBytes")] = QStringLiteral("AA");
+    EXPECT_FALSE(Protocol::validateClientEnvelope(
+                     Protocol::makeClientEnvelope(QString::fromLatin1(Protocol::VmfMessage),
+                                                  QStringLiteral("vmf-2"), nonCanonical))
+                     .valid);
+
+    QJsonObject nonZeroPadding = payload;
+    nonZeroPadding[QStringLiteral("wireBytes")] = QStringLiteral("AQ==");
+    EXPECT_FALSE(Protocol::validateClientEnvelope(
+                     Protocol::makeClientEnvelope(QString::fromLatin1(Protocol::VmfMessage),
+                                                  QStringLiteral("vmf-3"), nonZeroPadding))
+                     .valid);
+}
+
 TEST(ProtocolTest, ServerEnvelopeRejectsUnknownTypeAndInvalidSequence) {
     QJsonObject envelope = Protocol::makeServerEnvelope(
         QStringLiteral("pong"), 1, QJsonObject{});

@@ -21,7 +21,7 @@ cd "$release_dir/wargame-server-<version>"
 The package contains the source and Docker files for the desktop protocol
 client contract, `account-web`, and the authority `game-server`; the installer
 builds both server services locally. The included `deploy/release-manifest.env`
-locks the package to protocol v6/schema 6 and the WebSocket authoritative data
+locks the package to protocol v7/schema 7 and the WebSocket authoritative data
 plane.
 
 The game-server image disables the optional Fast DDS adapter by default. The

@@ -12,6 +12,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(WARGAME_BUILD_SERVER "Build the authoritative game server" ON)
+option(WARGAME_BUILD_VMF_TOOLS
+       "Build the design/EncoderDecoder VMF CLI tools when tinyxml2 is available" ON)
 option(WARGAME_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(WARGAME_ENABLE_FASTDDS "Enable Fast DDS data-plane integration when the SDK is installed" OFF)
 
@@ -47,7 +49,44 @@ endif()
 
 qt_standard_project_setup(REQUIRES 6.10)
 
+# The standalone EncoderDecoder project is also part of the release contract.
+# Keep it optional for hosts that only need the Qt client/server, but make the
+# disabled state explicit instead of silently shipping dictionary-only assets.
+set(WARGAME_VMF_TOOLS_AVAILABLE OFF)
+if(WARGAME_BUILD_VMF_TOOLS)
+    find_library(WARGAME_TINYXML2_LIBRARY NAMES tinyxml2)
+    if(WARGAME_TINYXML2_LIBRARY)
+        set(WARGAME_VMF_TOOLS_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/vmf-tools")
+        add_subdirectory(
+            "${CMAKE_CURRENT_SOURCE_DIR}/design/EncoderDecoder"
+            "${WARGAME_VMF_TOOLS_BINARY_DIR}")
+        set(WARGAME_VMF_TOOLS_AVAILABLE ON)
+        message(STATUS "VMF EncoderDecoder CLI: enabled")
+    else()
+        message(WARNING
+            "VMF EncoderDecoder CLI: disabled (tinyxml2 not found); "
+            "install libtinyxml2-dev or set WARGAME_BUILD_VMF_TOOLS=OFF")
+    endif()
+else()
+    message(STATUS "VMF EncoderDecoder CLI: disabled by WARGAME_BUILD_VMF_TOOLS=OFF")
+endif()
+
+if(WARGAME_VMF_TOOLS_AVAILABLE)
+    find_program(WARGAME_BASH_EXECUTABLE NAMES bash REQUIRED)
+    add_custom_target(vmf_design_regression
+        COMMAND "${WARGAME_BASH_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/vmf-design-regression.sh"
+                --source-dir "${CMAKE_CURRENT_SOURCE_DIR}"
+                --build-dir "${WARGAME_VMF_TOOLS_BINARY_DIR}"
+                --out-dir "${CMAKE_CURRENT_BINARY_DIR}/vmf-design-regression"
+        DEPENDS vmf_encode vmf_decode vmf_validate xml_compare
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Running design/EncoderDecoder VMF regression pipeline"
+        VERBATIM)
+endif()
+
 include(cmake/WargameTargets.cmake)
+wargame_add_vmf_library(wargame_vmf ${CMAKE_CURRENT_SOURCE_DIR})
 wargame_add_domain_library(wargame_domain ${CMAKE_CURRENT_SOURCE_DIR})
 wargame_add_protocol_library(wargame_protocol ${CMAKE_CURRENT_SOURCE_DIR})
 if(WARGAME_HAS_FASTDDS)
@@ -103,7 +142,7 @@ add_library(wargame_client STATIC
     src/network/FastDdsTransport.cpp
 )
 target_link_libraries(wargame_client PUBLIC
-    wargame_domain wargame_protocol Qt6::Quick Qt6::Network Qt6::WebSockets Qt6Keychain::Qt6Keychain)
+    wargame_domain wargame_protocol wargame_vmf Qt6::Quick Qt6::Network Qt6::WebSockets Qt6Keychain::Qt6Keychain)
 if(WARGAME_HAS_FASTDDS)
     target_compile_definitions(wargame_client PUBLIC WARGAME_HAS_FASTDDS=1)
     target_link_libraries(wargame_client PUBLIC ${WARGAME_FASTDDS_TARGET})
@@ -137,6 +176,7 @@ qt_add_qml_module(appindex
         qml/views/CommandPostView.qml
         qml/views/DirectorView.qml
         qml/views/OnlineOperationsView.qml
+        qml/views/RoomAdminView.qml
         qml/views/ScenarioEditorView.qml
         qml/views/RosterEditorDialog.qml
         qml/components/MapCanvas.qml
@@ -165,6 +205,7 @@ qt_add_qml_module(appindex
         qml/components/ChatPanel.qml
         qml/components/BattleReportDialog.qml
         qml/components/CommandPanel.qml
+        qml/components/GuidedStrikeWorkflowPanel.qml
 )
 
 set_target_properties(appindex PROPERTIES
@@ -251,6 +292,23 @@ endforeach()
 install(FILES ${WARGAME_MAP_METADATA}
     DESTINATION "${CMAKE_INSTALL_BINDIR}/map")
 
+# VMF dictionaries are runtime inputs, not generated build output. Keep the
+# profile beside the installed executable so it can load without the source
+# checkout.
+set(WARGAME_VMF_INSTALL_DIR "${CMAKE_INSTALL_BINDIR}/design/EncoderDecoder")
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/design/EncoderDecoder/dic.xml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/design/EncoderDecoder/dic_content.xml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/design/EncoderDecoder/message_catalog.json"
+    DESTINATION "${WARGAME_VMF_INSTALL_DIR}")
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/design/EncoderDecoder/msgStruct"
+    DESTINATION "${WARGAME_VMF_INSTALL_DIR}"
+    FILES_MATCHING PATTERN "*.xml")
+if(WARGAME_VMF_TOOLS_AVAILABLE)
+    install(TARGETS vmf_encode vmf_decode vmf_validate xml_compare
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
 # Authoritative headless server. It can also be built standalone from server/.
 if(WARGAME_BUILD_SERVER)
     add_subdirectory(server)
@@ -290,10 +348,15 @@ if(BUILD_TESTING)
         tests/test_p3.cpp
         tests/test_client_state_store.cpp
         tests/test_fastdds_transport.cpp
+        tests/test_vmf_codec.cpp
+        tests/test_vmf_catalog.cpp
+        tests/test_vmf_workflow.cpp
     )
     target_link_libraries(wargame_tests PRIVATE
-        corelib wargame_protocol GTest::gtest GTest::gtest_main)
+        corelib wargame_protocol wargame_vmf GTest::gtest GTest::gtest_main)
     target_include_directories(wargame_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(wargame_tests PRIVATE
+        WARGAME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     wargame_enable_sanitizers(wargame_tests)
 
     add_executable(fastdds_integration_tests tests/test_fastdds_integration.cpp)

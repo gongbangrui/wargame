@@ -430,6 +430,7 @@ void NetworkClient::onTextMessage(const QString& text) {
         if (!m_identityPublished) {
             emit authenticated(m_welcomePayload.value(QStringLiteral("username")).toString(),
                                m_welcomePayload.value(QStringLiteral("displayName")).toString(),
+                               m_welcomePayload.value(QStringLiteral("role")).toString(),
                                m_welcomePayload.value(QStringLiteral("seatId")).toString(),
                                m_accountServer);
             m_identityPublished = true;
@@ -464,6 +465,8 @@ void NetworkClient::onTextMessage(const QString& text) {
         emit intelShareReceived(payload);
     } else if (type == QLatin1String("intelHistoryPage")) {
         emit intelHistoryPageReceived(payload);
+    } else if (type == QLatin1String("vmfEvent")) {
+        emit vmfEventReceived(payload);
     } else if (type == QLatin1String("event")) {
         Protocol::TransferEventProjection transfer;
         if (Protocol::projectTransferEvent(payload, &transfer).valid) {
@@ -904,6 +907,19 @@ QString NetworkClient::requestIntelHistory(const QVariantMap& query) {
     return sendIntelRequest(QStringLiteral("requestIntelHistory"),
                             QStringLiteral("requestIntelHistory"),
                             QJsonObject::fromVariantMap(query));
+}
+
+QString NetworkClient::sendVmfMessage(const QJsonObject& message) {
+    const QString requestId = QStringLiteral("vmf-%1")
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if (!m_authenticated || m_socket.state() != QAbstractSocket::ConnectedState) {
+        emit commandRejected(QStringLiteral("联网会话尚未建立"));
+        return {};
+    }
+    if (!sendEnvelope(QString::fromLatin1(Protocol::VmfMessage), message, requestId)) {
+        return {};
+    }
+    return requestId;
 }
 
 void NetworkClient::cancelIntelHistoryRequests() {

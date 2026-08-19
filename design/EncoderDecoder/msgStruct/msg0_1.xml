@@ -1,0 +1,221 @@
+<Message name="NetworkMonitoring" number="0.1">
+
+    <Header>
+        <Field name="version" bits="16"/>
+        <Field name="length" bits="16"/>
+        <Field name="messageId" bits="16"/>
+        <Field name="originator" bits="24"/>
+        <Field name="destination" bits="24"/>
+    </Header>
+
+    <Body>
+		<!-- Number of sub-networks -->
+		<DataUnit DFI="4029" DUI="125" name="NumberOfSubNetworks" bits="3"/>
+		
+		<!-- Network monitoring message type -->
+		<DataUnit DFI="4093" DUI="042" name="NetworkMonitoringMessageType" bits="2"/>
+		
+		<!-- Report Unit -->
+		<DataUnit DFI="4004" DUI="012" name="URN" bits="24"/>
+		
+		<!-- Network info -->
+		<Group name="NetworkInfo" repeatable="True" max="5">
+			<GRI DFI="4045" DUI="001" bits="1"/>
+			
+			<DataUnit DFI="4085" DUI="059" name="NetworkIdNumber" bits="16"/>
+			
+			<Group name="DataCollectionTime" repeatable="True" max="5">
+				<GRI DFI="4045" DUI="001" bits="1"/>
+				<DataUnit DFI="4019" DUI="044" name="DataCollectionDay" bits="5"/>
+				<DataUnit DFI="792" DUI="452" name="DataCollectionHour" bits="5"/>
+				<DataUnit DFI="797" DUI="449" name="DataCollectionMinutes" bits="6"/>
+				<DataUnit DFI="380" DUI="417" name="DataCollectionSecond" bits="6"/>
+			</Group>
+			
+			<Group name="NetworkCharacteristics" selectable="True">
+				<GPI DFI="4014" DUI="001" bits="1"/>
+				<DataUnit DFI="4093" DUI="044" name="DataMeasurementIndicator" bits="2"/>
+				
+				<Group name="NetworkType" repeatable="True" max="5">
+					<GRI DFI="4045" DUI="001" bits="1"/>
+					<DataUnit DFI="4093" DUI="045" name="ProtocolType" bits="3"/>
+					
+					<Group name="TrafficStatus" repeatable="True" max="5">
+						<GRI DFI="4045" DUI="001" bits="1"/>
+						<DataUnit DFI="4093" DUI="046" name="TrafficType" bits="2"/>
+						<DataUnit DFI="4082" DUI="012" name="CurrentNetworkLoad" bits="4"/>
+						<DataUnit DFI="4082" DUI="013" name="AverageNetworkLoad" bits="4"/>
+					</Group>
+				</Group>
+				
+				<Field name="ServerId" bits="24" selectable="True">
+					<FPI DFI="4014" DUI="002" bits="1"/>
+					<DataUnit DFI="4004" DUI="012" name="URN" bits="24"/>
+				</Field>
+				
+				<DataUnit DFI="4082" DUI="014" name="NetworkStatus" bits="2"/>
+				
+				<Group name="ServerNetworkUsage" selectable="True">
+					<GPI DFI="4014" DUI="001" bits="1"/>
+					<DataUnit DFI="4029" DUI="116" name="SADataDown" bits="24"/>
+					<DataUnit DFI="4029" DUI="117" name="C2DataDown" bits="24"/>
+					<DataUnit DFI="4029" DUI="118" name="localCsmaSAUp" bits="24"/>
+					<DataUnit DFI="4029" DUI="119" name="localCsmaC2Up" bits="24"/>
+					<DataUnit DFI="4029" DUI="123" name="numberOfServerClient" bits="8"/>
+					
+					<Group name="ClientConfig" repeatable="True" max="5">
+						<GRI DFI="4045" DUI="001" bits="1"/>
+						<DataUnit DFI="4004" DUI="012" name="URN" bits="24"/>
+						<DataUnit DFI="4093" DUI="043" name="clientConfiguartoin" bits="3"/>
+					</Group>
+					
+					<Group name="LocalMonitorStation" selectable="True">
+						<GPI DFI="4014" DUI="001" bits="1"/>
+						<DataUnit DFI="4029" DUI="120" name="wideAreaCsmaC2Up" bits="24"/>
+						
+						<Field name="SAQuantity" selectable="True">
+							<FPI DFI="4014" DUI="002" bits="1"/>
+							<DataUnit DFI="4029" DUI="126" name="wideAreaCsmaSAUp" bits="24"/>
+						</Field>
+					</Group>
+					
+					<Group name="SVCStatus" selectable="True">
+						<GPI DFI="4014" DUI="001" bits="1"/>
+						<DataUnit DFI="4029" DUI="121" name="svcC2DataUp" bits="24"/>
+						<DataUnit DFI="4029" DUI="122" name="SVCsUp" bits="24"/>
+					</Group>
+					
+					<Group name="MulticastGroupInfo" selectable="True">
+						<GPI DFI="4014" DUI="001" bits="1"/>
+						<DataUnit DFI="4029" DUI="124" name="numberOfMulticastGroups" bits="8"/>
+						<Field name="MulticastGroup" repeatable="True" max="5">
+							<FRI DFI="4045" DUI="002" bits="1"/>
+							<DataUnit DFI="4085" DUI="061" name="MulticastGroupId" bits="16"/>
+						</Field>
+					</Group>
+				</Group>
+			</Group>
+		</Group>
+    </Body>
+
+	<!--
+		Rules 语法说明：
+		1) Rules 仅用于校验，不自动推导或改写 GPI/GRI/FPI/FRI。
+		2) CaseRules：
+		   - 用于定义消息 case 的匹配条件。
+		   - 只有 MessageContent@case 存在且去空白后非空时，才执行 CaseRules 匹配。
+		   - 当 case 缺失或 case="" 时，不匹配 CaseRules。
+		3) ConditionRules：
+		   - 使用 If -> Then 形式定义约束。
+		   - If 为真时，Then 必须为真。
+		   - 带 caseRef 的 Condition 仅在对应 Case 命中时参与判断。
+		   - 不带 caseRef 的 Condition 为全局规则，总是参与判断。
+		4) 支持的表达式节点只有：
+		   - <AND>：全部子表达式为真时返回真
+		   - <OR>：任一子表达式为真时返回真
+		   - <Not>：只能有一个子表达式，返回其逻辑非
+		   - <Cmp>：比较节点
+		5) <Cmp> 语法：
+		   - 必须提供 path / op，并且必须且只能提供 value 或 targetPath 之一
+		   - value 表示右侧为具体数值，targetPath 表示右侧为另一个路径
+		   - op 支持：eq / ne / gt / ge / lt / le / in / not_in
+		   - in / not_in 的 value 为逗号分隔的整数列表，例如 value="1,2,3"
+		   - targetPath 支持 eq / ne / gt / ge / lt / le，不支持 in / not_in
+		   - targetPath 必须解析为单个值
+		6) Path 语法：
+		   - H = Header，B = Body
+		   - G(name) = Group
+		   - F(name) = Field
+		   - D(name) = DataUnit；在 Header 中 D(name) 对应 Header.Field(name)
+		   - I(name) = 指示位，仅用于 GRI / GPI / FRI / FPI
+		7) 下标规则：
+		   - 只有 repeatable 的 Group / Field 才允许写下标
+		   - 正数下标：[0] / [1] / [2] / ...
+		   - 负数下标：[-1] 为倒数第一项，[-2] 为倒数第二项
+		   - [*] 表示所有匹配实例都必须满足该比较
+		   - 非 repeatable 节点不得写下标
+		8) .iteration 语法：
+		   - 仅用于 repeatable 的 Group / Field
+		   - 表示该容器的实例数量
+		   - 目标路径本身不能再带下标，例如 G(X).iteration 合法，G(X)[0].iteration 不合法
+		   - 只有带 GRI / FRI 的 repeatable 容器才允许使用 .iteration
+		9) Aliases：
+		   - <Alias name="NI0" path="B.G(NetworkInfo)[0]"/> 定义路径别名
+		   - 使用时写作$NI0，并允许继续拼接后续路径，例如NI0.D(NetworkIdNumber)
+		10) 示例：
+		   - <Cmp path="B.D(URN)" op="eq" value="1"/>
+		   - <Cmp path="$NI0.G(DataCollectionTime)[-1].D(DataCollectionDay)" op="eq" value="10"/>
+		   - <Cmp path="B.G(NetworkInfo)[*].G(DataCollectionTime)[0].I(GRI)" op="eq" value="1"/>
+		   - <Cmp path="B.G(NetworkInfo).iteration" op="le" value="4"/>
+		   - <Cmp path="$NI0.D(NetworkIdNumber)" op="le" targetPath="B.D(NumberOfSubNetworks)"/>
+		   - <Not><Cmp path="$NI0.D(NetworkIdNumber)" op="eq" value="10"/></Not>
+	-->
+	<Rules>
+		<!-- 别名用于简化长路径，提高可读性 -->
+		<Aliases>
+			<Alias name="NI0" path="B.G(NetworkInfo)[0]"/>
+		</Aliases>
+
+		<CaseRules>
+			<!-- Case C1: URN != 10 且第1个 Network info 的 Network id number == 1 -->
+			<Case id="C1">
+				<AND>
+					<Cmp path="B.D(URN)" op="ne" value="10"/>
+					<Cmp path="$NI0.D(NetworkIdNumber)" op="eq" value="1"/>
+					<Cmp path="B.G(NetworkInfo).iteration" op="le" value="4"/>
+					<Cmp path="B.G(NetworkInfo)[0].G(DataCollectionTime).iteration" op="le" value="4"/>
+					<Cmp path="B.G(NetworkInfo)[0].G(NetworkCharacteristics).G(ServerNetworkUsage).G(MulticastGroupInfo).F(MulticastGroup).iteration" op="le" value="4"/>
+					<OR>
+						<Cmp path="B.G(NetworkInfo)[*].G(DataCollectionTime)[0].I(GRI)" op="eq" value="1"/>
+						<Cmp path="B.G(NetworkInfo)[-2].G(NetworkCharacteristics).F(ServerId).I(FPI)" op="eq" value="1"/>
+					</OR>
+				</AND>
+			</Case>
+		</CaseRules>
+
+		<ConditionRules>
+			<!--
+				R1: 若满足条件（Network id number == 1 且 URN != 10），
+				则要求该 Network info 的 GRI == 1，且 Network characteristics 的 GPI == 1。
+				通过caseRef绑定C1，如果没有caseRef，则是全局规则
+			-->
+			<Condition id="R1" caseRef="C1">
+				<If>
+					<AND>
+						<Cmp path="$NI0.D(NetworkIdNumber)" op="eq" value="1"/>
+						<Cmp path="B.D(URN)" op="ne" value="10"/>
+					</AND>
+				</If>
+				<Then>
+					<AND>
+						<Cmp path="$NI0.I(GRI)" op="eq" value="1"/>
+						<Cmp path="$NI0.G(NetworkCharacteristics).I(GPI)" op="eq" value="1"/>
+					</AND>
+				</Then>
+			</Condition>
+			
+			<!--
+				R2:全局约束
+			-->
+			<Condition id="R2">
+				<If>
+					<Cmp path="B.D(URN)" op="eq" value="1"/>
+				</If>
+				<Then>
+					<AND>
+						<Cmp path="$NI0.G(DataCollectionTime).iteration" op="eq" value="1"/>
+						<Cmp path="$NI0.G(DataCollectionTime)[-1].D(DataCollectionDay)" op="eq" value="10"/>
+						<Cmp path="$NI0.G(NetworkCharacteristics).I(GPI)" op="eq" value="1"/>
+						<OR>
+							<Not>
+								<Cmp path="$NI0.D(NetworkIdNumber)" op="eq" value="10"/>
+							</Not>
+							<Cmp path="B.D(NumberOfSubNetworks)" op="eq" value="2" />
+						</OR>
+					</AND>
+				</Then>
+			</Condition>
+		</ConditionRules>
+	</Rules>
+
+</Message>

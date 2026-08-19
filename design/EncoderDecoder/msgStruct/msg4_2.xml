@@ -1,0 +1,37 @@
+<Message name="Land Route" number="4.2">
+
+    <Header>
+        <Field name="version" bits="16"/>
+        <Field name="length" bits="16"/>
+        <Field name="messageId" bits="16"/>
+        <Field name="originator" bits="24"/>
+        <Field name="destination" bits="24"/>
+    </Header>
+
+    <Body>
+        <Group name="MultipleRoute" repeatable="True">
+			<GRI DFI="4045" DUI="001" bits="1"/>
+			
+			<Group name="RouteExtremeties" repeatable="True">
+                <GRI DFI="4045" DUI="001" bits="1"/>
+                <DataUnit DFI="281" DUI="014" name="Latitude00051" bits="22"/>
+                <DataUnit DFI="282" DUI="014" name="Longtitude00051" bits="23"/>
+            </Group>
+            <Group name="ReportTime" selectable="True">
+                <GPI DFI="4014" DUI="001" bits="1"/>
+                <DataUnit DFI="4099" DUI="001" name="Month" bits="4"/>
+                <DataUnit DFI="4019" DUI="001" name="DayOfMonth" bits="5"/>
+                <DataUnit DFI="792" DUI="001" name="Hour" bits="5"/>
+                <DataUnit DFI="797" DUI="004" name="Minute" bits="6"/>
+            </Group>
+            <Group name="RouteData" selectable="True">
+                <GPI DFI="4014" DUI="001" bits="1"/>
+                <Group name="CriticalPoints" repeatable="True">
+                    <GRI DFI="4045" DUI="001" bits="1"/>
+                    <DataUnit DFI="281" DUI="014" name="Latitude00051" bits="22"/>
+                    <DataUnit DFI="282" DUI="014" name="Longtitude00051" bits="23"/>
+                </Group>
+            </Group>
+		</Group>
+    </Body>
+</Message>

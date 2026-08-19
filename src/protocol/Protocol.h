@@ -7,19 +7,20 @@
 
 namespace gbr::Protocol {
 
-// v6 is the current contract. v5 contains the first intelligence-ledger
-// fields and v4 is the pre-ledger contract; all three remain valid during a
+// v7 is the current VMF contract. v6 contains the intelligence-ledger
+// fields and v4 is the pre-ledger contract; both remain valid during a
 // rolling deployment so a new client can downgrade without losing its room.
-inline constexpr int Version = 6;
-inline constexpr int SchemaVersion = 6;
+inline constexpr int Version = 7;
+inline constexpr int SchemaVersion = 7;
 inline constexpr int IntelVersion = 5;
 inline constexpr int IntelSchemaVersion = 5;
-inline constexpr int PreviousVersion = 5;
-inline constexpr int PreviousSchemaVersion = 5;
+inline constexpr int PreviousVersion = 6;
+inline constexpr int PreviousSchemaVersion = 6;
 inline constexpr int LegacyVersion = 4;
 inline constexpr int LegacySchemaVersion = 4;
 inline constexpr int MaxMessageBytes = 256 * 1024;
 inline constexpr int MaxServerMessageBytes = 8 * 1024 * 1024;
+inline constexpr int MaxVmfWireBytes = 128 * 1024;
 inline constexpr int MaxIdentifierLength = 64;
 inline constexpr int MaxActionLength = 64;
 inline constexpr int MaxTokenLength = 4096;
@@ -32,6 +33,7 @@ inline constexpr int MaxMapLabelLength = 128;
 inline constexpr int MaxJsonDepth = 16;
 inline constexpr int MaxJsonNodes = 262144;
 inline constexpr int MaxRoomNameLength = 96;
+inline constexpr int MaxRoomDescriptionLength = 512;
 inline constexpr int MaxSeatIdLength = 64;
 inline constexpr int MaxDdsTicketLength = 128;
 inline constexpr int MaxIntelNoteLength = 500;
@@ -82,6 +84,8 @@ struct RoomLifecycleProjection {
     QString phase = QStringLiteral("preparing");
     QString roomId;
     QString roomName;
+    QString roomDescription;
+    QString scenarioId = QStringLiteral("default");
     QString roomStatus;
     QString roomMode = QStringLiteral("pvp");
     QString aiDifficulty = QStringLiteral("normal");
@@ -98,6 +102,10 @@ struct RoomLifecycleProjection {
     qint64 scenarioRevision = 0;
     qint64 stateRevision = 0;
     QList<SeatProjection> seats;
+    QJsonObject seatLimits;
+    QJsonObject seatParameters;
+    QJsonObject vmfWorkflow;
+    QJsonObject vmfWorkflows;
 };
 
 struct SnapshotProjection {
@@ -212,6 +220,8 @@ inline constexpr const char* SeatStateMessage = "seatState";
 inline constexpr const char* DeploymentPromptMessage = "deploymentPrompt";
 inline constexpr const char* IntelShareEventMessage = "intelShare";
 inline constexpr const char* IntelHistoryPageMessage = "intelHistoryPage";
+inline constexpr const char* VmfMessage = "vmfMessage";
+inline constexpr const char* VmfEventMessage = "vmfEvent";
 
 inline constexpr int MaxObserverTrajectoryUnits = 8;
 inline constexpr int MaxObserverTrajectoryPoints = 90;

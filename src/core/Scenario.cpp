@@ -72,6 +72,14 @@ bool readRequiredString(const QJsonObject& object, const char* name, QString* ou
     return true;
 }
 
+QString defaultVmfUrn(const QString& unitId) {
+    return QStringLiteral("urn:gbr:wargame:unit:%1").arg(unitId);
+}
+
+bool validCommunicationFormat(const QString& format) {
+    return format == QLatin1String("native") || format == QLatin1String("vmf-design-v1");
+}
+
 }
 
 QJsonObject ScenarioIo::toJson(const Scenario& s) {
@@ -83,10 +91,18 @@ QJsonObject ScenarioIo::toJson(const Scenario& s) {
     m["heightMeters"] = s.map.heightMeters;
     m["backgroundResource"] = s.map.backgroundResource;
     root["map"] = m;
+    QJsonObject communication;
+    communication["format"] = s.communicationPolicy.format;
+    communication["vmfProfile"] = s.communicationPolicy.vmfProfile;
+    communication["ackTimeoutSec"] = s.communicationPolicy.ackTimeoutSec;
+    communication["maxRetries"] = s.communicationPolicy.maxRetries;
+    communication["automaticAck"] = s.communicationPolicy.automaticAck;
+    root["communicationPolicy"] = communication;
     QJsonArray arr;
     for (const auto& u : s.units) {
         QJsonObject o;
         o["id"] = u.id;
+        o["vmfUrn"] = u.vmfUrn.isEmpty() ? defaultVmfUrn(u.id) : u.vmfUrn;
         o["callsign"] = u.callsign;
         o["kind"] = u.kind;
         o["side"] = u.side;
@@ -153,6 +169,46 @@ Scenario ScenarioIo::fromJson(const QJsonObject& o, QString* err) {
     }
     s.map.backgroundResource = m.value("backgroundResource").toString();
 
+    const QJsonValue policyValue = o.contains(QStringLiteral("communicationPolicy"))
+        ? o.value(QStringLiteral("communicationPolicy")) : o.value(QStringLiteral("communication"));
+    if (!policyValue.isUndefined()) {
+        if (!policyValue.isObject()) return reject(QStringLiteral("communicationPolicy必须是对象"));
+        const QJsonObject policy = policyValue.toObject();
+        s.communicationPolicy.format = policy.value(QStringLiteral("format"))
+            .toString(QStringLiteral("native"));
+        if (!validCommunicationFormat(s.communicationPolicy.format)) {
+            return reject(QStringLiteral("communicationPolicy.format必须是native或vmf-design-v1"));
+        }
+        s.communicationPolicy.vmfProfile = policy.value(QStringLiteral("vmfProfile"))
+            .toString(policy.value(QStringLiteral("profile")).toString());
+        if (s.communicationPolicy.format == QLatin1String("vmf-design-v1")
+            && s.communicationPolicy.vmfProfile.isEmpty()) {
+            s.communicationPolicy.vmfProfile = QStringLiteral("vmf-design-v1");
+        }
+        if (!readOptionalFiniteDouble(policy, "ackTimeoutSec", 3.0,
+                                      &s.communicationPolicy.ackTimeoutSec, &parseError,
+                                      QStringLiteral("communicationPolicy"))
+            || s.communicationPolicy.ackTimeoutSec <= 0.0) {
+            return reject(parseError.isEmpty()
+                              ? QStringLiteral("communicationPolicy.ackTimeoutSec必须大于0")
+                              : parseError);
+        }
+        if (!readOptionalInteger(policy, "maxRetries", 2,
+                                 &s.communicationPolicy.maxRetries, &parseError,
+                                 QStringLiteral("communicationPolicy"))
+            || s.communicationPolicy.maxRetries < 0
+            || s.communicationPolicy.maxRetries > 16) {
+            return reject(parseError.isEmpty()
+                              ? QStringLiteral("communicationPolicy.maxRetries范围无效")
+                              : parseError);
+        }
+        const QJsonValue automaticAck = policy.value(QStringLiteral("automaticAck"));
+        if (!automaticAck.isUndefined()) {
+            if (!automaticAck.isBool()) return reject(QStringLiteral("communicationPolicy.automaticAck必须是布尔值"));
+            s.communicationPolicy.automaticAck = automaticAck.toBool();
+        }
+    }
+
     const QJsonValue unitsValue = o.value(QStringLiteral("units"));
     if (!unitsValue.isUndefined() && !unitsValue.isArray()) {
         return reject(QStringLiteral("units必须是数组"));
@@ -175,6 +231,15 @@ Scenario ScenarioIo::fromJson(const QJsonObject& o, QString* err) {
             return reject(QStringLiteral("%1.id重复: %2").arg(context, su.id));
         }
         unitIds.insert(su.id);
+
+        const QJsonValue urnValue = u.value(QStringLiteral("vmfUrn"));
+        if (urnValue.isUndefined()) {
+            su.vmfUrn = defaultVmfUrn(su.id);
+        } else if (!urnValue.isString() || urnValue.toString().trimmed().isEmpty()) {
+            return reject(context + QStringLiteral(".vmfUrn不能为空"));
+        } else {
+            su.vmfUrn = urnValue.toString().trimmed();
+        }
 
         su.callsign = u.value("callsign").toString();
         if (!readOptionalFiniteDouble(u, "x", 0.0, &su.pos.x, &parseError, context)
@@ -258,6 +323,13 @@ Scenario ScenarioIo::fromJson(const QJsonObject& o, QString* err) {
                   [](const SchedulePoint& a, const SchedulePoint& b){ return a.time < b.time; });
         s.units.push_back(su);
     }
+    QSet<QString> vmfUrns;
+    for (const ScenarioUnit& unit : s.units) {
+        if (vmfUrns.contains(unit.vmfUrn)) {
+            return reject(QStringLiteral("vmfUrn重复: %1").arg(unit.vmfUrn));
+        }
+        vmfUrns.insert(unit.vmfUrn);
+    }
     s.notes = o.value("notes").toString();
     return s;
 }
@@ -304,6 +376,14 @@ bool ScenarioIo::saveToFile(const Scenario& s, const QString& path, QString* err
 
 Scenario ScenarioIo::defaultScenario() {
     Scenario s;
+    // Preserve the historical local scenario contract.  VMF is opt-in via
+    // communicationPolicy so existing scenarios and native message handlers
+    // remain behaviorally identical until a scenario explicitly selects it.
+    s.communicationPolicy.format = QStringLiteral("native");
+    s.communicationPolicy.vmfProfile.clear();
+    s.communicationPolicy.ackTimeoutSec = 3.0;
+    s.communicationPolicy.maxRetries = 2;
+    s.communicationPolicy.automaticAck = true;
     s.map.widthMeters = 20000;
     s.map.heightMeters = 15000;
     s.map.name = "default";
@@ -313,6 +393,7 @@ Scenario ScenarioIo::defaultScenario() {
                    std::initializer_list<SchedulePoint> sched = {}) {
         ScenarioUnit u;
         u.id = id; u.callsign = cs; u.kind = kind; u.side = side;
+        u.vmfUrn = QStringLiteral("urn:gbr:wargame:unit:%1").arg(id);
         u.pos = GeoPos{x, y, alt};
         u.detectRange = d; u.attackRange = a; u.commRange = c;
         u.speed = sp; u.maxHp = hp;

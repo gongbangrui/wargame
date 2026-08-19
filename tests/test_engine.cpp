@@ -532,6 +532,187 @@ TEST_F(EngineTest, PostedDestroyNotificationCannotKillLiveUnit) {
     EXPECT_EQ(destroyedSignals, 0);
 }
 
+TEST_F(EngineTest, VmfDestructionConfirmationRequiresReconObservationAndLink) {
+    Scenario scenario = engine.scenario();
+    scenario.communicationPolicy.format = QStringLiteral("vmf-design-v1");
+    scenario.communicationPolicy.vmfProfile = QStringLiteral("vmf-design-v1");
+    for (ScenarioUnit& unit : scenario.units) unit.schedule.clear();
+
+    const auto place = [&scenario](const QString& id, const GeoPos& position,
+                                   double detectRange, double commRange) {
+        auto it = std::find_if(scenario.units.begin(), scenario.units.end(),
+                               [&id](const ScenarioUnit& unit) { return unit.id == id; });
+        if (it == scenario.units.end()) return;
+        it->pos = position;
+        it->detectRange = detectRange;
+        it->commRange = commRange;
+    };
+    place(QStringLiteral("red_cp"), GeoPos{1000.0, 1000.0, 50.0}, 5000.0, 2000.0);
+    place(QStringLiteral("red_r1"), GeoPos{1100.0, 1000.0, 3000.0}, 1000.0, 2000.0);
+    place(QStringLiteral("red_a1"), GeoPos{1200.0, 1000.0, 2000.0}, 500.0, 2000.0);
+    place(QStringLiteral("blue_g1"), GeoPos{1500.0, 1000.0, 0.0}, 500.0, 500.0);
+    place(QStringLiteral("blue_r1"), GeoPos{1500.0, 1200.0, 3000.0}, 500.0, 500.0);
+    place(QStringLiteral("blue_a1"), GeoPos{1500.0, 1400.0, 2000.0}, 500.0, 500.0);
+    ASSERT_TRUE(engine.setScenario(scenario));
+
+    UnitBase* firstTarget = engine.unit(QStringLiteral("blue_g1"));
+    UnitBase* secondTarget = engine.unit(QStringLiteral("blue_r1"));
+    UnitBase* thirdTarget = engine.unit(QStringLiteral("blue_a1"));
+    ASSERT_NE(firstTarget, nullptr);
+    ASSERT_NE(secondTarget, nullptr);
+    ASSERT_NE(thirdTarget, nullptr);
+    firstTarget->setHp(0.0);
+    secondTarget->setHp(0.0);
+    thirdTarget->setHp(0.0);
+
+    int reconConfirmations = 0;
+    QObject::connect(engine.bus(), &MessageBus::messagePosted,
+                     [&reconConfirmations](const QJsonObject& message) {
+        if (message.value(QStringLiteral("type")).toString()
+                == QLatin1String("TargetDestroyed")
+            && message.value(QStringLiteral("sender")).toString()
+                == QLatin1String("red_r1")) {
+            ++reconConfirmations;
+        }
+    });
+
+    const auto sendDestroy = [this](const QString& targetId, const UnitBase* target) {
+        Message destroyed;
+        destroyed.id = QStringLiteral("destroyed-%1").arg(targetId);
+        destroyed.type = Message::Type::TargetDestroyed;
+        destroyed.sender = QStringLiteral("red_a1");
+        destroyed.receiver = QStringLiteral("red_cp");
+        destroyed.requiresAck = true;
+        destroyed.payload = QJsonObject{
+            {QStringLiteral("targetId"), targetId},
+            {QStringLiteral("attackerId"), QStringLiteral("red_a1")},
+            {QStringLiteral("x"), target->pos().x},
+            {QStringLiteral("y"), target->pos().y},
+            {QStringLiteral("alt"), target->pos().alt},
+            {QStringLiteral("targetType"), target->kindStr()},
+            {QStringLiteral("targetCount"), 1},
+            {QStringLiteral("friendFoe"), QStringLiteral("enemy")},
+            {QStringLiteral("status"), QStringLiteral("destroyed")}};
+        return engine.bus()->send(destroyed);
+    };
+
+    ASSERT_TRUE(sendDestroy(QStringLiteral("blue_g1"), firstTarget));
+    EXPECT_EQ(reconConfirmations, 1);
+    EXPECT_DOUBLE_EQ(firstTarget->hp(), 0.0);
+
+    auto* recon = engine.unit(QStringLiteral("red_r1"));
+    ASSERT_NE(recon, nullptr);
+    recon->setDetectRange(10.0);
+    ASSERT_TRUE(sendDestroy(QStringLiteral("blue_r1"), secondTarget));
+    EXPECT_EQ(reconConfirmations, 1)
+        << "an out-of-range recon aircraft must not confirm a kill";
+    EXPECT_DOUBLE_EQ(secondTarget->hp(), 0.0);
+
+    recon->setDetectRange(1000.0);
+    recon->setCommRange(1.0);
+    ASSERT_TRUE(sendDestroy(QStringLiteral("blue_a1"), thirdTarget));
+    EXPECT_EQ(reconConfirmations, 1)
+        << "a recon aircraft without a command-post link must not confirm a kill";
+    EXPECT_DOUBLE_EQ(thirdTarget->hp(), 0.0);
+}
+
+TEST_F(EngineTest, GuidedStrikeWorkflowCompletesThroughRealAttackAndWithdrawal) {
+    Scenario scenario = engine.scenario();
+    scenario.communicationPolicy.format = QStringLiteral("vmf-design-v1");
+    scenario.communicationPolicy.vmfProfile = QStringLiteral("vmf-design-v1");
+    for (ScenarioUnit& unit : scenario.units) unit.schedule.clear();
+
+    const auto configure = [&scenario](const QString& id, const GeoPos& position,
+                                       double detectRange, double commRange) {
+        const auto it = std::find_if(scenario.units.begin(), scenario.units.end(),
+                                     [&id](const ScenarioUnit& unit) {
+                                         return unit.id == id;
+                                     });
+        if (it == scenario.units.end()) return;
+        it->pos = position;
+        it->detectRange = detectRange;
+        it->commRange = commRange;
+    };
+    configure(QStringLiteral("red_cp"), GeoPos{1000.0, 1000.0, 50.0}, 5000.0, 3000.0);
+    configure(QStringLiteral("red_r1"), GeoPos{1100.0, 1000.0, 3000.0}, 1000.0, 3000.0);
+    configure(QStringLiteral("red_g1"), GeoPos{1150.0, 1000.0, 0.0}, 1000.0, 3000.0);
+    configure(QStringLiteral("red_a1"), GeoPos{1200.0, 1000.0, 2000.0}, 500.0, 3000.0);
+    configure(QStringLiteral("blue_r1"), GeoPos{1500.0, 1000.0, 3000.0}, 500.0, 500.0);
+    for (ScenarioUnit& unit : scenario.units) {
+        if (unit.id == QLatin1String("red_a1")) {
+            unit.hitProbability = 1.0;
+            unit.minAttackRange = 0.0;
+            unit.optimalRange = 1000.0;
+            unit.attackRange = 1000.0;
+            unit.damageMin = 200.0;
+            unit.damageMax = 200.0;
+        }
+    }
+    ASSERT_TRUE(engine.setScenario(scenario));
+
+    GuidedStrikeWorkflow* workflow = engine.guidedStrikeWorkflow(QStringLiteral("red"));
+    ASSERT_NE(workflow, nullptr);
+    const QJsonArray route{QJsonObject{{QStringLiteral("x"), 1500.0},
+                                       {QStringLiteral("y"), 1000.0}}};
+    const QJsonObject report{
+        {QStringLiteral("targetId"), QStringLiteral("blue_r1")},
+        {QStringLiteral("targetType"), QStringLiteral("reconuav")},
+        {QStringLiteral("targetCount"), 1},
+        {QStringLiteral("friendFoe"), QStringLiteral("enemy")},
+        {QStringLiteral("status"), QStringLiteral("detected")},
+        {QStringLiteral("x"), 1500.0},
+        {QStringLiteral("y"), 1000.0},
+        {QStringLiteral("alt"), 3000.0}};
+    QString error;
+    ASSERT_TRUE(workflow->reportTarget(QStringLiteral("red_r1"),
+                                       QStringLiteral("blue_r1"), report, &error))
+        << error.toStdString();
+    ASSERT_TRUE(workflow->confirmDispatch(QStringLiteral("red_cp"),
+                                          QStringLiteral("red_a1"),
+                                          QStringLiteral("blue_r1"), route, &error))
+        << error.toStdString();
+    ASSERT_TRUE(workflow->commandGroundGuidance(QStringLiteral("red_cp"),
+                                                QStringLiteral("red_g1"),
+                                                QStringLiteral("red_a1"),
+                                                QStringLiteral("blue_r1"), &error))
+        << error.toStdString();
+    ASSERT_TRUE(workflow->confirmGroundAttack(QStringLiteral("red_g1"),
+                                               QStringLiteral("red_a1"),
+                                               QStringLiteral("blue_r1"), route, &error))
+        << error.toStdString();
+    ASSERT_EQ(workflow->stage(), GuidedStrikeWorkflow::Stage::Engaging);
+
+    int reconConfirmations = 0;
+    QObject::connect(engine.bus(), &MessageBus::messagePosted,
+                     [&reconConfirmations](const QJsonObject& message) {
+        if (message.value(QStringLiteral("type")).toString()
+                == QLatin1String("TargetDestroyed")
+            && message.value(QStringLiteral("sender")).toString()
+                == QLatin1String("red_r1")) {
+            ++reconConfirmations;
+        }
+    });
+
+    auto* target = engine.unit(QStringLiteral("blue_r1"));
+    auto* attacker = dynamic_cast<AttackUAV*>(engine.unit(QStringLiteral("red_a1")));
+    ASSERT_NE(target, nullptr);
+    ASSERT_NE(attacker, nullptr);
+    target->setHp(50.0);
+    attacker->setPosition(GeoPos{target->pos().x, target->pos().y, attacker->pos().alt});
+    attacker->fireOnTarget(QStringLiteral("blue_r1"));
+    engine.stepOnce(0.1);
+
+    ASSERT_FALSE(target->alive());
+    EXPECT_EQ(workflow->stage(), GuidedStrikeWorkflow::Stage::TargetDestroyed);
+    EXPECT_EQ(reconConfirmations, 1);
+
+    ASSERT_TRUE(workflow->confirmWithdraw(QStringLiteral("red_cp"),
+                                          QStringLiteral("red_a1"),
+                                          1000.0, 1000.0, &error))
+        << error.toStdString();
+    EXPECT_EQ(workflow->stage(), GuidedStrikeWorkflow::Stage::Withdrawn);
+}
+
 TEST_F(EngineTest, DestroyedTargetLeavesAttackerInPlaceWithoutAutoWithdraw) {
     // 修复后的设计：摧毁目标后，攻击方不应被 CP 自动派单撤回；
     // 而是保留原地等待新指令，由指挥员手动决定下一步。

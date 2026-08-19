@@ -8,6 +8,7 @@
 #include "protocol/StateDelta.h"
 
 #include <QCoreApplication>
+#include <QByteArray>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -170,6 +171,95 @@ bool isIntelRequestType(const QString& type) {
     return type == QLatin1String("shareIntel")
         || type == QLatin1String("createIntelReport")
         || type == QLatin1String("requestIntelHistory");
+}
+
+bool buildVmfMessage(const QJsonObject& payload, const QString& messageId,
+                     Message* output, QString* error) {
+    if (!output) {
+        if (error) *error = QStringLiteral("VMF 消息输出参数为空");
+        return false;
+    }
+    Message message;
+    message.id = messageId.isEmpty()
+        ? payload.value(QStringLiteral("messageId")).toString() : messageId;
+    if (message.id.isEmpty()) {
+        if (error) *error = QStringLiteral("VMF 消息 ID 缺失");
+        return false;
+    }
+    if (!Message::parseTypeName(payload.value(QStringLiteral("messageType")).toString(),
+                                &message.type)
+        || message.type == Message::Type::Ack) {
+        if (error) *error = QStringLiteral("VMF 消息类型无效");
+        return false;
+    }
+    message.sender = payload.value(QStringLiteral("senderUnitId")).toString();
+    message.receiver = payload.value(QStringLiteral("receiverUnitId")).toString();
+    message.traceId = payload.value(QStringLiteral("traceId")).toString();
+    message.correlationId = payload.value(QStringLiteral("correlationId")).toString();
+    message.vmfMessage = payload.value(QStringLiteral("vmfMessage")).toString();
+    message.wireFormat = Message::WireFormat::VmfDesignV1;
+    const QByteArray encodedWire = payload.value(QStringLiteral("wireBytes")).toString().toLatin1();
+    message.wireBytes = QByteArray::fromBase64(encodedWire);
+    const QJsonValue bitLengthValue = payload.value(QStringLiteral("wireBitLength"));
+    const double bitLengthNumber = bitLengthValue.toDouble(-1.0);
+    if (!bitLengthValue.isDouble() || !std::isfinite(bitLengthNumber)
+        || bitLengthNumber <= 0.0 || std::floor(bitLengthNumber) != bitLengthNumber
+        || bitLengthNumber > static_cast<double>(std::numeric_limits<int>::max())) {
+        if (error) *error = QStringLiteral("VMF 位长度无效");
+        return false;
+    }
+    message.wireBitLength = static_cast<int>(bitLengthNumber);
+    message.requiresAck = payload.value(QStringLiteral("requiresAck")).toBool(false);
+    message.automaticAck = true;
+    message.retryCount = payload.value(QStringLiteral("retryCount")).toInt(0);
+    message.payload = payload.value(QStringLiteral("payload")).toObject();
+    message.timestamp = QDateTime::currentDateTimeUtc();
+    message.vmfEncoded = true;
+    if (message.wireBytes.isEmpty() || message.wireBytes.toBase64() != encodedWire
+        || message.wireBitLength <= 0
+        || message.wireBitLength > message.wireBytes.size() * 8) {
+        if (error) *error = QStringLiteral("VMF wire 数据无效");
+        return false;
+    }
+    const int remainder = message.wireBitLength % 8;
+    if (remainder != 0) {
+        const unsigned char unusedMask = static_cast<unsigned char>((1U << (8 - remainder)) - 1U);
+        if ((static_cast<unsigned char>(message.wireBytes.at(message.wireBytes.size() - 1))
+             & unusedMask) != 0U) {
+            if (error) *error = QStringLiteral("VMF padding 位必须为 0");
+            return false;
+        }
+    }
+    *output = std::move(message);
+    return true;
+}
+
+QJsonObject addServerVmfDedupe(const QJsonObject& stateObject,
+                               const QSet<QString>& ids) {
+    if (stateObject.isEmpty()) return stateObject;
+    vmf::RuntimeState state;
+    QString error;
+    if (!vmf::RuntimeState::fromJson(stateObject, &state, &error)) return stateObject;
+    QStringList ordered = ids.values();
+    ordered.sort();
+    for (const QString& id : ordered) state.rememberMessageId(id);
+    return state.toJson();
+}
+
+void restoreServerVmfDedupe(const QJsonObject& stateObject, QSet<QString>* ids,
+                            QStringList* order) {
+    if (!ids || !order || stateObject.isEmpty()) return;
+    vmf::RuntimeState state;
+    QString error;
+    if (!vmf::RuntimeState::fromJson(stateObject, &state, &error)) return;
+    ids->clear();
+    order->clear();
+    for (const QJsonValue& value : state.seenMessageIds) {
+        const QString id = value.toString();
+        if (id.isEmpty()) continue;
+        ids->insert(id);
+        order->append(id);
+    }
 }
 
 QString roomModeFromConfig(const QJsonObject& room) {
@@ -471,6 +561,15 @@ GameServer::GameServer(QObject* parent)
                           {QStringLiteral("provider"), m_aiProviderMode}});
     }
 
+    // Register before any scenario is loaded so a simulation-generated VMF
+    // observation is durably recorded before the newly-created workflow can
+    // be checkpointed. replayDurableEvents() suppresses this callback while
+    // applying already-recorded events during recovery.
+    if (m_engine.bus()) {
+        connect(m_engine.bus(), &MessageBus::messagePosted, this,
+                [this](const QJsonObject& posted) { handleGeneratedVmfMessage(posted); });
+    }
+
     const auto bootstrapRoomState = [this]() {
         // A failed restore may have partially applied a checkpoint before an
         // event or runtime validation error. Reset every room-owned value
@@ -480,7 +579,11 @@ GameServer::GameServer(QObject* parent)
         m_phase = QStringLiteral("preparing");
         m_roomMode = m_authoritativeRoom.mode();
         m_aiDifficulty = QStringLiteral("normal");
+        m_roomDescription.clear();
+        m_scenarioId = QStringLiteral("default");
+        m_roomStatus = QStringLiteral("stopped");
         m_configVersion = 1;
+        m_lastRoomUpdate.clear();
         m_redReady = false;
         m_blueReady = false;
         m_runInitialScenario = {};
@@ -490,6 +593,8 @@ GameServer::GameServer(QObject* parent)
         m_nextObserverTrajectorySampleAt = 0.0;
         m_commandResults.clear();
         m_commandResultOrder.clear();
+        m_vmfMessageIds.clear();
+        m_vmfMessageIdOrder.clear();
         m_scenarioRevision = 1;
         m_stateRevision = 1;
         m_eventSequence = 0;
@@ -779,6 +884,9 @@ void GameServer::refreshRoomControlForJoin(QWebSocket* socket, const QJsonObject
             }
             if (payload.value(QStringLiteral("asObserver")).toBool()) {
                 m_roomName = selected.value(QStringLiteral("name")).toString(m_roomName);
+                m_roomDescription = selected.value(QStringLiteral("description")).toString(
+                    m_roomDescription);
+                m_scenarioId = selected.value(QStringLiteral("scenarioId")).toString(m_scenarioId);
                 m_roomStatus = selected.value(QStringLiteral("status"))
                                    .toString(QStringLiteral("stopped"));
                 m_roomMode = roomModeFromConfig(selected);
@@ -846,6 +954,9 @@ void GameServer::refreshRoomControlForJoin(QWebSocket* socket, const QJsonObject
             if (m_phase == QLatin1String("preparing")) m_seatParameters = nextParameters;
             reconcileSeatConfiguration(seatParametersChanged);
             m_roomName = selected.value(QStringLiteral("name")).toString(m_roomName);
+            m_roomDescription = selected.value(QStringLiteral("description")).toString(
+                m_roomDescription);
+            m_scenarioId = selected.value(QStringLiteral("scenarioId")).toString(m_scenarioId);
             m_roomStatus = selected.value(QStringLiteral("status")).toString(QStringLiteral("stopped"));
             m_lastRoomUpdate = selected.value(QStringLiteral("updatedAt")).toString();
             processRoomOperation(selected.value(QStringLiteral("pendingOperation")).toObject());
@@ -1160,6 +1271,7 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
              || type == QLatin1String("setObserverTrails")) {
         handleSetObserverTrajectories(socket, payload);
     }
+    else if (type == QLatin1String("vmfMessage")) handleVmfMessage(socket, payload, messageId);
     else if (type == QLatin1String("heartbeat")) sendEnvelope(socket, QStringLiteral("pong"), QJsonObject{{QStringLiteral("sessionAlive"), true}});
     else if (type == QLatin1String("command")) handleCommand(socket, payload);
     else if (type == QLatin1String("control")) handleControl(socket, payload);
@@ -1566,6 +1678,9 @@ void GameServer::syncRoomControl(QWebSocket* requester) {
             && m_roomStatus != QLatin1String("stopped");
         m_lastRoomUpdate = updated;
         m_roomName = selected.value(QStringLiteral("name")).toString(m_roomName);
+        m_roomDescription = selected.value(QStringLiteral("description")).toString(
+            m_roomDescription);
+        m_scenarioId = selected.value(QStringLiteral("scenarioId")).toString(m_scenarioId);
         const QJsonObject latestOperation = selected.value(QStringLiteral("operation")).toObject();
         const QJsonObject pendingOperation = selected.value(QStringLiteral("pendingOperation")).toObject();
         const QString pendingAction = pendingOperation.value(QStringLiteral("action")).toString();
@@ -1850,7 +1965,7 @@ void GameServer::processKickRequests(const QJsonArray& requests) {
                 session.side.clear();
                 session.seatReady = false;
                 session.observer = false;
-                session.role = QStringLiteral("player");
+                session.role = session.accountRole;
                 if (!resetRoomIfEmpty(&persistenceError)) {
                     session = originalSession;
                     result = QStringLiteral("failed");
@@ -1864,7 +1979,7 @@ void GameServer::processKickRequests(const QJsonArray& requests) {
                 session.side.clear();
                 session.seatReady = false;
                 session.observer = false;
-                session.role = QStringLiteral("player");
+                session.role = session.accountRole;
                 const QString reason = request.value(QStringLiteral("reason"))
                                            .toString(QStringLiteral("你已被管理员移出房间"));
                 sendEnvelope(target, QStringLiteral("event"),
@@ -1981,9 +2096,13 @@ void GameServer::finishAuthentication(QWebSocket* socket, const QJsonObject& ide
     }
     session.authenticated = true;
     session.userId = userId;
-    session.username = identity.value(QStringLiteral("username")).toString();
-    session.displayName = identity.value(QStringLiteral("displayName")).toString();
-    session.role = QStringLiteral("player");
+    session.username = identity.value(QStringLiteral("username")).toString().trimmed();
+    session.displayName = identity.value(QStringLiteral("displayName")).toString().trimmed();
+    if (session.displayName.isEmpty()) session.displayName = session.username;
+    session.accountRole = identity.value(QStringLiteral("role")).toString().trimmed().toLower();
+    if (session.accountRole == QLatin1String("editor")) session.accountRole = QStringLiteral("room_admin");
+    if (session.accountRole != QLatin1String("room_admin")) session.accountRole = QStringLiteral("player");
+    session.role = session.accountRole;
     session.connectedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
     session.lastSeenAt = session.connectedAt;
     session.ddsTicket = QUuid::createUuid().toString(QUuid::WithoutBraces)
@@ -1995,6 +2114,7 @@ void GameServer::finishAuthentication(QWebSocket* socket, const QJsonObject& ide
                                                      {QStringLiteral("userId"), session.userId}});
     QJsonObject welcome{{QStringLiteral("username"), session.username},
                         {QStringLiteral("displayName"), session.displayName},
+                        {QStringLiteral("role"), session.accountRole},
                         {QStringLiteral("room"), m_roomId},
                         {QStringLiteral("dataPlane"), m_fastDds.backendName()},
                         {QStringLiteral("dataPlaneTopics"), QJsonArray::fromStringList(m_fastDds.topicNames())},
@@ -2108,7 +2228,14 @@ void GameServer::removeClient(QWebSocket* socket) {
 
 QString GameServer::normalizedRole(const ClientSession& session) const {
     if (session.observer) return QStringLiteral("observer");
-    return session.seatId.isEmpty() ? session.role : session.seatId;
+    return session.seatId.isEmpty() ? session.accountRole : session.seatId;
+}
+
+bool GameServer::canManageRoom(const ClientSession& session) const {
+    return session.authenticated && !session.observer
+        && session.accountRole == QLatin1String("room_admin")
+        && session.roomId == m_roomId && session.seatId.isEmpty()
+        && m_phase == QLatin1String("preparing");
 }
 
 bool GameServer::hasSeatPermission(const ClientSession& session, const QString& action) const {
@@ -2121,6 +2248,41 @@ bool GameServer::hasSeatPermission(const ClientSession& session, const QString& 
 
 UnitBase* GameServer::seatUnit(const QString& seatId) const {
     return m_engine.unit(m_authoritativeRoom.seat(seatId).unitId);
+}
+
+bool GameServer::initialPositionForSeat(const QString& seatId, GeoPos* position,
+                                        QString* error) const {
+    if (error) error->clear();
+    if (!position) {
+        if (error) *error = QStringLiteral("初始位置输出参数为空");
+        return false;
+    }
+    const SeatDescriptor descriptor = describeSeat(seatId);
+    const QString kind = descriptor.type == QLatin1String("commander")
+        ? QStringLiteral("commandpost")
+        : descriptor.type == QLatin1String("attack") ? QStringLiteral("attackuav")
+        : descriptor.type == QLatin1String("recon") ? QStringLiteral("reconuav")
+        : descriptor.type == QLatin1String("ground") ? QStringLiteral("groundscout")
+                                                       : QStringLiteral("jammeruav");
+    QList<ScenarioUnit> candidates;
+    const Scenario& baseline = m_runInitialScenario.units.empty()
+        ? m_engine.scenario() : m_runInitialScenario;
+    for (const ScenarioUnit& unit : baseline.units) {
+        if (unit.side == descriptor.side && unit.kind == kind) candidates.append(unit);
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const ScenarioUnit& left,
+                                                       const ScenarioUnit& right) {
+        return left.id < right.id;
+    });
+    const int requestedIndex = descriptor.type == QLatin1String("commander")
+        ? 0 : descriptor.index - 1;
+    if (requestedIndex < 0 || requestedIndex >= candidates.size()) {
+        if (error) *error = QStringLiteral("战位 %1 缺少对应的初始单位，请房间管理员补齐 %2")
+                                  .arg(seatId, kind);
+        return false;
+    }
+    *position = candidates.at(requestedIndex).pos;
+    return true;
 }
 
 void GameServer::broadcastRoomDirectory() {
@@ -2136,7 +2298,7 @@ void GameServer::handleRoomList(QWebSocket* socket) {
 void GameServer::sendRoomDirectory(QWebSocket* socket) {
     QJsonObject room{{QStringLiteral("roomId"), m_roomId},
                      {QStringLiteral("name"), m_roomName},
-                     {QStringLiteral("description"), QStringLiteral("由网页管理员控制生命周期的联网推演室")},
+                     {QStringLiteral("description"), m_roomDescription},
                      {QStringLiteral("status"), m_roomStatus},
                      {QStringLiteral("mode"), m_roomMode},
                      {QStringLiteral("aiDifficulty"), m_aiDifficulty},
@@ -2144,7 +2306,7 @@ void GameServer::sendRoomDirectory(QWebSocket* socket) {
                      {QStringLiteral("intelStaleAfterSec"), m_intelLedger.config().staleAfterSec},
                      {QStringLiteral("intelArchiveAfterSec"), m_intelLedger.config().archiveAfterSec},
                      {QStringLiteral("hostedByGameServer"), true},
-                     {QStringLiteral("scenarioId"), QStringLiteral("default")}};
+                     {QStringLiteral("scenarioId"), m_scenarioId}};
     QJsonObject limits;
     for (auto it = m_seatLimits.cbegin(); it != m_seatLimits.cend(); ++it) limits[it.key()] = it.value();
     room[QStringLiteral("seatLimits")] = limits;
@@ -2253,6 +2415,13 @@ void GameServer::completeJoinRoom(QWebSocket* socket, const QJsonObject& payload
         sendError(socket, QStringLiteral("ROOM_FINISHED"), QStringLiteral("本局推演已结束，请等待管理员开启下一局"));
         return;
     }
+    if (!observerJoin && sessionIt->accountRole == QLatin1String("room_admin")
+        && (m_roomStatus != QLatin1String("preparing")
+            || m_phase != QLatin1String("preparing"))) {
+        sendError(socket, QStringLiteral("ROOM_ADMIN_PREPARING_ONLY"),
+                  QStringLiteral("房间管理员只能进入准备阶段的房间"));
+        return;
+    }
     ClientSession& session = sessionIt.value();
     if (!session.seatId.isEmpty()) {
         sendError(socket, QStringLiteral("ALREADY_SEATED"),
@@ -2265,7 +2434,7 @@ void GameServer::completeJoinRoom(QWebSocket* socket, const QJsonObject& payload
     session.side.clear();
     session.seatReady = false;
     session.observer = observerJoin;
-    session.role = observerJoin ? QStringLiteral("observer") : QStringLiteral("player");
+    session.role = observerJoin ? QStringLiteral("observer") : session.accountRole;
     if (observerJoin) {
         session.observerTrajectorySelection = m_observerSelectionCache.value(session.userId);
         for (auto it = session.observerTrajectorySelection.begin();
@@ -2295,8 +2464,27 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
         session.side.clear();
         session.seatReady = false;
         session.observer = false;
-        session.role = QStringLiteral("player");
+        session.role = session.accountRole;
         handleRoomList(socket);
+        return;
+    }
+    if (session.seatId.isEmpty()) {
+        const ClientSession originalSession = session;
+        session.roomId.clear();
+        session.seatType.clear();
+        session.side.clear();
+        session.seatReady = false;
+        session.observer = false;
+        session.role = session.accountRole;
+        QString resetError;
+        if (!resetRoomIfEmpty(&resetError)) {
+            session = originalSession;
+            sendError(socket, QStringLiteral("PERSISTENCE_FAILED"), resetError);
+            return;
+        }
+        handleRoomList(socket);
+        sendFullSnapshot(socket);
+        broadcastSnapshots(true);
         return;
     }
     bool lastParticipant = session.roomId == m_roomId;
@@ -2317,7 +2505,7 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
         session.side.clear();
         session.seatReady = false;
         session.observer = false;
-        session.role = QStringLiteral("player");
+        session.role = session.accountRole;
         QString resetError;
         if (!resetRoomIfEmpty(&resetError)) {
             session = originalSession;
@@ -2376,7 +2564,7 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
     session.side.clear();
     session.seatReady = false;
     session.observer = false;
-    session.role = QStringLiteral("player");
+    session.role = session.accountRole;
     handleRoomList(socket);
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (it->authenticated && it->roomId == m_roomId) sendSeatDirectory(it.key());
@@ -2389,6 +2577,11 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
     ClientSession& session = m_clients[socket];
     if (session.roomId != m_roomId) {
         sendError(socket, QStringLiteral("ROOM_REQUIRED"), QStringLiteral("请先选择推演房间"));
+        return;
+    }
+    if (session.accountRole == QLatin1String("room_admin")) {
+        sendError(socket, QStringLiteral("ROOM_ADMIN_NO_SEAT"),
+                  QStringLiteral("房间管理员不占用战位，请在房间管理界面编辑配置"));
         return;
     }
     if (m_phase == QLatin1String("preparing")
@@ -2457,6 +2650,18 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
             sendTransferOutcome(QStringLiteral("transferRejected"), transfer, approval.revision,
                                 approval.code);
             sendError(socket, approval.code, QStringLiteral("战位切换批准失败"));
+            return;
+        }
+        GeoPos initialPosition;
+        QString initialPositionError;
+        if (!initialPositionForSeat(transfer.value(QStringLiteral("targetSeatId")).toString(),
+                                    &initialPosition, &initialPositionError)
+            || !m_authoritativeRoom.deployInitial(
+                   transfer.value(QStringLiteral("targetSeatId")).toString(), initialPosition).ok) {
+            restoreRoomStateBackup(backup);
+            sendTransferOutcome(QStringLiteral("transferRejected"), transfer, approval.revision,
+                                QStringLiteral("INITIAL_UNIT_MISSING"));
+            sendError(socket, QStringLiteral("INITIAL_UNIT_MISSING"), initialPositionError);
             return;
         }
         removeParticipantMarksForUser(approvedUserId,
@@ -2567,6 +2772,12 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
         : seatType == QLatin1String("recon") ? QStringLiteral("reconuav")
         : seatType == QLatin1String("ground") ? QStringLiteral("groundscout")
                                                : QStringLiteral("jammeruav"));
+    GeoPos initialPosition;
+    QString initialPositionError;
+    if (!initialPositionForSeat(seatId, &initialPosition, &initialPositionError)) {
+        sendError(socket, QStringLiteral("INITIAL_UNIT_MISSING"), initialPositionError);
+        return;
+    }
     if (!session.seatId.isEmpty() && session.seatId != seatId) {
         const QJsonObject beforeRoom = m_authoritativeRoom.toJson();
         const AuthoritativeRoom::Result transfer = m_authoritativeRoom.requestTransfer(
@@ -2595,6 +2806,13 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
         sendError(socket, claimed.code, QStringLiteral("战位选择被服务器拒绝"));
         return;
     }
+    const AuthoritativeRoom::Result initialDeployment =
+        m_authoritativeRoom.deployInitial(seatId, initialPosition);
+    if (!initialDeployment.ok) {
+        m_authoritativeRoom.restore(before);
+        sendError(socket, initialDeployment.code, QStringLiteral("初始部署位置无效"));
+        return;
+    }
     if (!session.seatId.isEmpty()) {
         const SeatDescriptor previous = describeSeat(session.seatId);
         m_seats.remove(session.seatId);
@@ -2620,6 +2838,13 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
     occupant.ready = false;
     m_seats.insert(seatId, occupant);
     syncAuthoritativeSeats();
+    QString deploymentError;
+    if (!applyDeployedScenario(&deploymentError)) {
+        m_authoritativeRoom.restore(before);
+        syncAuthoritativeSeats();
+        sendError(socket, QStringLiteral("INITIAL_DEPLOYMENT_FAILED"), deploymentError);
+        return;
+    }
     QString claimPersistenceError;
     if (!persistRoomState(&claimPersistenceError)) {
         m_authoritativeRoom.restore(before);
@@ -2633,23 +2858,6 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
         if (it->authenticated && it->roomId == m_roomId) sendSeatDirectory(it.key());
     }
     sendFullSnapshot(socket);
-    if (seatType != QLatin1String("commander")) {
-        const QString sideName = side == QLatin1String("red") ? QStringLiteral("红方") : QStringLiteral("蓝方");
-        const QJsonObject prompt{{QStringLiteral("unitId"), mappedUnitId},
-                                 {QStringLiteral("seatId"), seatId},
-                                 {QStringLiteral("targetSeatId"), seatId},
-                                 {QStringLiteral("message"), QStringLiteral("请为%1选择初始部署位置").arg(sideName)}};
-        sendEnvelope(socket, QStringLiteral("deploymentPrompt"),
-                     QJsonObject{{QStringLiteral("unitId"), mappedUnitId},
-                                 {QStringLiteral("seatId"), seatId},
-                                 {QStringLiteral("message"), QStringLiteral("等待%1指挥官选择初始部署位置").arg(sideName)}});
-        for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
-            if (it->authenticated && it->roomId == m_roomId && it->side == side
-                && it->seatType == QLatin1String("commander")) {
-                sendEnvelope(it.key(), QStringLiteral("deploymentPrompt"), prompt);
-            }
-        }
-    }
     broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("seatClaimed")},
                                {QStringLiteral("seatId"), seatId}}, side);
 }
@@ -3587,6 +3795,10 @@ void GameServer::handleCommand(QWebSocket* socket, const QJsonObject& payload) {
                                                 QStringLiteral("命令基于服务器尚未发布的状态版本")));
         return;
     }
+    if (action == QLatin1String("updateRoomConfig")) {
+        handleRoomConfigCommand(socket, payload);
+        return;
+    }
     if (m_phase != QLatin1String("running")) {
         sendCommandResult(socket, commandId,
                           CommandResult::reject(QStringLiteral("MATCH_NOT_RUNNING"),
@@ -3627,6 +3839,200 @@ void GameServer::handleCommand(QWebSocket* socket, const QJsonObject& payload) {
     if (!m_commandResults.contains(cacheKey)) m_commandResultOrder.append(cacheKey);
     m_commandResults.insert(cacheKey, durableResult);
     sendCommandResult(socket, commandId, result);
+}
+
+void GameServer::handleRoomConfigCommand(QWebSocket* socket, const QJsonObject& payload) {
+    if (!m_clients.contains(socket)) return;
+    const ClientSession session = m_clients.value(socket);
+    const QString commandId = payload.value(QStringLiteral("commandId")).toString();
+    const QString cacheKey = commandCacheKey(session.userId, commandId);
+    const QJsonObject args = payload.value(QStringLiteral("args")).toObject();
+    const auto cacheResult = [this, session, commandId](const CommandResult& result) {
+        QJsonObject resultPayload = result.toJson();
+        resultPayload[QStringLiteral("commandId")] = commandId;
+        resultPayload[QStringLiteral("serverTime")] = m_engine.simTime();
+        const QString key = commandCacheKey(session.userId, commandId);
+        if (!m_commandResults.contains(key)) m_commandResultOrder.append(key);
+        m_commandResults.insert(key, resultPayload);
+        while (m_commandResultOrder.size() > 2048) {
+            m_commandResults.remove(m_commandResultOrder.takeFirst());
+        }
+        return resultPayload;
+    };
+    const auto reject = [this, socket, commandId, cacheResult](const QString& code,
+                                                                const QString& message) {
+        sendCommandResult(socket, commandId, CommandResult::reject(code, message));
+    };
+
+    if (!canManageRoom(session)) {
+        reject(QStringLiteral("PERMISSION_DENIED"),
+               QStringLiteral("只有准备阶段的房间管理员可以编辑房间配置"));
+        return;
+    }
+    const quint64 expectedVersion = static_cast<quint64>(
+        args.value(QStringLiteral("expectedConfigVersion")).toInteger());
+    if (expectedVersion != m_configVersion) {
+        reject(QStringLiteral("ROOM_CONFIG_VERSION_CONFLICT"),
+               QStringLiteral("房间配置已经更新，请重新载入后再保存"));
+        return;
+    }
+    if (m_roomConfigCommandsInFlight.contains(cacheKey)) return;
+
+    QJsonObject request{
+        {QStringLiteral("expected_config_version"), static_cast<qint64>(expectedVersion)},
+        {QStringLiteral("name"), args.value(QStringLiteral("name"))},
+        {QStringLiteral("description"), args.value(QStringLiteral("description"))},
+        {QStringLiteral("scenario_id"), args.value(QStringLiteral("scenarioId"))},
+        {QStringLiteral("seat_limits"), args.value(QStringLiteral("seatLimits"))},
+        {QStringLiteral("seat_parameters"), args.value(QStringLiteral("seatParameters"))}};
+    const QUrl url(m_authServiceUrl + QStringLiteral("/api/internal/rooms/%1/config")
+                       .arg(QUrl::toPercentEncoding(m_roomId)));
+    QNetworkRequest networkRequest(url);
+    networkRequest.setRawHeader("X-Internal-Key", m_internalKey.toUtf8());
+    networkRequest.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    QNetworkReply* reply = m_network.put(
+        networkRequest, QJsonDocument(request).toJson(QJsonDocument::Compact));
+    m_roomConfigCommandsInFlight.insert(cacheKey);
+    QTimer::singleShot(5000, reply, [reply]() {
+        if (reply->isRunning()) {
+            reply->setProperty("roomConfigTimedOut", true);
+            reply->abort();
+        }
+    });
+    const QPointer<QWebSocket> guardedSocket(socket);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, guardedSocket, commandId, cacheKey, session, cacheResult]() {
+        m_roomConfigCommandsInFlight.remove(cacheKey);
+        const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool timedOut = reply->property("roomConfigTimedOut").toBool();
+        const QString networkError = reply->errorString();
+        const QJsonDocument document = QJsonDocument::fromJson(reply->readAll());
+        reply->deleteLater();
+
+        const auto finish = [this, guardedSocket, commandId, cacheResult](
+                                const CommandResult& result) {
+            // Cache even when the requesting socket has gone away; a reconnect
+            // with the same command id must receive the definitive result.
+            cacheResult(result);
+            if (guardedSocket && m_clients.contains(guardedSocket)) {
+                sendCommandResult(guardedSocket, commandId, result);
+            }
+        };
+
+        if (statusCode != 200 || !document.isObject()) {
+            const QString code = statusCode == 409
+                ? QStringLiteral("ROOM_CONFIG_VERSION_CONFLICT")
+                : QStringLiteral("ROOM_CONFIG_UPDATE_FAILED");
+            const QString message = statusCode == 409
+                ? QStringLiteral("房间配置版本冲突，请重新载入后保存")
+                : timedOut
+                    ? QStringLiteral("房间配置保存超时，请稍后重试")
+                    : QStringLiteral("房间配置保存失败: %1")
+                          .arg(networkError.isEmpty()
+                                   ? QStringLiteral("HTTP %1").arg(statusCode)
+                                   : networkError);
+            finish(CommandResult::reject(code, message));
+            return;
+        }
+
+        const QJsonObject room = document.object().value(QStringLiteral("room")).toObject();
+        const quint64 nextVersion = static_cast<quint64>(
+            room.value(QStringLiteral("configVersion")).toInteger());
+        const QJsonObject limitsObject = room.value(QStringLiteral("seatLimits")).toObject();
+        const QJsonObject parametersObject = room.value(QStringLiteral("seatParameters")).toObject();
+        if (room.value(QStringLiteral("roomId")).toString() != m_roomId
+            || nextVersion == 0 || limitsObject.isEmpty()) {
+            finish(CommandResult::reject(QStringLiteral("ROOM_CONFIG_UPDATE_FAILED"),
+                                         QStringLiteral("账号服务返回的房间配置无效")));
+            return;
+        }
+
+        QHash<QString, int> nextLimits;
+        for (auto it = limitsObject.constBegin(); it != limitsObject.constEnd(); ++it) {
+            const QString key = it.key();
+            const SeatDescriptor descriptor = describeSeat(key);
+            if (!it.value().isDouble() || descriptor.baseId != key
+                || (descriptor.side != QLatin1String("red")
+                    && descriptor.side != QLatin1String("blue"))) {
+                finish(CommandResult::reject(QStringLiteral("ROOM_CONFIG_UPDATE_FAILED"),
+                                             QStringLiteral("账号服务返回的战位容量无效")));
+                return;
+            }
+            const int limit = it.value().toInt(-1);
+            if (limit < 0 || limit > 64
+                || (descriptor.type == QLatin1String("commander") && limit != 1)) {
+                finish(CommandResult::reject(QStringLiteral("ROOM_CONFIG_UPDATE_FAILED"),
+                                             QStringLiteral("账号服务返回的战位容量超出范围")));
+                return;
+            }
+            nextLimits.insert(key, limit);
+        }
+        if (nextLimits.size() != 10) {
+            finish(CommandResult::reject(QStringLiteral("ROOM_CONFIG_UPDATE_FAILED"),
+                                         QStringLiteral("账号服务返回的战位配置不完整")));
+            return;
+        }
+        QHash<QString, QJsonObject> nextParameters;
+        for (auto it = parametersObject.constBegin(); it != parametersObject.constEnd(); ++it) {
+            const SeatDescriptor descriptor = describeSeat(it.key());
+            if (descriptor.baseId.isEmpty() || !it.value().isObject()) {
+                finish(CommandResult::reject(QStringLiteral("ROOM_CONFIG_UPDATE_FAILED"),
+                                             QStringLiteral("账号服务返回的战位参数无效")));
+                return;
+            }
+            const QJsonObject parameters = it.value().toObject();
+            for (auto parameter = parameters.constBegin(); parameter != parameters.constEnd(); ++parameter) {
+                if ((parameter.key() != QLatin1String("communicationRange")
+                     && parameter.key() != QLatin1String("detectRange"))
+                    || !parameter.value().isDouble()
+                    || !std::isfinite(parameter.value().toDouble())
+                    || parameter.value().toDouble() < 0.0
+                    || parameter.value().toDouble() > 1000000.0) {
+                    finish(CommandResult::reject(QStringLiteral("ROOM_CONFIG_UPDATE_FAILED"),
+                                                 QStringLiteral("账号服务返回的战位参数超出范围")));
+                    return;
+                }
+            }
+            nextParameters.insert(it.key(), parameters);
+        }
+
+        if (m_phase != QLatin1String("preparing")) {
+            finish(CommandResult::reject(QStringLiteral("ROOM_NOT_PREPARING"),
+                                         QStringLiteral("房间已经离开准备阶段，配置未应用")));
+            return;
+        }
+        const RoomStateBackup backup = captureRoomState();
+        m_roomName = room.value(QStringLiteral("name")).toString(m_roomName);
+        m_roomDescription = room.value(QStringLiteral("description")).toString(m_roomDescription);
+        m_scenarioId = room.value(QStringLiteral("scenarioId")).toString(m_scenarioId);
+        m_configVersion = nextVersion;
+        m_lastRoomUpdate = room.value(QStringLiteral("updatedAt")).toString(m_lastRoomUpdate);
+        m_seatLimits = nextLimits;
+        m_seatParameters = nextParameters;
+        reconcileSeatConfiguration(true);
+        const CommandResult success = CommandResult::ok(QStringLiteral("房间配置已保存"));
+        // Include the result in the checkpoint written below.  This keeps a
+        // retried command idempotent across a server restart as well as across
+        // a live reconnect.
+        cacheResult(success);
+        QString persistenceError;
+        if (!persistRoomState(&persistenceError)) {
+            QString rollbackError;
+            restoreRoomStateBackup(backup, &rollbackError);
+            finish(CommandResult::reject(
+                QStringLiteral("PERSISTENCE_FAILED"),
+                QStringLiteral("房间配置已收到但本地检查点写入失败: %1")
+                    .arg(persistenceError.isEmpty() ? rollbackError : persistenceError)));
+            return;
+        }
+        syncAuthoritativeSeats();
+        for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
+            if (it->authenticated && it->roomId == m_roomId) sendSeatDirectory(it.key());
+        }
+        broadcastRoomDirectory();
+        broadcastSnapshots(true);
+        finish(success);
+    });
 }
 
 void GameServer::handleControl(QWebSocket* socket, const QJsonObject& payload) {
@@ -3703,6 +4109,287 @@ void GameServer::handleChat(QWebSocket* socket, const QJsonObject& payload) {
     broadcastChat(message);
 }
 
+void GameServer::handleVmfMessage(QWebSocket* socket, const QJsonObject& payload,
+                                  const QString& requestId) {
+    if (!m_clients.contains(socket)) return;
+    ClientSession& session = m_clients[socket];
+    if (session.roomId != m_roomId || session.seatId.isEmpty() || session.observer) {
+        sendError(socket, QStringLiteral("SEAT_REQUIRED"),
+                  QStringLiteral("选择可用战位后才能发送 VMF 消息"), requestId);
+        return;
+    }
+    if (!m_engine.vmfEnabled()
+        || m_engine.scenario().communicationPolicy.format != QLatin1String("vmf-design-v1")) {
+        sendError(socket, QStringLiteral("VMF_DISABLED"),
+                  QStringLiteral("当前房间未启用 VMF profile"), requestId);
+        return;
+    }
+    const AuthoritativeRoom::Seat seat = m_authoritativeRoom.seat(session.seatId);
+    Message::Type requestedType;
+    if (!Message::parseTypeName(payload.value(QStringLiteral("messageType")).toString(),
+                                &requestedType)) {
+        sendError(socket, QStringLiteral("VMF_ROLE_FORBIDDEN"),
+                  QStringLiteral("当前战位无权发送该 VMF 消息类型"), requestId);
+        return;
+    }
+    const QString senderId = payload.value(QStringLiteral("senderUnitId")).toString();
+    if (senderId.isEmpty() || seat.unitId != senderId) {
+        sendError(socket, QStringLiteral("UNIT_NOT_OWNED"),
+                  QStringLiteral("VMF 发送单元不属于当前战位"), requestId);
+        return;
+    }
+    UnitBase* sender = m_engine.unit(senderId);
+    if (!sender || !sender->alive() || sender->sideStr() != session.side) {
+        sendError(socket, QStringLiteral("UNIT_NOT_AVAILABLE"),
+                  QStringLiteral("VMF 发送单元当前不可用"), requestId);
+        return;
+    }
+    const QString receiverId = payload.value(QStringLiteral("receiverUnitId")).toString();
+    if (receiverId != QLatin1String("*")) {
+        UnitBase* receiver = m_engine.unit(receiverId);
+        if (!receiver || !receiver->alive() || receiver->sideStr() != session.side) {
+            sendError(socket, QStringLiteral("INVALID_RECEIVER"),
+                      QStringLiteral("VMF 接收单元必须是同阵营有效单元"), requestId);
+            return;
+        }
+        if (!StateProjector::canTransmit(m_engine, senderId, receiverId)) {
+            sendError(socket, QStringLiteral("COMMUNICATION_LOST"),
+                      QStringLiteral("发送方与接收方当前不在有向通信链路内"), requestId);
+            return;
+        }
+    } else {
+        bool reachable = false;
+        for (const QString& id : m_engine.unitIds()) {
+            const UnitBase* candidate = m_engine.unit(id);
+            if (candidate && candidate->alive() && candidate->sideStr() == session.side
+                && id != senderId && StateProjector::canTransmit(m_engine, senderId, id)) {
+                reachable = true;
+                break;
+            }
+        }
+        if (!reachable) {
+            sendError(socket, QStringLiteral("COMMUNICATION_LOST"),
+                      QStringLiteral("当前没有可达的同阵营 VMF 接收单元"), requestId);
+            return;
+        }
+    }
+
+    const QString traceId = payload.value(QStringLiteral("traceId")).toString();
+    const QString dedupeKey = QString::number(session.userId) + QLatin1Char(':') + traceId;
+    if (m_vmfMessageIds.contains(dedupeKey)) {
+        sendError(socket, QStringLiteral("DUPLICATE_MESSAGE"),
+                  QStringLiteral("VMF trace 已处理"), requestId);
+        return;
+    }
+    Message message;
+    QString buildError;
+    const QString messageId = QStringLiteral("vmf_%1_%2").arg(session.userId).arg(traceId);
+    if (!buildVmfMessage(payload, messageId, &message, &buildError)) {
+        sendError(socket, QStringLiteral("INVALID_VMF"), buildError, requestId);
+        return;
+    }
+    QString validationError;
+    if (!m_engine.validateVmfMessage(message, &validationError)) {
+        sendError(socket, QStringLiteral("INVALID_VMF"), validationError, requestId);
+        return;
+    }
+    const QJsonObject catalogSummary = m_engine.vmfMessageCatalogSummary(message);
+    if (catalogSummary.isEmpty()) {
+        sendError(socket, QStringLiteral("INVALID_VMF"),
+                  QStringLiteral("VMF 消息目录摘要缺失"), requestId);
+        return;
+    }
+    QString receiverRole;
+    if (receiverId != QLatin1String("*")) {
+        bool receiverSeatFound = false;
+        for (const AuthoritativeRoom::Seat& candidate : m_authoritativeRoom.seats()) {
+            if (candidate.unitId == receiverId) {
+                receiverRole = candidate.seatType;
+                receiverSeatFound = true;
+                break;
+            }
+        }
+        if (!receiverSeatFound) {
+            sendError(socket, QStringLiteral("INVALID_RECEIVER"),
+                      QStringLiteral("VMF 接收单元不属于当前权威战位"), requestId);
+            return;
+        }
+    } else {
+        const QJsonArray receiverRoles = catalogSummary.value(QStringLiteral("receiverRoles"))
+                                             .toArray();
+        if (!std::any_of(receiverRoles.cbegin(), receiverRoles.cend(), [](const QJsonValue& value) {
+                return value.toString() == QLatin1String("any");
+            })) {
+            sendError(socket, QStringLiteral("INVALID_RECEIVER"),
+                      QStringLiteral("该 VMF 消息必须指定具有目录角色的接收战位"), requestId);
+            return;
+        }
+    }
+    if (!m_engine.validateVmfMessageForRoles(message, seat.seatType, receiverRole,
+                                             &validationError)) {
+        sendError(socket, QStringLiteral("VMF_ROLE_FORBIDDEN"), validationError, requestId);
+        return;
+    }
+    message.requiresAck = catalogSummary.value(QStringLiteral("requiresAck")).toBool();
+    message.automaticAck = catalogSummary.value(QStringLiteral("automaticAck")).toBool();
+    message.payload.insert(QStringLiteral("vmfCatalogId"),
+                           catalogSummary.value(QStringLiteral("catalogId")));
+    message.payload.insert(QStringLiteral("vmfTrigger"),
+                           catalogSummary.value(QStringLiteral("trigger")));
+    message.payload.insert(QStringLiteral("vmfInformationValue"),
+                           catalogSummary.value(QStringLiteral("informationValue")));
+    if (!m_engine.validateVmfWorkflowMessage(message, &validationError)) {
+        sendError(socket, QStringLiteral("VMF_SEQUENCE_INVALID"), validationError, requestId);
+        return;
+    }
+    QJsonObject durable = payload;
+    durable.insert(QStringLiteral("messageId"), message.id);
+    durable.insert(QStringLiteral("userId"), session.userId);
+    durable.insert(QStringLiteral("seatId"), session.seatId);
+    QString persistenceError;
+    if (!recordDurableEvent(QStringLiteral("vmfMessage"), durable, &persistenceError)) {
+        sendError(socket, QStringLiteral("PERSISTENCE_FAILED"),
+                  QStringLiteral("VMF 消息日志写入失败: %1").arg(persistenceError), requestId);
+        return;
+    }
+    QString postError;
+    if (!m_engine.postVmfMessage(message, &postError)) {
+        sendError(socket, QStringLiteral("INVALID_VMF"), postError, requestId);
+        return;
+    }
+    bool acknowledged = !message.requiresAck;
+    if (!acknowledged && m_engine.bus()) {
+        const QList<Message> pending = m_engine.bus()->pendingAcks();
+        acknowledged = std::none_of(
+            pending.cbegin(), pending.cend(), [&message](const Message& candidate) {
+                return candidate.id == message.id;
+            });
+    }
+    m_vmfMessageIds.insert(dedupeKey);
+    m_vmfMessageIdOrder.append(dedupeKey);
+    while (m_vmfMessageIdOrder.size() > 4096) {
+        m_vmfMessageIds.remove(m_vmfMessageIdOrder.takeFirst());
+    }
+    ++m_stateRevision;
+
+    QJsonObject workflowState;
+    if (const GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(session.side)) {
+        workflowState = workflow->snapshot();
+    }
+    const QJsonObject event{
+        {QStringLiteral("kind"), QStringLiteral("vmfMessage")},
+        {QStringLiteral("messageId"), message.id},
+        {QStringLiteral("traceId"), message.traceId},
+        {QStringLiteral("correlationId"), message.correlationId},
+        {QStringLiteral("vmfMessage"), message.vmfMessage},
+        {QStringLiteral("wireFormat"), Message::wireFormatName(message.wireFormat)},
+        {QStringLiteral("wireBitLength"), message.wireBitLength},
+        {QStringLiteral("senderUnitId"), message.sender},
+        {QStringLiteral("receiverUnitId"), message.receiver},
+        {QStringLiteral("messageType"), Message::typeName(message.type)},
+        {QStringLiteral("validated"), true},
+        {QStringLiteral("fieldCount"), payload.value(QStringLiteral("fieldCount")).toInt()},
+        {QStringLiteral("catalogId"), catalogSummary.value(QStringLiteral("catalogId"))},
+        {QStringLiteral("trigger"), catalogSummary.value(QStringLiteral("trigger"))},
+        {QStringLiteral("informationValue"), catalogSummary.value(QStringLiteral("informationValue"))},
+        {QStringLiteral("retryCount"), message.retryCount},
+        {QStringLiteral("acked"), acknowledged},
+        {QStringLiteral("senderSide"), session.side},
+        {QStringLiteral("receiverSide"), session.side},
+        {QStringLiteral("direction"), QStringLiteral("friendly")},
+        {QStringLiteral("workflow"), workflowState},
+        {QStringLiteral("summary"), messageSummary(QStringLiteral("vmfMessage"), payload)}};
+    broadcastVmfEvent(event);
+    persistRoomState();
+}
+
+void GameServer::handleGeneratedVmfMessage(const QJsonObject& posted) {
+    // Client-originated VMF envelopes are recorded by handleVmfMessage before
+    // they enter the bus.  This path is intentionally limited to the
+    // simulation-generated reconnaissance confirmation; recording every bus
+    // message would persist position reports, ACKs and native traffic that
+    // are not part of the VMF control-plane contract.
+    if (m_replayingDurableEvents) return;
+    if (posted.value(QStringLiteral("type")).toString()
+            != QLatin1String("TargetDestroyed")
+        || posted.value(QStringLiteral("payload")).toObject()
+               .value(QStringLiteral("confirmationSource")).toString()
+            != QLatin1String("recon-observation")) {
+        return;
+    }
+    if (!m_engine.vmfEnabled()
+        || posted.value(QStringLiteral("wireFormat")).toString()
+            != QLatin1String("vmf-design-v1")) {
+        audit(QStringLiteral("vmf"),
+              QJsonObject{{QStringLiteral("event"), QStringLiteral("generatedMessageRejected")},
+                          {QStringLiteral("reason"), QStringLiteral("missing-vmf-envelope")},
+                          {QStringLiteral("messageId"), posted.value(QStringLiteral("id"))}});
+        return;
+    }
+    const QString messageId = posted.value(QStringLiteral("id")).toString();
+    if (messageId.trimmed().isEmpty()) {
+        audit(QStringLiteral("vmf"),
+              QJsonObject{{QStringLiteral("event"), QStringLiteral("generatedMessageRejected")},
+                          {QStringLiteral("reason"), QStringLiteral("missing-message-id")}});
+        return;
+    }
+
+    const QString senderId = posted.value(QStringLiteral("sender")).toString();
+    const UnitBase* sender = m_engine.unit(senderId);
+    if (!sender || !sender->alive() || sender->kind() != UnitKind::ReconUAV) {
+        audit(QStringLiteral("vmf"),
+              QJsonObject{{QStringLiteral("event"), QStringLiteral("generatedMessageRejected")},
+                          {QStringLiteral("reason"), QStringLiteral("invalid-recon-sender")},
+                          {QStringLiteral("senderUnitId"), senderId}});
+        return;
+    }
+
+    QString seatId;
+    for (const AuthoritativeRoom::Seat& candidate : m_authoritativeRoom.seats()) {
+        if (candidate.unitId == senderId && candidate.side == sender->sideStr()) {
+            seatId = candidate.seatId;
+            break;
+        }
+    }
+    if (seatId.isEmpty()) {
+        audit(QStringLiteral("vmf"),
+              QJsonObject{{QStringLiteral("event"), QStringLiteral("generatedMessageRejected")},
+                          {QStringLiteral("reason"), QStringLiteral("recon-seat-not-found")},
+                          {QStringLiteral("senderUnitId"), senderId}});
+        return;
+    }
+
+    // Convert MessageBus' internal JSON shape back to the durable VMF event
+    // shape consumed by applyDurableEvent().  The exact encoded bytes are
+    // retained for deterministic replay and are never included in projected
+    // observer events.
+    QJsonObject durable{
+        {QStringLiteral("messageId"), messageId},
+        {QStringLiteral("messageType"), posted.value(QStringLiteral("type"))},
+        {QStringLiteral("senderUnitId"), posted.value(QStringLiteral("sender"))},
+        {QStringLiteral("receiverUnitId"), posted.value(QStringLiteral("receiver"))},
+        {QStringLiteral("traceId"), posted.value(QStringLiteral("traceId"))},
+        {QStringLiteral("correlationId"), posted.value(QStringLiteral("correlationId"))},
+        {QStringLiteral("vmfMessage"), posted.value(QStringLiteral("vmfMessage"))},
+        {QStringLiteral("wireFormat"), posted.value(QStringLiteral("wireFormat"))},
+        {QStringLiteral("wireBytes"), posted.value(QStringLiteral("wireBytes"))},
+        {QStringLiteral("wireBitLength"), posted.value(QStringLiteral("wireBitLength"))},
+        {QStringLiteral("requiresAck"), posted.value(QStringLiteral("requiresAck"))},
+        {QStringLiteral("retryCount"), posted.value(QStringLiteral("retryCount"))},
+        {QStringLiteral("payload"), posted.value(QStringLiteral("payload"))},
+        {QStringLiteral("userId"), 0},
+        {QStringLiteral("seatId"), seatId},
+        {QStringLiteral("generatedBy"), QStringLiteral("simulation")}};
+
+    QString persistenceError;
+    if (!recordDurableEvent(QStringLiteral("vmfMessage"), durable, &persistenceError)) {
+        audit(QStringLiteral("persistence"),
+              QJsonObject{{QStringLiteral("event"), QStringLiteral("generatedVmfEventFailed")},
+                          {QStringLiteral("messageId"), durable.value(QStringLiteral("messageId"))},
+                          {QStringLiteral("message"), persistenceError}});
+    }
+}
+
 void GameServer::handleFastDdsEnvelope(const QString& topic, const QJsonObject& payload) {
     if (topic == QLatin1String("Heartbeat") || topic == QLatin1String("heartbeat")) return;
     if (topic != QLatin1String("ChatMessage") && topic != QLatin1String("MapMark")) return;
@@ -3740,18 +4427,217 @@ void GameServer::handleFastDdsEnvelope(const QString& topic, const QJsonObject& 
 }
 
 void GameServer::handleScenarioUpsert(QWebSocket* socket, const QJsonObject& payload) {
-    Q_UNUSED(payload);
-    sendError(socket, QStringLiteral("PERMISSION_DENIED"), QStringLiteral("初始阵容由网页管理员配置"));
+    const ClientSession& session = m_clients.value(socket);
+    if (!canManageRoom(session)) {
+        sendError(socket, QStringLiteral("PERMISSION_DENIED"),
+                  QStringLiteral("只有准备阶段的房间管理员可以编辑初始阵容"));
+        return;
+    }
+    const QJsonObject unitObject = payload.value(QStringLiteral("unit")).toObject();
+    const QString unitId = unitObject.value(QStringLiteral("id")).toString().trimmed();
+    if (unitId.isEmpty()) {
+        sendError(socket, QStringLiteral("INVALID_SCENARIO"), QStringLiteral("初始单位必须包含 ID"));
+        return;
+    }
+    Scenario replacement = m_runInitialScenario.units.empty()
+        ? m_engine.scenario() : m_runInitialScenario;
+    QJsonObject wrapper = ScenarioIo::toJson(replacement);
+    wrapper[QStringLiteral("units")] = QJsonArray{unitObject};
+    QString parseError;
+    const Scenario parsed = ScenarioIo::fromJson(wrapper, &parseError);
+    if (!parseError.isEmpty() || parsed.units.size() != 1) {
+        sendError(socket, QStringLiteral("INVALID_SCENARIO"),
+                  parseError.isEmpty() ? QStringLiteral("初始单位数据无效") : parseError);
+        return;
+    }
+    bool replaced = false;
+    for (ScenarioUnit& unit : replacement.units) {
+        if (unit.id != unitId) continue;
+        unit = parsed.units.front();
+        replaced = true;
+        break;
+    }
+    if (!replaced) replacement.units.push_back(parsed.units.front());
+    QString error;
+    if (!replaceInitialScenario(replacement, &error)) {
+        sendError(socket, QStringLiteral("SCENARIO_UPDATE_FAILED"), error);
+        return;
+    }
+    broadcastSnapshots(true);
 }
 
 void GameServer::handleScenarioRemove(QWebSocket* socket, const QJsonObject& payload) {
-    Q_UNUSED(payload);
-    sendError(socket, QStringLiteral("PERMISSION_DENIED"), QStringLiteral("初始阵容由网页管理员配置"));
+    const ClientSession& session = m_clients.value(socket);
+    if (!canManageRoom(session)) {
+        sendError(socket, QStringLiteral("PERMISSION_DENIED"),
+                  QStringLiteral("只有准备阶段的房间管理员可以编辑初始阵容"));
+        return;
+    }
+    const QString unitId = payload.value(QStringLiteral("unitId")).toString().trimmed();
+    Scenario replacement = m_runInitialScenario.units.empty()
+        ? m_engine.scenario() : m_runInitialScenario;
+    const qsizetype beforeSize = static_cast<qsizetype>(replacement.units.size());
+    std::erase_if(replacement.units, [&unitId](const ScenarioUnit& unit) {
+        return unit.id == unitId;
+    });
+    if (static_cast<qsizetype>(replacement.units.size()) == beforeSize) {
+        sendError(socket, QStringLiteral("UNIT_NOT_FOUND"), QStringLiteral("初始单位不存在"));
+        return;
+    }
+    QString error;
+    if (!replaceInitialScenario(replacement, &error)) {
+        sendError(socket, QStringLiteral("SCENARIO_UPDATE_FAILED"), error);
+        return;
+    }
+    broadcastSnapshots(true);
 }
 
 void GameServer::handleScenarioReplace(QWebSocket* socket, const QJsonObject& payload) {
-    Q_UNUSED(payload);
-    sendError(socket, QStringLiteral("PERMISSION_DENIED"), QStringLiteral("初始阵容由网页管理员配置"));
+    const ClientSession& session = m_clients.value(socket);
+    if (!canManageRoom(session)) {
+        sendError(socket, QStringLiteral("PERMISSION_DENIED"),
+                  QStringLiteral("只有准备阶段的房间管理员可以编辑初始阵容"));
+        return;
+    }
+    QString parseError;
+    const Scenario replacement = ScenarioIo::fromJson(
+        payload.value(QStringLiteral("scenario")).toObject(), &parseError);
+    if (!parseError.isEmpty()) {
+        sendError(socket, QStringLiteral("INVALID_SCENARIO"), parseError);
+        return;
+    }
+    QString error;
+    if (!replaceInitialScenario(replacement, &error)) {
+        sendError(socket, QStringLiteral("SCENARIO_UPDATE_FAILED"), error);
+        return;
+    }
+    broadcastSnapshots(true);
+}
+
+bool GameServer::applyInitialScenarioState(const Scenario& initialScenario,
+                                           const Scenario& runtimeScenario,
+                                           quint64 scenarioRevision,
+                                           QString* error) {
+    if (error) error->clear();
+    if (scenarioRevision == 0) {
+        if (error) *error = QStringLiteral("初始场景版本无效");
+        return false;
+    }
+    const QString initialValidation = validateNetworkScenario(initialScenario);
+    if (!initialValidation.isEmpty()) {
+        if (error) *error = initialValidation;
+        return false;
+    }
+    if (!runtimeScenario.units.empty()) {
+        const QString runtimeValidation = validateNetworkScenario(runtimeScenario);
+        if (!runtimeValidation.isEmpty()) {
+            if (error) *error = runtimeValidation;
+            return false;
+        }
+    }
+
+    QHash<QString, ScenarioUnit> catalog = AuthoritativeRoom::defaultTemplateCatalog();
+    for (const ScenarioUnit& unit : initialScenario.units) {
+        if (catalog.contains(unit.kind)) catalog.insert(unit.kind, unit);
+    }
+    QString catalogError;
+    if (!m_authoritativeRoom.setTemplateCatalog(catalog, &catalogError)) {
+        if (error) *error = catalogError;
+        return false;
+    }
+    const bool applied = runtimeScenario.units.empty()
+        ? m_engine.setRemoteScenario(runtimeScenario) : m_engine.setScenario(runtimeScenario);
+    if (!applied) {
+        if (error) *error = m_engine.lastError();
+        return false;
+    }
+    m_runInitialScenario = initialScenario;
+    m_scenarioRevision = scenarioRevision;
+    resetReadiness();
+    return true;
+}
+
+bool GameServer::replaceInitialScenario(const Scenario& scenario, QString* error) {
+    if (error) error->clear();
+    if (m_phase != QLatin1String("preparing")) {
+        if (error) *error = QStringLiteral("只有准备阶段可以编辑初始阵容");
+        return false;
+    }
+    if (!m_authoritativeRoom.seats().isEmpty()) {
+        if (error) *error = QStringLiteral("房间已有战位占用，请先清空战位后再编辑初始阵容");
+        return false;
+    }
+    const QString validationError = validateNetworkScenario(scenario);
+    if (!validationError.isEmpty()) {
+        if (error) *error = validationError;
+        return false;
+    }
+
+    const RoomStateBackup backup = captureRoomState();
+    const quint64 nextRevision = m_scenarioRevision + 1;
+    QString persistenceError;
+    if (!recordDurableEvent(
+            QStringLiteral("scenario"),
+            QJsonObject{{QStringLiteral("scenario"), ScenarioIo::toJson(scenario)},
+                        {QStringLiteral("scenarioRevision"), static_cast<qint64>(nextRevision)}},
+            &persistenceError)) {
+        if (error) *error = QStringLiteral("场景日志写入失败: %1").arg(persistenceError);
+        return false;
+    }
+
+    const quint64 scenarioEventSequence = m_eventSequence;
+    const auto rollback = [this, &backup, scenarioEventSequence, error](const QString& reason) {
+        QString restoreError;
+        if (!restoreRoomStateBackup(backup, &restoreError)) {
+            if (error) {
+                *error = QStringLiteral("%1；场景回滚失败: %2")
+                    .arg(reason, restoreError);
+            }
+            return false;
+        }
+
+        // The scenario event was already appended. Restore the previous event
+        // sequence before appending a compensating event, otherwise recovery
+        // would replay a change that never committed to a checkpoint.
+        m_eventSequence = scenarioEventSequence;
+        const Scenario initialScenario = backup.runInitialScenario.units.empty()
+            ? backup.scenario : backup.runInitialScenario;
+        QString rollbackEventError;
+        const bool rollbackRecorded = recordDurableEvent(
+            QStringLiteral("scenarioRollback"),
+            QJsonObject{{QStringLiteral("scenario"), ScenarioIo::toJson(backup.scenario)},
+                        {QStringLiteral("initialScenario"), ScenarioIo::toJson(initialScenario)},
+                        {QStringLiteral("scenarioRevision"),
+                         static_cast<qint64>(backup.scenarioRevision)}},
+            &rollbackEventError);
+        QString persistError;
+        const bool scenarioSaved = rollbackRecorded && persistScenario(&persistError);
+        const bool checkpointSaved = scenarioSaved && persistRoomState(&persistError);
+        if (error) {
+            QStringList details{reason};
+            if (!rollbackRecorded) {
+                details.append(QStringLiteral("回滚日志写入失败: %1").arg(rollbackEventError));
+            }
+            if (!scenarioSaved || !checkpointSaved) {
+                details.append(QStringLiteral("旧场景持久化失败: %1").arg(persistError));
+            }
+            *error = details.join(QStringLiteral("；"));
+        }
+        return false;
+    };
+
+    QString applyError;
+    if (!applyInitialScenarioState(scenario, scenario, nextRevision, &applyError)) {
+        return rollback(QStringLiteral("场景应用失败: %1").arg(applyError));
+    }
+    ++m_stateRevision;
+    if (!persistScenario(&persistenceError)) {
+        return rollback(QStringLiteral("场景文件保存失败: %1").arg(persistenceError));
+    }
+    if (!persistRoomState(&persistenceError)) {
+        return rollback(QStringLiteral("房间检查点保存失败: %1").arg(persistenceError));
+    }
+    return true;
 }
 
 bool GameServer::persistScenario(QString* error) {
@@ -3798,6 +4684,8 @@ bool GameServer::persistRoomState(QString* error) {
         ? QJsonArray{} : m_engine.collectCheckpointState();
     checkpoint.engineState = checkpoint.scenario.units.empty()
         ? QJsonObject{} : m_engine.collectGlobalCheckpointState();
+    checkpoint.vmfState = addServerVmfDedupe(m_engine.collectVmfRuntimeState(),
+                                             m_vmfMessageIds);
     for (const QString& key : m_commandResultOrder) {
     checkpoint.commandHistory.append(
             QJsonObject{{QStringLiteral("key"), key},
@@ -3807,6 +4695,18 @@ bool GameServer::persistRoomState(QString* error) {
     checkpoint.intelLedger = m_intelLedger.toJson();
     checkpoint.authoritativeRoom = m_authoritativeRoom.toJson();
     checkpoint.phase = m_phase;
+    checkpoint.roomStatus = m_roomStatus;
+    checkpoint.roomName = m_roomName;
+    checkpoint.roomDescription = m_roomDescription;
+    checkpoint.scenarioId = m_scenarioId;
+    for (auto it = m_seatLimits.cbegin(); it != m_seatLimits.cend(); ++it) {
+        checkpoint.seatLimits[it.key()] = it.value();
+    }
+    for (auto it = m_seatParameters.cbegin(); it != m_seatParameters.cend(); ++it) {
+        checkpoint.seatParameters[it.key()] = it.value();
+    }
+    checkpoint.configVersion = m_configVersion;
+    checkpoint.lastRoomUpdate = m_lastRoomUpdate;
     checkpoint.redReady = m_redReady;
     checkpoint.blueReady = m_blueReady;
     checkpoint.running = m_engine.running();
@@ -3940,8 +4840,53 @@ bool GameServer::restoreRoomState(QString* error) {
             return false;
         }
     }
+    if (!checkpoint.vmfState.isEmpty()) {
+        QString vmfError;
+        if (!m_engine.restoreVmfRuntimeState(checkpoint.vmfState, &vmfError)) {
+            if (error) *error = QStringLiteral("VMF 运行态恢复失败: %1").arg(vmfError);
+            return false;
+        }
+        restoreServerVmfDedupe(checkpoint.vmfState, &m_vmfMessageIds,
+                               &m_vmfMessageIdOrder);
+    }
     m_runInitialScenario = checkpoint.runInitialScenario;
     m_phase = checkpoint.phase;
+    if (!checkpoint.roomName.isEmpty()) m_roomName = checkpoint.roomName;
+    m_roomDescription = checkpoint.roomDescription;
+    if (!checkpoint.scenarioId.isEmpty()) m_scenarioId = checkpoint.scenarioId;
+    if (!checkpoint.roomStatus.isEmpty()) m_roomStatus = checkpoint.roomStatus;
+    m_configVersion = checkpoint.configVersion > 0 ? checkpoint.configVersion : 1;
+    m_lastRoomUpdate = checkpoint.lastRoomUpdate;
+    if (!checkpoint.seatLimits.isEmpty()) {
+        QHash<QString, int> restoredLimits;
+        for (auto it = checkpoint.seatLimits.constBegin(); it != checkpoint.seatLimits.constEnd(); ++it) {
+            const SeatDescriptor descriptor = describeSeat(it.key());
+            if (descriptor.baseId != it.key() || !it.value().isDouble()) {
+                if (error) *error = QStringLiteral("检查点战位容量无效");
+                return false;
+            }
+            const int limit = it.value().toInt(-1);
+            if (limit < 0 || limit > 64
+                || (descriptor.type == QLatin1String("commander") && limit != 1)) {
+                if (error) *error = QStringLiteral("检查点战位容量超出范围");
+                return false;
+            }
+            restoredLimits.insert(it.key(), limit);
+        }
+        if (restoredLimits.size() == 10) m_seatLimits = restoredLimits;
+    }
+    if (!checkpoint.seatParameters.isEmpty()) {
+        QHash<QString, QJsonObject> restoredParameters;
+        for (auto it = checkpoint.seatParameters.constBegin(); it != checkpoint.seatParameters.constEnd(); ++it) {
+            const SeatDescriptor descriptor = describeSeat(it.key());
+            if (descriptor.baseId.isEmpty() || !it.value().isObject()) {
+                if (error) *error = QStringLiteral("检查点战位参数无效");
+                return false;
+            }
+            restoredParameters.insert(it.key(), it.value().toObject());
+        }
+        m_seatParameters = restoredParameters;
+    }
     m_redReady = checkpoint.redReady;
     m_blueReady = checkpoint.blueReady;
     m_scenarioRevision = checkpoint.scenarioRevision;
@@ -4038,6 +4983,8 @@ bool GameServer::replayDurableEvents(QString* error) {
         if (error) *error = readError;
         return false;
     }
+    const bool wasReplaying = m_replayingDurableEvents;
+    m_replayingDurableEvents = true;
     for (const QJsonValue& value : events) {
         const QJsonObject event = value.toObject();
         const quint64 sequence = static_cast<quint64>(
@@ -4046,6 +4993,7 @@ bool GameServer::replayDurableEvents(QString* error) {
         if (!applyDurableEvent(event.value(QStringLiteral("kind")).toString(),
                                event.value(QStringLiteral("payload")).toObject(),
                                &applyError)) {
+            m_replayingDurableEvents = wasReplaying;
             if (error) {
                 *error = QStringLiteral("重放事件 %1 失败: %2").arg(sequence).arg(applyError);
             }
@@ -4054,12 +5002,121 @@ bool GameServer::replayDurableEvents(QString* error) {
         m_eventSequence = sequence;
         ++m_stateRevision;
     }
+    m_replayingDurableEvents = wasReplaying;
     return true;
 }
 
 bool GameServer::applyDurableEvent(const QString& kind, const QJsonObject& payload,
                                    QString* error) {
     if (error) error->clear();
+    if (kind == QLatin1String("vmfMessage")) {
+        const QString messageId = payload.value(QStringLiteral("messageId")).toString();
+        Message message;
+        QString buildError;
+        if (!buildVmfMessage(payload, messageId, &message, &buildError)) {
+            if (error) *error = buildError;
+            return false;
+        }
+        QString validationError;
+        if (!m_engine.validateVmfMessage(message, &validationError)) {
+            if (error) *error = validationError;
+            return false;
+        }
+        const QString sourceSeatId = payload.value(QStringLiteral("seatId")).toString();
+        if (sourceSeatId.isEmpty() || !m_authoritativeRoom.hasSeat(sourceSeatId)) {
+            if (error) *error = QStringLiteral("VMF 重放事件缺少有效发送战位");
+            return false;
+        }
+        const AuthoritativeRoom::Seat sourceSeat = m_authoritativeRoom.seat(sourceSeatId);
+        if (sourceSeat.unitId.isEmpty() || sourceSeat.unitId != message.sender) {
+            if (error) *error = QStringLiteral("VMF 重放发送单元不属于记录战位");
+            return false;
+        }
+        const UnitBase* sourceUnit = m_engine.unit(message.sender);
+        if (!sourceUnit || !sourceUnit->alive()
+            || sourceUnit->sideStr() != sourceSeat.side) {
+            if (error) *error = QStringLiteral("VMF 重放发送单元无效或阵营不一致");
+            return false;
+        }
+        const QJsonObject catalogSummary = m_engine.vmfMessageCatalogSummary(message);
+        if (catalogSummary.isEmpty()) {
+            if (error) *error = QStringLiteral("VMF 重放消息目录摘要缺失");
+            return false;
+        }
+        QString receiverRole;
+        if (message.receiver != QLatin1String("*")) {
+            bool receiverFound = false;
+            for (const AuthoritativeRoom::Seat& candidate : m_authoritativeRoom.seats()) {
+                if (candidate.unitId == message.receiver) {
+                    receiverRole = candidate.seatType;
+                    if (candidate.side != sourceSeat.side) {
+                        if (error) *error = QStringLiteral("VMF 重放接收单元阵营不一致");
+                        return false;
+                    }
+                    receiverFound = true;
+                    break;
+                }
+            }
+            if (!receiverFound) {
+                if (error) *error = QStringLiteral("VMF 重放接收单元不存在");
+                return false;
+            }
+        } else {
+            const QJsonArray receiverRoles = catalogSummary
+                .value(QStringLiteral("receiverRoles")).toArray();
+            if (!std::any_of(receiverRoles.cbegin(), receiverRoles.cend(),
+                             [](const QJsonValue& value) {
+                                 return value.toString() == QLatin1String("any");
+                             })) {
+                if (error) *error = QStringLiteral("VMF 重放通配接收方不满足目录角色约束");
+                return false;
+            }
+        }
+        if (!m_engine.validateVmfMessageForRoles(message, sourceSeat.seatType,
+                                                 receiverRole, &validationError)) {
+            if (error) *error = validationError;
+            return false;
+        }
+        message.requiresAck = catalogSummary.value(QStringLiteral("requiresAck")).toBool();
+        message.automaticAck = catalogSummary.value(QStringLiteral("automaticAck")).toBool();
+        message.payload.insert(QStringLiteral("vmfCatalogId"),
+                               catalogSummary.value(QStringLiteral("catalogId")));
+        message.payload.insert(QStringLiteral("vmfTrigger"),
+                               catalogSummary.value(QStringLiteral("trigger")));
+        message.payload.insert(QStringLiteral("vmfInformationValue"),
+                               catalogSummary.value(QStringLiteral("informationValue")));
+        const bool generatedSimulationMessage =
+            payload.value(QStringLiteral("generatedBy")).toString()
+                == QLatin1String("simulation")
+            && payload.value(QStringLiteral("userId")).toInteger() == 0
+            && message.type == Message::Type::TargetDestroyed
+            && message.payload.value(QStringLiteral("confirmationSource")).toString()
+                == QLatin1String("recon-observation");
+        const GuidedStrikeWorkflow* workflow =
+            m_engine.guidedStrikeWorkflow(sourceSeat.side);
+        const bool unboundObservation = generatedSimulationMessage
+            && (!workflow || workflow->stage() == GuidedStrikeWorkflow::Stage::Idle);
+        if (!unboundObservation
+            && !m_engine.validateVmfWorkflowMessage(message, &validationError)) {
+            if (error) *error = validationError;
+            return false;
+        }
+        if (!m_engine.postVmfMessage(message, &validationError)) {
+            if (error) *error = validationError;
+            return false;
+        }
+        const QString userId = QString::number(payload.value(QStringLiteral("userId")).toInteger());
+        const QString traceId = payload.value(QStringLiteral("traceId")).toString();
+        const QString dedupeKey = userId + QLatin1Char(':') + traceId;
+        if (!dedupeKey.startsWith(QLatin1String("0:"))) {
+            m_vmfMessageIds.insert(dedupeKey);
+            m_vmfMessageIdOrder.append(dedupeKey);
+            while (m_vmfMessageIdOrder.size() > 4096) {
+                m_vmfMessageIds.remove(m_vmfMessageIdOrder.takeFirst());
+            }
+        }
+        return true;
+    }
     if (kind == QLatin1String("command")) {
         const CommandResult result = m_engine.executeCommand(
             payload.value(QStringLiteral("action")).toString(),
@@ -4089,17 +5146,29 @@ bool GameServer::applyDurableEvent(const QString& kind, const QJsonObject& paylo
         else m_blueReady = payload.value(QStringLiteral("ready")).toBool();
         return true;
     }
-    if (kind == QLatin1String("scenario")) {
-        const Scenario scenario = ScenarioIo::fromJson(
-            payload.value(QStringLiteral("scenario")).toObject());
+    if (kind == QLatin1String("scenario")
+        || kind == QLatin1String("scenarioRollback")) {
+        const QJsonObject runtimeObject = payload.value(QStringLiteral("scenario")).toObject();
+        const Scenario runtimeScenario = ScenarioIo::fromJson(runtimeObject);
         const qint64 revision = payload.value(QStringLiteral("scenarioRevision")).toInteger();
-        const QString validationError = validateNetworkScenario(scenario);
-        if (!validationError.isEmpty() || revision <= 0 || !m_engine.setScenario(scenario)) {
-            if (error) *error = validationError.isEmpty() ? m_engine.lastError() : validationError;
+        Scenario initialScenario = runtimeScenario;
+        if (kind == QLatin1String("scenarioRollback")) {
+            const QJsonValue initialValue = payload.value(QStringLiteral("initialScenario"));
+            // Rollback events written before initialScenario was added only
+            // carried the runtime scenario. At replay time the checkpoint
+            // already contains the previous initial scene, so preserve it.
+            initialScenario = initialValue.isObject()
+                ? ScenarioIo::fromJson(initialValue.toObject())
+                : (m_runInitialScenario.units.empty() ? runtimeScenario : m_runInitialScenario);
+        }
+        QString applyError;
+        if (revision <= 0 || !applyInitialScenarioState(initialScenario, runtimeScenario,
+                                                        static_cast<quint64>(revision),
+                                                        &applyError)) {
+            if (error) *error = revision <= 0
+                ? QStringLiteral("场景版本无效") : applyError;
             return false;
         }
-        m_scenarioRevision = static_cast<quint64>(revision);
-        resetReadiness();
         return true;
     }
     if (kind == QLatin1String("control")) {
@@ -4249,7 +5318,40 @@ bool GameServer::applyDeployedScenario(QString* error) {
     QJsonObject scenarioJson = ScenarioIo::toJson(
         m_runInitialScenario.units.empty() ? ScenarioIo::defaultScenario() : m_runInitialScenario);
     scenarioJson[QStringLiteral("units")] = units;
-    const Scenario scenario = ScenarioIo::fromJson(scenarioJson);
+    QString parseError;
+    Scenario scenario = ScenarioIo::fromJson(scenarioJson, &parseError);
+    if (!parseError.isEmpty()) {
+        if (error) *error = parseError;
+        return false;
+    }
+    const auto applyRangeParameter = [error](const QJsonObject& parameters,
+                                             const QString& name, double* target) {
+        if (!parameters.contains(name) || !target) return true;
+        const QJsonValue value = parameters.value(name);
+        const double number = value.toDouble(std::numeric_limits<double>::quiet_NaN());
+        if (!value.isDouble() || !std::isfinite(number) || number < 0.0
+            || number > 1'000'000.0) {
+            if (error) *error = QStringLiteral("战位参数无效: %1").arg(name);
+            return false;
+        }
+        *target = number;
+        return true;
+    };
+    for (const AuthoritativeRoom::Seat& seat : m_authoritativeRoom.seats()) {
+        auto unit = std::find_if(scenario.units.begin(), scenario.units.end(),
+                                 [&seat](const ScenarioUnit& candidate) {
+                                     return candidate.id == seat.unitId;
+                                 });
+        if (unit == scenario.units.end()) continue;
+        QJsonObject parameters = m_seatParameters.value(seat.seatId);
+        if (parameters.isEmpty()) parameters = m_seatParameters.value(seatParameterKey(seat.seatId));
+        if (!applyRangeParameter(parameters, QStringLiteral("communicationRange"),
+                                 &unit->commRange)
+            || !applyRangeParameter(parameters, QStringLiteral("detectRange"),
+                                    &unit->detectRange)) {
+            return false;
+        }
+    }
     const QString validationError = validateNetworkScenario(scenario);
     if (!validationError.isEmpty() || !m_engine.setScenario(scenario)) {
         if (error) *error = validationError.isEmpty() ? m_engine.lastError() : validationError;
@@ -4296,15 +5398,25 @@ GameServer::RoomStateBackup GameServer::captureRoomState() const {
     RoomStateBackup backup;
     backup.authoritativeRoom = m_authoritativeRoom.toJson();
     backup.scenario = m_engine.scenario();
+    backup.runInitialScenario = m_runInitialScenario;
     backup.runtimeUnits = backup.scenario.units.empty()
         ? QJsonArray{} : m_engine.collectCheckpointState();
     backup.engineState = backup.scenario.units.empty()
         ? QJsonObject{} : m_engine.collectGlobalCheckpointState();
+    backup.vmfState = addServerVmfDedupe(m_engine.collectVmfRuntimeState(),
+                                         m_vmfMessageIds);
     backup.simTime = m_engine.simTime();
     backup.running = m_engine.running();
     backup.speed = m_engine.speedMul();
     backup.phase = m_phase;
     backup.roomStatus = m_roomStatus;
+    backup.roomName = m_roomName;
+    backup.roomDescription = m_roomDescription;
+    backup.scenarioId = m_scenarioId;
+    backup.seatLimits = m_seatLimits;
+    backup.seatParameters = m_seatParameters;
+    backup.configVersion = m_configVersion;
+    backup.lastRoomUpdate = m_lastRoomUpdate;
     backup.redReady = m_redReady;
     backup.blueReady = m_blueReady;
     backup.mapMarks = m_mapMarks;
@@ -4361,8 +5473,24 @@ bool GameServer::restoreRoomStateBackup(const RoomStateBackup& backup, QString* 
         if (error) *error = localError;
         return false;
     }
+    if (!backup.vmfState.isEmpty()) {
+        if (!m_engine.restoreVmfRuntimeState(backup.vmfState, &localError)) {
+            if (error) *error = localError;
+            return false;
+        }
+        restoreServerVmfDedupe(backup.vmfState, &m_vmfMessageIds,
+                               &m_vmfMessageIdOrder);
+    }
     m_phase = backup.phase;
     m_roomStatus = backup.roomStatus;
+    m_roomName = backup.roomName;
+    m_roomDescription = backup.roomDescription;
+    m_scenarioId = backup.scenarioId;
+    m_seatLimits = backup.seatLimits;
+    m_seatParameters = backup.seatParameters;
+    m_configVersion = backup.configVersion;
+    m_lastRoomUpdate = backup.lastRoomUpdate;
+    m_runInitialScenario = backup.runInitialScenario;
     m_redReady = backup.redReady;
     m_blueReady = backup.blueReady;
     m_mapMarks = backup.mapMarks;
@@ -5812,6 +6940,8 @@ QJsonObject GameServer::roomState() const {
     return QJsonObject{{QStringLiteral("phase"), m_phase},
                        {QStringLiteral("roomId"), m_roomId},
                        {QStringLiteral("roomName"), m_roomName},
+                       {QStringLiteral("roomDescription"), m_roomDescription},
+                       {QStringLiteral("scenarioId"), m_scenarioId},
                        {QStringLiteral("roomStatus"), m_roomStatus},
                        {QStringLiteral("roomMode"), m_roomMode},
                        {QStringLiteral("aiDifficulty"), m_aiDifficulty},
@@ -5821,6 +6951,20 @@ QJsonObject GameServer::roomState() const {
                        {QStringLiteral("aiEngine"), m_aiEffectiveEngine},
                        {QStringLiteral("aiFallbackReason"), m_aiFallbackReason},
                        {QStringLiteral("configVersion"), static_cast<qint64>(m_configVersion)},
+                       {QStringLiteral("seatLimits"), [&]() {
+                           QJsonObject limits;
+                           for (auto it = m_seatLimits.cbegin(); it != m_seatLimits.cend(); ++it) {
+                               limits[it.key()] = it.value();
+                           }
+                           return limits;
+                       }()},
+                       {QStringLiteral("seatParameters"), [&]() {
+                           QJsonObject parameters;
+                           for (auto it = m_seatParameters.cbegin(); it != m_seatParameters.cend(); ++it) {
+                               parameters[it.key()] = it.value();
+                           }
+                           return parameters;
+                       }()},
                        {QStringLiteral("redReady"), m_redReady},
                        {QStringLiteral("blueReady"), m_blueReady},
                        {QStringLiteral("readyForStart"), readyForStart},
@@ -6072,6 +7216,22 @@ QJsonObject GameServer::snapshotFor(const ClientSession& session, quint64 projec
     const quint64 revision = projectedRevision > 0 ? projectedRevision : m_stateRevision;
     QJsonObject projectedRoomState = roomState();
     projectedRoomState[QStringLiteral("stateRevision")] = static_cast<qint64>(revision);
+    if (session.observer) {
+        QJsonObject workflows;
+        for (const QString& side : {QStringLiteral("red"), QStringLiteral("blue")}) {
+            if (const GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(side)) {
+                workflows.insert(side, workflow->snapshot());
+            }
+        }
+        if (!workflows.isEmpty()) {
+            projectedRoomState.insert(QStringLiteral("vmfWorkflows"), workflows);
+        }
+    } else if (!session.side.isEmpty()) {
+        if (const GuidedStrikeWorkflow* workflow = m_engine.guidedStrikeWorkflow(session.side)) {
+            projectedRoomState.insert(QStringLiteral("vmfWorkflow"),
+                                      StateProjector::projectWorkflow(workflow->snapshot()));
+        }
+    }
     QJsonObject snapshot = StateProjector::snapshotFor(
         m_engine, normalizedRole(session), revision, projectedRoomState,
         m_sharedIntel.value(session.seatId), m_authoritativeRoom.seat(session.seatId).unitId,
@@ -6433,6 +7593,24 @@ void GameServer::broadcastEvent(const QJsonObject& event, const QString& side) {
             m_engine, normalizedRole(it.value()), event,
             m_authoritativeRoom.seat(it.value().seatId).unitId);
         if (!projected.isEmpty()) sendEnvelope(it.key(), QStringLiteral("event"), projected);
+    }
+}
+
+void GameServer::broadcastVmfEvent(const QJsonObject& event) {
+    for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
+        if (!it->authenticated || it->roomId != m_roomId) continue;
+        const QString role = normalizedRole(it.value());
+        if (it->observer) {
+            const QJsonObject summary = StateProjector::projectEvent(
+                m_engine, role, event,
+                m_authoritativeRoom.seat(it.value().seatId).unitId);
+            if (!summary.isEmpty()) sendEnvelope(it.key(), QStringLiteral("event"), summary);
+            continue;
+        }
+        const QJsonObject projected = StateProjector::projectEvent(
+            m_engine, role, event,
+            m_authoritativeRoom.seat(it.value().seatId).unitId);
+        if (!projected.isEmpty()) sendEnvelope(it.key(), QStringLiteral("vmfEvent"), projected);
     }
 }
 

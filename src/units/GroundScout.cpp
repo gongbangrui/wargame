@@ -14,6 +14,10 @@ void GroundScout::setupFsm() {
 }
 
 void GroundScout::onMessage(const Message& m) {
+    if (m.type == Message::Type::GroundGuideOrder) {
+        setStatus(QStringLiteral("等待人工确认引导攻击"));
+        return;
+    }
     if (m.type == Message::Type::SharedDetect) {
         const QString tid = m.payload.value("targetId").toString();
         if (!tid.isEmpty()) {

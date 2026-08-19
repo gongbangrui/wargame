@@ -183,7 +183,7 @@ Item {
                 ColumnLayout {
                     spacing: 4
                     Text { text: root.rosterMode ? (root.restrictedSide === "red" ? "红方初始阵容" : "蓝方初始阵容") : "场景编辑器"; color: t.text; font.pixelSize: 18; font.bold: true; renderType: Text.NativeRendering }
-                    Text { text: root.editable ? "双击地图放置新单元；右键单元删除；选中后可用 W/S/A/D 微调位置" : "推演已经开始，初始场景现为只读状态"; color: root.editable ? t.muted : t.danger; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true; renderType: Text.NativeRendering }
+                    Text { text: root.editable ? "双击地图放置新单元；右键单元删除；选中后可用 W/S/A/D 微调位置" : root.controller.networked && root.controller.isRoomAdmin && root.controller.matchPhase === "preparing" ? "已有用户占用战位，清空战位后才能修改初始场景" : "推演已经开始，初始场景现为只读状态"; color: root.editable ? t.muted : t.danger; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true; renderType: Text.NativeRendering }
                 }
 
                 SectionTitle { text: "场景单元" }
