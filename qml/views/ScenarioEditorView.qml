@@ -24,6 +24,10 @@ Item {
     property int gridSize: 100
     property bool compactLayout: width < 820
     property bool narrowLayout: width < 560
+    property bool positionPickMode: false
+    property string positionStatus: ""
+    property bool positionCommitPending: false
+    onEditableChanged: if (!root.editable) root.positionPickMode = false
 
     function nudgeSelected(offsetX, offsetY) {
         if (!root.editable) return
@@ -156,6 +160,65 @@ Item {
         }
     }
 
+    function currentPositionUnit() {
+        var index = list.currentIndex
+        if (index >= 0 && root.units[index]) return root.units[index]
+        if (root.selectedIds.length === 1) {
+            for (var i = 0; i < root.units.length; ++i)
+                if (root.units[i].id === root.selectedIds[0]) return root.units[i]
+        }
+        return null
+    }
+
+    function applyPickedPosition(point) {
+        if (!root.positionPickMode || !root.editable || !point) return
+        var current = root.currentPositionUnit()
+        if (!current) {
+            root.positionStatus = "请先选择一个单位"
+            root.positionPickMode = false
+            return
+        }
+        var x = Number(point.x)
+        var y = Number(point.y)
+        if (!isFinite(x) || !isFinite(y)) return
+        x = Math.max(0, Math.min(canvas.mapSize.w, x))
+        y = Math.max(0, Math.min(canvas.mapSize.h, y))
+        var data = JSON.parse(JSON.stringify(current))
+        data.x = Math.round(x)
+        data.y = Math.round(y)
+        root.pushUndo()
+        var networked = Boolean(root.controller.networked)
+        root.positionCommitPending = networked
+        var targetId = root.controller.upsertUnit(data)
+        if (!targetId) {
+            root.positionCommitPending = false
+            root.positionStatus = "初始位置提交失败"
+            return
+        }
+        root.pendingFocusUnitId = targetId
+        root.selectedIds = [targetId]
+        root.positionPickMode = false
+        if (!networked || root.positionCommitPending)
+            root.positionStatus = networked ? "已提交位置，等待服务器同步 · " + data.x + ", " + data.y
+                : "初始位置已保存 · " + data.x + ", " + data.y
+        root.reload()
+    }
+
+    function togglePositionPickMode() {
+        if (!root.editable) return
+        if (root.positionPickMode) {
+            root.positionPickMode = false
+            root.positionStatus = "已取消选点"
+            return
+        }
+        if (!root.currentPositionUnit()) {
+            root.positionStatus = "请先选择一个单位"
+            return
+        }
+        root.positionStatus = "请在 GIS 地图上点击新的初始位置"
+        root.positionPickMode = true
+    }
+
     function fitScenarioCanvas() {
         if (!canvas || canvas.width <= 0 || canvas.height <= 0) return
         var source = root.units || []
@@ -192,7 +255,29 @@ Item {
     Connections {
         target: root.controller
         function onCommandExecuted() { root.reload() }
-        function onUnitsForward() { root.requestReload() }
+        function onUnitsForward() {
+            if (root.positionCommitPending) {
+                root.positionCommitPending = false
+                root.positionStatus = "初始位置已同步"
+            }
+            root.requestReload()
+        }
+        function onCommandStatusChanged() {
+            if (!root.positionCommitPending || root.controller.lastCommandAction !== "scenarioUpsert") return
+            if (root.controller.lastCommandStatus === "accepted") {
+                root.positionCommitPending = false
+                root.positionStatus = "初始位置已同步"
+            } else if (root.controller.lastCommandStatus === "rejected"
+                       || root.controller.lastCommandStatus === "unknown") {
+                root.positionCommitPending = false
+                root.positionStatus = root.controller.lastCommandMessage || "初始位置提交失败"
+            }
+        }
+        function onErrorForward(message) {
+            if (!root.positionCommitPending) return
+            root.positionCommitPending = false
+            root.positionStatus = message || "初始位置提交失败"
+        }
     }
 
     Timer {
@@ -222,8 +307,8 @@ Item {
 
                 ColumnLayout {
                     spacing: 4
-                    Text { text: root.rosterMode ? (root.restrictedSide === "red" ? "红方初始阵容" : "蓝方初始阵容") : "场景编辑器"; color: t.text; font.pixelSize: 18; font.bold: true; renderType: Text.NativeRendering }
-                    Text { text: root.editable ? "双击地图放置新单元；右键单元删除；选中后可用 W/S/A/D 微调位置" : root.controller.networked && root.controller.isRoomAdmin && root.controller.matchPhase === "preparing" ? "已有用户占用战位，清空战位后才能修改初始场景" : "推演已经开始，初始场景现为只读状态"; color: root.editable ? t.muted : t.danger; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true; renderType: Text.NativeRendering }
+                    Text { text: root.rosterMode ? (root.restrictedSide === "red" ? "红方初始阵容" : "蓝方初始阵容") : "GIS 场景编辑器"; color: t.text; font.pixelSize: 18; font.bold: true; renderType: Text.NativeRendering }
+                    Text { text: root.editable ? "GIS 地图支持拖拽缩放；双击空白处新增单位，选中单位后可用地图选点修改初始位置" : root.controller.networked && root.controller.isRoomAdmin && root.controller.matchPhase === "preparing" ? "已有用户占用战位，清空战位后才能修改初始场景" : "推演已经开始，初始场景现为只读状态"; color: root.editable ? t.muted : t.danger; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true; renderType: Text.NativeRendering }
                 }
 
                 SectionTitle { text: "场景单元" }
@@ -286,6 +371,7 @@ Item {
                         onClicked: root.planRouteSelected()
                     }
                     TonalButton { text: "删除"; base: t.danger; enabled: root.editable && root.selectedOrCurrent().length > 0; onClicked: root.removeSelected() }
+                    TonalButton { text: root.positionPickMode ? "取消选点" : "地图选点"; iconName: root.positionPickMode ? "close" : "locate"; base: root.positionPickMode ? t.danger : t.success; enabled: root.editable && !root.positionCommitPending && (!!root.currentPositionUnit() || root.positionPickMode); onClicked: root.togglePositionPickMode() }
                     GhostButton { visible: !root.rosterMode; text: "↶ 撤销"; enabled: root.editable && root.undoStack.length > 0; onClicked: root.undo() }
                     GhostButton { visible: !root.rosterMode; text: "↷ 重做"; enabled: root.editable && root.redoStack.length > 0; onClicked: root.redo() }
                     GhostButton { visible: !root.rosterMode; text: "保存"; onClicked: root.saveToFile() }
@@ -344,7 +430,10 @@ Item {
                 showAllSides: !root.rosterMode
                 focusUnitId: list.currentIndex >= 0 && root.units[list.currentIndex] ? root.units[list.currentIndex].id : ""
                 selectedUnitIds: root.selectedIds
-                allowRightClickActions: true
+                pointPickMode: root.positionPickMode
+                showCoordinateGrid: true
+                showCoordinateReadout: true
+                allowRightClickActions: !root.positionPickMode
                 routes: root.visibleRoutes()
                 onUnitClicked: function(uid, btn, modifiers) {
                     for (var i = 0; i < root.units.length; i++) {
@@ -356,8 +445,15 @@ Item {
                     }
                     if (btn === "right" && root.editable) { confirmDelete.uids = [uid]; confirmDelete.open() }
                 }
-                onRightClickedMap: function(lp) { if (root.editable) editDialog.openNew(lp.x, lp.y, root.restrictedSide || root.controller.focusedSide) }
-                onDoubleClickedMap: function(lp) { if (root.editable) editDialog.openNew(lp.x, lp.y, root.restrictedSide || root.controller.focusedSide) }
+                onClickedMap: function(lp) { root.applyPickedPosition(lp) }
+                onRightClickedMap: function(lp) {
+                    if (root.editable && !root.positionPickMode)
+                        editDialog.openNew(lp.x, lp.y, root.restrictedSide || root.controller.focusedSide)
+                }
+                onDoubleClickedMap: function(lp) {
+                    if (root.positionPickMode) root.applyPickedPosition(lp)
+                    else if (root.editable) editDialog.openNew(lp.x, lp.y, root.restrictedSide || root.controller.focusedSide)
+                }
             }
 
             Rectangle {
@@ -369,7 +465,7 @@ Item {
                 Text {
                     id: canvasStatus
                     anchors.centerIn: parent
-                    text: "画布 · " + root.units.length + " 个单位"
+                    text: "GIS 地图 · " + root.units.length + " 个单位"
                     color: root.units.length > 0 ? t.success : t.muted
                     font.pixelSize: 10; font.bold: true
                 }
@@ -377,14 +473,23 @@ Item {
 
             Rectangle {
                 anchors.left: parent.left; anchors.bottom: parent.bottom
+                anchors.right: root.narrowLayout ? parent.right : undefined
                 anchors.leftMargin: 24; anchors.bottomMargin: 24
+                anchors.rightMargin: root.narrowLayout ? 24 : 0
                 color: "#0c1122"; border.color: "#1e2d4a"; radius: 8
-                implicitHeight: 36; implicitWidth: hintText.implicitWidth + 28
+                implicitHeight: Math.max(36, hintText.implicitHeight + 16)
+                implicitWidth: Math.min(parent.width - 48, hintText.implicitWidth + 28)
                 Text {
                     id: hintText
-                    anchors.centerIn: parent
-                    text: root.editable ? "双击地图新增 · 右键单元删除 · W/S/A/D 微调 100m" : "推演进行中，初始阵容已锁定"
+                    anchors.fill: parent; anchors.margins: 8
+                    text: root.positionPickMode ? "选点模式 · 点击 GIS 地图提交选中单位的初始位置"
+                        : root.positionStatus.length > 0 ? root.positionStatus
+                        : root.editable ? "双击地图新增 · 选中单位后使用地图选点 · 右键单元删除"
+                        : "推演进行中，初始阵容已锁定"
                     color: "#c2cad8"; font.pixelSize: 11
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    wrapMode: Text.WordWrap
                     renderType: Text.NativeRendering
                 }
             }

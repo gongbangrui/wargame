@@ -29,7 +29,11 @@ Item {
     property bool showRoutes: true
     property bool showRecentPaths: true
     property bool showProjectiles: true
+    // Scenario editor mode: a click on the map is treated as a placement
+    // point by the host editor and gets a visible crosshair/cursor.
+    property bool pointPickMode: false
     onShowProjectilesChanged: innerCanvas.requestPaint()
+    onPointPickModeChanged: innerCanvas.requestPaint()
     property bool showEnemyHp: true
     property bool showCoordinateGrid: false   // controlled by settings
     property bool showCoordinateReadout: false
@@ -1493,7 +1497,7 @@ Item {
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             hoverEnabled: true
-            cursorShape: root.guideMode ? Qt.CrossCursor : Qt.ArrowCursor
+            cursorShape: root.guideMode || root.pointPickMode ? Qt.CrossCursor : Qt.ArrowCursor
             // 拖拽平移画布。拖动期间解除单元追踪，避免追踪箭头跟随视口平移产生误导
             property bool _panning: false
             // 从按下点计算的实际移动距离；超过阈值后才进入平移。
@@ -1690,6 +1694,36 @@ Item {
             text: "X " + Math.round(root.pointerLogicalPos.x) + "  Y " + Math.round(root.pointerLogicalPos.y) + " m"
             color: t.coordinateText
             font.pixelSize: 10
+        }
+    }
+
+    Item {
+        id: pointPickOverlay
+        visible: root.pointPickMode && root.pointerInside
+        x: root.toPixel(root.pointerLogicalPos.x, root.pointerLogicalPos.y).x
+        y: root.toPixel(root.pointerLogicalPos.x, root.pointerLogicalPos.y).y
+        width: 1
+        height: 1
+        z: 65
+
+        Rectangle { x: -22; y: 0; width: 44; height: 1; color: "#62e6c4" }
+        Rectangle { x: 0; y: -22; width: 1; height: 44; color: "#62e6c4" }
+        Rectangle {
+            x: 10; y: 10
+            implicitWidth: pointPickLabel.implicitWidth + 16
+            implicitHeight: 24
+            color: "#07151acc"
+            border.color: "#62e6c4"
+            radius: 4
+            Text {
+                id: pointPickLabel
+                anchors.centerIn: parent
+                text: "设置初始位置  " + Math.round(root.pointerLogicalPos.x)
+                      + ", " + Math.round(root.pointerLogicalPos.y)
+                color: "#c9fff0"
+                font.pixelSize: 10
+                font.bold: true
+            }
         }
     }
 
