@@ -30,6 +30,16 @@ Item {
     property bool compactLayout: width < 860
     property bool narrowLayout: width < 560
     property bool tinyLayout: width < 420
+    // A two-column admin workspace needs enough width for the editor's own
+    // list/canvas split.  Below this point stack the panels so the canvas is
+    // never reduced to a clipped sliver.
+    property bool desktopWorkspace: width >= 1320
+    // In the stacked layout the editor contains a roster and a canvas in
+    // separate rows.  Reserve both rows in the panel; the outer Flickable
+    // provides scrolling for short windows.
+    property real workspaceHeight: root.desktopWorkspace
+        ? Math.max(520, Math.min(760, height - 220))
+        : Math.max(900, Math.min(1080, height - 140))
 
     readonly property var seatKeys: [
         "red_commander", "red_attack", "red_recon", "red_ground", "red_jammer",
@@ -347,20 +357,26 @@ Item {
             GridLayout {
                 id: workspace
                 Layout.fillWidth: true
-                columns: root.width >= 1080 ? 2 : 1
+                Layout.preferredHeight: root.workspaceHeight
+                Layout.minimumHeight: root.workspaceHeight
+                columns: root.desktopWorkspace ? 2 : 1
                 columnSpacing: 12; rowSpacing: 12
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.minimumHeight: root.width >= 1080 ? 520 : 500
-                    Layout.preferredHeight: root.width >= 1080 ? Math.max(520, root.height - 250) : 500
+                    Layout.fillHeight: true
+                    Layout.minimumWidth: root.desktopWorkspace ? 720 : 0
+                    Layout.minimumHeight: root.workspaceHeight
+                    Layout.preferredHeight: root.workspaceHeight
                     color: root.panel; border.color: root.line; radius: 6; clip: true
                     ScenarioEditorView { anchors.fill: parent; anchors.margins: 1; controller: root.controller; editor: root.editor }
                 }
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredWidth: root.width >= 1080 ? 318 : -1
-                    Layout.minimumHeight: 290
-                    Layout.preferredHeight: root.width >= 1080 ? Math.max(520, root.height - 250) : 300
+                    Layout.fillHeight: true
+                    Layout.preferredWidth: root.desktopWorkspace ? 318 : -1
+                    Layout.minimumWidth: root.desktopWorkspace ? 300 : 0
+                    Layout.minimumHeight: root.workspaceHeight
+                    Layout.preferredHeight: root.workspaceHeight
                     color: root.panel; border.color: root.line; radius: 6
                     ColumnLayout { anchors.fill: parent; anchors.margins: 14; spacing: 10
                         RowLayout { Layout.fillWidth: true; spacing: 8

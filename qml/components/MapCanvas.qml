@@ -134,12 +134,21 @@ Item {
 
     // 公共刷新方法
     function refresh() { innerCanvas.requestPaint() }
+    function unitListSource() {
+        // QJsonArray/QVariantList values exposed through a QML var are not
+        // guaranteed to satisfy Array.isArray(), although they still expose
+        // length and indexed values.  Keep null as the explicit signal to use
+        // the runtime projection; an empty scenario list must stay empty.
+        if (root.scenarioUnits !== null && root.scenarioUnits !== undefined)
+            return root.scenarioUnits
+        return root.controller ? root.controller.units : []
+    }
     function canvasUnits() {
-        if (!Array.isArray(root.scenarioUnits))
-            return root.controller ? (root.controller.units || []) : []
+        var sourceList = root.unitListSource()
+        if (!sourceList || typeof sourceList.length !== "number") return []
         var output = []
-        for (var i = 0; i < root.scenarioUnits.length; ++i) {
-            var source = root.scenarioUnits[i] || ({})
+        for (var i = 0; i < sourceList.length; ++i) {
+            var source = sourceList[i] || ({})
             var unit = JSON.parse(JSON.stringify(source))
             var x = Number(source.x)
             var y = Number(source.y)
@@ -155,6 +164,7 @@ Item {
         return output
     }
     function refreshUnitSource() {
+        if (!innerCanvas) return
         var projectedUnits = root.canvasUnits()
         root.observeAbilityTransitions(projectedUnits)
         innerCanvas.units = projectedUnits

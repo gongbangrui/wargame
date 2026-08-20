@@ -136,6 +136,10 @@ Item {
         }
         root.selectedIds = retained
         root.validationIssues = root.controller.scenarioValidationIssues()
+        // The scenario roster is a QML var and may be backed by a Qt list.
+        // Push it explicitly so the canvas does not depend on reference-change
+        // notification timing for its internal Canvas model.
+        if (canvas) canvas.refreshUnitSource()
 
         // 保留列表选择，但只有新建/编辑后的显式焦点才移动视口。
         // 网络快照和本地刷新不能覆盖用户刚完成的画布拖拽。
@@ -354,6 +358,21 @@ Item {
                 }
                 onRightClickedMap: function(lp) { if (root.editable) editDialog.openNew(lp.x, lp.y, root.restrictedSide || root.controller.focusedSide) }
                 onDoubleClickedMap: function(lp) { if (root.editable) editDialog.openNew(lp.x, lp.y, root.restrictedSide || root.controller.focusedSide) }
+            }
+
+            Rectangle {
+                anchors.top: parent.top; anchors.right: parent.right
+                anchors.topMargin: 18; anchors.rightMargin: 20
+                color: "#08121dcc"; border.color: "#31506b"; radius: 4
+                implicitWidth: canvasStatus.implicitWidth + 18; implicitHeight: 24
+                z: 20
+                Text {
+                    id: canvasStatus
+                    anchors.centerIn: parent
+                    text: "画布 · " + root.units.length + " 个单位"
+                    color: root.units.length > 0 ? t.success : t.muted
+                    font.pixelSize: 10; font.bold: true
+                }
             }
 
             Rectangle {
