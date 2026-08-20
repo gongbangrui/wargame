@@ -91,14 +91,32 @@ cp -- "$BUILD_ROOT/appindex" "$OUTPUT_ROOT/appindex"
 cp -- "$BUILD_ROOT/server/wargame_server" "$OUTPUT_ROOT/wargame_server-root-qt"
 cp -- "$SERVER_BUILD_ROOT/wargame_server" "$OUTPUT_ROOT/wargame_server-standalone-qt64"
 cp -- "$ROOT_DIR/deploy/release-manifest.env" "$OUTPUT_ROOT/release-manifest.env"
+rm -rf -- "$OUTPUT_ROOT/map"
+mkdir -p -- "$OUTPUT_ROOT/map"
+cp -- "$BUILD_ROOT/map/metadata.json" "$BUILD_ROOT/map/tilejson.json" "$OUTPUT_ROOT/map/"
+while IFS= read -r -d '' map_zoom_dir; do
+  map_zoom_name="${map_zoom_dir##*/}"
+  [[ "$map_zoom_name" =~ ^[0-9]+$ ]] || continue
+  cp -a -- "$map_zoom_dir" "$OUTPUT_ROOT/map/$map_zoom_name"
+done < <(find "$BUILD_ROOT/map" -mindepth 1 -maxdepth 1 -type d -print0)
+MAP_TILE_COUNT="$(find "$OUTPUT_ROOT/map" -type f -name '*.png' -print | wc -l)"
+(( MAP_TILE_COUNT > 0 )) || {
+  printf 'release GIS map contains no PNG tiles\n' >&2
+  exit 1
+}
 chmod 755 "$OUTPUT_ROOT/appindex" "$OUTPUT_ROOT/wargame_server-root-qt" "$OUTPUT_ROOT/wargame_server-standalone-qt64"
-(cd "$OUTPUT_ROOT" && sha256sum \
-  appindex \
-  wargame_server-root-qt \
-  wargame_server-standalone-qt64 \
-  release-identity.txt \
-  release-manifest.env \
-  > SHA256SUMS)
+(
+  cd "$OUTPUT_ROOT"
+  {
+    printf '%s\0' \
+      appindex \
+      wargame_server-root-qt \
+      wargame_server-standalone-qt64 \
+      release-identity.txt \
+      release-manifest.env
+    find map -type f -print0 | LC_ALL=C sort -z
+  } | xargs -0 sha256sum > SHA256SUMS
+)
 
 printf 'releaseVersion=%s\n' "$VERSION"
 printf 'sourceDigest=%s\n' "$SOURCE_DIGEST"

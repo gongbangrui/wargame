@@ -15,8 +15,11 @@ WebSocket 权威数据面；`release-identity.txt` 保存一次计算的版本�
 
 ```bash
 WARGAME_VERSION=2.0.0 ./tools/build-release.sh --clean
-sha256sum -c dist/release-2.0.0/SHA256SUMS
+(cd dist/release-2.0.0 && sha256sum -c SHA256SUMS)
 ```
+
+桌面客户端发布产物由 `appindex` 和同级 `map/` 目录共同组成；两者必须一起分发。
+`SHA256SUMS` 覆盖可执行文件、发布身份以及全部 GIS 运行时瓦片。
 
 输出目录同时包含桌面 `appindex`、根项目服务端、Qt 6.4 独立服务端和发布身份文件。
 服务器发布包仍由 `deploy/package-one-click.sh` 生成；它会携带同一身份并在安装时拒绝摘要或

@@ -259,6 +259,52 @@ TEST(MapTilesTest, StagedMapMetadataLoadsWithRevisionAndZoomRange) {
     EXPECT_EQ(provider.maxTileZoom(), 14);
 }
 
+TEST(MapTilesTest, RendererPaintsStagedRuntimeMap) {
+    ensureGuiApplication();
+    const QString mapRoot = QDir(QCoreApplication::applicationDirPath())
+                                .filePath(QStringLiteral("map"));
+    ASSERT_TRUE(TileCacheLocator::isUsableMapDirectory(mapRoot));
+
+    MapProvider provider;
+    QString error;
+    ASSERT_TRUE(provider.loadMetadataFile(
+        QDir(mapRoot).filePath(QStringLiteral("metadata.json")), &error))
+        << qPrintable(error);
+    const QJsonObject info = provider.describe();
+
+    MapTileRenderer renderer;
+    renderer.setWidth(640);
+    renderer.setHeight(480);
+    renderer.setTileCacheDir(mapRoot);
+    renderer.setOriginLat(info.value(QStringLiteral("originLat")).toDouble());
+    renderer.setOriginLon(info.value(QStringLiteral("originLon")).toDouble());
+    renderer.setLogicalWidthMeters(info.value(QStringLiteral("widthMeters")).toDouble());
+    renderer.setLogicalHeightMeters(info.value(QStringLiteral("heightMeters")).toDouble());
+    renderer.setMinTileZoom(info.value(QStringLiteral("tileMinZoom")).toInt());
+    renderer.setMaxTileZoom(info.value(QStringLiteral("tileMaxZoom")).toInt());
+    renderer.setTileZoom(info.value(QStringLiteral("tileMinZoom")).toInt());
+    renderer.setCenterX(info.value(QStringLiteral("widthMeters")).toDouble() / 2.0);
+    renderer.setCenterY(info.value(QStringLiteral("heightMeters")).toDouble() / 2.0);
+    renderer.setZoom(0.04);
+
+    QImage rendered(640, 480, QImage::Format_RGB32);
+    rendered.fill(Qt::black);
+    QPainter painter(&rendered);
+    renderer.paint(&painter);
+    painter.end();
+
+    const QColor blankBackground(8, 11, 20);
+    int sampled = 0;
+    int mapPixels = 0;
+    for (int y = 4; y < rendered.height(); y += 8) {
+        for (int x = 4; x < rendered.width(); x += 8) {
+            ++sampled;
+            if (rendered.pixelColor(x, y) != blankBackground) ++mapPixels;
+        }
+    }
+    EXPECT_GT(mapPixels, sampled / 2);
+}
+
 TEST(MapTilesTest, RendererAlignsOriginTileEdgeAtWideViewport) {
     ensureGuiApplication();
     expectRendererTileEdgeAlignment(QSizeF{1280.0, 720.0}, 0.04,

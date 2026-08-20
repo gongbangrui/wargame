@@ -499,6 +499,30 @@ Item {
     // Semi-transparent overlay so tiles show through but we keep grid border
     Rectangle { anchors.fill: parent; color: "transparent"; border.color: "#2a3a56"; border.width: 1 }
 
+    Rectangle {
+        visible: tileMap.tileCacheDir.length === 0
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, 360)
+        height: mapResourceError.implicitHeight + 28
+        color: "#101722ee"
+        border.color: t.alertBg
+        radius: 6
+        z: 70
+
+        Text {
+            id: mapResourceError
+            anchors.fill: parent
+            anchors.margins: 14
+            text: "GIS 地图资源未加载\n请确认客户端同级 map 目录已完整部署"
+            color: t.label
+            font.pixelSize: 12
+            font.bold: true
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            wrapMode: Text.WordWrap
+        }
+    }
+
     // 引导模式激活时显示绿色边框
     Rectangle {
         anchors.fill: parent
