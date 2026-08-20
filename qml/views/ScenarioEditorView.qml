@@ -14,6 +14,7 @@ Item {
     property string restrictedSide: ""
     property string forcedSide: ""
     property bool rosterMode: false
+    property bool mapDominant: false
     property bool editable: !root.controller.networked
         || (root.controller.matchPhase === "preparing"
             && (root.rosterMode ? root.controller.canEditOwnRoster : root.controller.canEditScenario))
@@ -24,6 +25,10 @@ Item {
     property int gridSize: 100
     property bool compactLayout: width < 820
     property bool narrowLayout: width < 560
+    property real compactUnitPanelHeight: Math.max(180,
+        Math.min(root.narrowLayout ? 230 : 260, root.height * 0.32))
+    property real compactMapHeight: Math.max(260,
+        root.height - root.compactUnitPanelHeight)
     property bool positionPickMode: false
     property string positionStatus: ""
     property bool positionCommitPending: false
@@ -291,14 +296,17 @@ Item {
 
     GridLayout {
         anchors.fill: parent; rowSpacing: 0; columnSpacing: 0
-        columns: root.compactLayout ? 1 : 2
+        columns: root.mapDominant || root.compactLayout ? 1 : 2
 
         Rectangle {
+            visible: !root.mapDominant
+            Layout.row: root.compactLayout ? 1 : 0
+            Layout.column: 0
             Layout.fillWidth: true
             Layout.fillHeight: !root.compactLayout
             Layout.preferredWidth: root.compactLayout ? -1 : Math.min(360, Math.max(280, root.width * 0.36))
-            Layout.preferredHeight: root.compactLayout ? (root.narrowLayout ? 214 : 250) : -1
-            Layout.minimumHeight: root.compactLayout ? 190 : 0
+            Layout.preferredHeight: root.compactLayout ? root.compactUnitPanelHeight : -1
+            Layout.minimumHeight: root.compactLayout ? Math.min(180, root.compactUnitPanelHeight) : 0
             color: t.panel
             Rectangle { anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom; width: 1; color: t.border }
 
@@ -419,9 +427,13 @@ Item {
         }
 
         Item {
-            Layout.fillHeight: !root.compactLayout; Layout.fillWidth: true
-            Layout.minimumHeight: root.compactLayout ? (root.narrowLayout ? 390 : 430) : 0
-            Layout.preferredHeight: root.compactLayout ? (root.narrowLayout ? 390 : 430) : -1
+            Layout.row: 0
+            Layout.column: root.mapDominant || root.compactLayout ? 0 : 1
+            Layout.fillHeight: true
+            Layout.fillWidth: true
+            Layout.minimumHeight: root.compactLayout
+                ? Math.min(root.compactMapHeight, Math.max(220, root.height * 0.5)) : 0
+            Layout.preferredHeight: root.compactLayout ? root.compactMapHeight : -1
             MapCanvas { controller: root.controller; editor: root.editor;
                 id: canvas
                 anchors.fill: parent; anchors.margins: 12
@@ -445,6 +457,15 @@ Item {
                     }
                     if (btn === "right" && root.editable) { confirmDelete.uids = [uid]; confirmDelete.open() }
                 }
+                onDoubleClickedUnit: function(uid) {
+                    if (!root.editable) return
+                    for (var i = 0; i < root.units.length; ++i) {
+                        if (root.units[i].id !== uid) continue
+                        root.selectUnit(uid, i, Qt.NoModifier)
+                        editDialog.openWith(root.units[i])
+                        break
+                    }
+                }
                 onClickedMap: function(lp) { root.applyPickedPosition(lp) }
                 onRightClickedMap: function(lp) {
                     if (root.editable && !root.positionPickMode)
@@ -453,6 +474,46 @@ Item {
                 onDoubleClickedMap: function(lp) {
                     if (root.positionPickMode) root.applyPickedPosition(lp)
                     else if (root.editable) editDialog.openNew(lp.x, lp.y, root.restrictedSide || root.controller.focusedSide)
+                }
+            }
+
+            Rectangle {
+                visible: root.mapDominant
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.leftMargin: 18
+                anchors.topMargin: 18
+                width: Math.max(220, Math.min(parent.width - 180, 620))
+                height: mapToolbar.implicitHeight + 12
+                color: "#08121dee"
+                border.color: "#31506b"
+                radius: 6
+                z: 24
+
+                Flow {
+                    id: mapToolbar
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    spacing: 6
+
+                    TonalButton { text: "新增"; iconName: "plus"; base: t.accent; enabled: root.editable; onClicked: root.addNew() }
+                    TonalButton { text: "编辑"; iconName: "edit"; base: "#2a4f86"; enabled: root.editable && root.currentPositionUnit(); onClicked: root.editSelected() }
+                    TonalButton {
+                        text: "路径"; iconName: "command"; base: t.success
+                        enabled: root.editable && !!root.currentPositionUnit()
+                            && root.currentPositionUnit().kind !== "commandpost"
+                        onClicked: root.planRouteSelected()
+                    }
+                    TonalButton {
+                        text: root.positionPickMode ? "取消选点" : "初始位置"
+                        iconName: root.positionPickMode ? "close" : "locate"
+                        base: root.positionPickMode ? t.danger : t.success
+                        enabled: root.editable && !root.positionCommitPending
+                            && (!!root.currentPositionUnit() || root.positionPickMode)
+                        onClicked: root.togglePositionPickMode()
+                    }
+                    TonalButton { text: "删除"; iconName: "delete"; base: t.danger; enabled: root.editable && root.selectedOrCurrent().length > 0; onClicked: root.removeSelected() }
+                    GhostButton { text: "全图"; iconName: "scan"; onClicked: root.fitScenarioCanvas() }
                 }
             }
 
@@ -522,12 +583,13 @@ Item {
         root.selectedIds = [id]; root.pendingFocusUnitId = id; root.reload()
     }
     function editSelected() {
-        if (list.currentIndex < 0) return
-        editDialog.openWith(root.units[list.currentIndex])
+        var unit = root.currentPositionUnit()
+        if (!unit) return
+        editDialog.openWith(unit)
     }
     function planRouteSelected() {
-        if (list.currentIndex < 0) return
-        var u = root.units[list.currentIndex]
+        var u = root.currentPositionUnit()
+        if (!u) return
         if (u.kind === "commandpost") return
         var snap = root.controller.unitAt(u.id)
         routeDialog.openFor(snap)

@@ -368,7 +368,13 @@ Item {
                     Layout.minimumHeight: root.workspaceHeight
                     Layout.preferredHeight: root.workspaceHeight
                     color: root.panel; border.color: root.line; radius: 6; clip: true
-                    ScenarioEditorView { anchors.fill: parent; anchors.margins: 1; controller: root.controller; editor: root.editor }
+                    ScenarioEditorView {
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        controller: root.controller
+                        editor: root.editor
+                        mapDominant: true
+                    }
                 }
                 Rectangle {
                     Layout.fillWidth: true
