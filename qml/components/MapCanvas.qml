@@ -9,6 +9,10 @@ Item {
     id: root
     property var controller: null
     property var editor: null
+    // Scenario editors can render the configured roster before any runtime
+    // deployment exists. Online tactical views leave this null and use the
+    // projected runtime units as before.
+    property var scenarioUnits: null
     property string sideFilter: "red"
     property bool   showAllSides: false
     property var visibleUnitIds: null
@@ -130,6 +134,33 @@ Item {
 
     // 公共刷新方法
     function refresh() { innerCanvas.requestPaint() }
+    function canvasUnits() {
+        if (!Array.isArray(root.scenarioUnits))
+            return root.controller ? (root.controller.units || []) : []
+        var output = []
+        for (var i = 0; i < root.scenarioUnits.length; ++i) {
+            var source = root.scenarioUnits[i] || ({})
+            var unit = JSON.parse(JSON.stringify(source))
+            var x = Number(source.x)
+            var y = Number(source.y)
+            if (!isFinite(x) || !isFinite(y)) continue
+            unit.position = [x, y, Number(source.alt || 0)]
+            unit.alive = source.alive !== false
+            unit.hp = source.hp === undefined ? Number(source.maxHp || 100) : source.hp
+            unit.maxHp = source.maxHp === undefined ? 100 : source.maxHp
+            unit.movable = source.movable === undefined
+                ? source.kind !== "commandpost" : source.movable
+            output.push(unit)
+        }
+        return output
+    }
+    function refreshUnitSource() {
+        var projectedUnits = root.canvasUnits()
+        root.observeAbilityTransitions(projectedUnits)
+        innerCanvas.units = projectedUnits
+        if (root.controller && root.controller.networked) root.rebuildRecentPaths()
+        innerCanvas.requestPaint()
+    }
     function rebuildRecentPaths() {
         var map = ({})
         if (root.controller && root.controller.networked) {
@@ -295,6 +326,7 @@ Item {
     }
     onCenterChanged: refresh()
     onMapSizeChanged: refresh()
+    onScenarioUnitsChanged: root.refreshUnitSource()
     onMapMarkersChanged: refresh()
     onIntelRecordsChanged: refresh()
     onShowIntelLiveChanged: refresh()
@@ -494,7 +526,7 @@ Item {
         Connections {
             target: root.controller
             function onUnitsForward() {
-                var projectedUnits = root.controller.units || []
+                var projectedUnits = root.canvasUnits()
                 root.observeAbilityTransitions(projectedUnits)
                 innerCanvas.units = projectedUnits
                 if (root.controller.networked) {
@@ -1553,7 +1585,7 @@ Item {
             }
             onWheel: function(wheel) {
                 var delta = wheel.angleDelta.y > 0 ? 1.1 : 1/1.1
-                root.zoom = Math.max(0.05, Math.min(20.0, root.zoom * delta))
+                root.zoom = Math.max(0.005, Math.min(20.0, root.zoom * delta))
                 innerCanvas.requestPaint()
             }
             onClicked: function(mouse) {
@@ -1676,8 +1708,7 @@ Item {
 
     Component.onCompleted: {
         root.applyMapInfo(true)
-        innerCanvas.units = root.controller.units
-        root.observeAbilityTransitions(innerCanvas.units || [])
+        root.refreshUnitSource()
         innerCanvas.acceptProjectileSample(root.controller.projectiles)
         root.rebuildRecentPaths()
         innerCanvas.requestPaint()

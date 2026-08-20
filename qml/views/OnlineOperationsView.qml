@@ -1102,7 +1102,7 @@ Item {
                 Text { Layout.fillWidth: true; text: root.controller.onlineStage === "roomSelect" ? "选择推演房间" : root.controller.onlineStage === "roomAdmin" ? "房间管理" : root.controller.isObserver ? "只读观战" : root.switchSeatSelection || root.controller.onlineStage === "seatSelect" ? "选择战位" : "联网实战席"; color: root.ink; font.pixelSize: root.compactLayout ? 20 : 23; font.bold: true; elide: Text.ElideRight }
                 Text { Layout.fillWidth: true; text: root.controller.currentRoomId ? root.controller.currentRoomId + " · " + root.roomConfigurationLabel() : "选择准备中的房间"; color: root.dim; font.pixelSize: 12; elide: Text.ElideRight }
             }
-            Rectangle { Layout.preferredWidth: root.compactLayout ? 148 : 180; Layout.preferredHeight: 34; color: root.panelAlt; border.color: root.line; radius: 5
+            Rectangle { visible: root.controller.onlineStage !== "roomSelect" && root.controller.onlineStage !== "roomAdmin"; Layout.preferredWidth: root.compactLayout ? 148 : 180; Layout.preferredHeight: visible ? 34 : 0; color: root.panelAlt; border.color: root.line; radius: 5
                 RowLayout { anchors.fill: parent; anchors.margins: 8; spacing: 8
                     Rectangle { Layout.preferredWidth: 8; Layout.preferredHeight: 8; radius: 4; color: root.controller.networkState === "connected" ? root.cyan : root.orange }
                     Text { Layout.fillWidth: true; text: root.controller.networkState === "connected" ? ("数据面 · " + root.controller.dataPlaneName) : root.controller.networkStatus; color: root.dim; font.pixelSize: 10; elide: Text.ElideRight }

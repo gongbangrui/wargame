@@ -22,6 +22,8 @@ Item {
     property var clipboardUnits: []
     property var validationIssues: []
     property int gridSize: 100
+    property bool compactLayout: width < 820
+    property bool narrowLayout: width < 560
 
     function nudgeSelected(offsetX, offsetY) {
         if (!root.editable) return
@@ -149,11 +151,40 @@ Item {
             }
         }
     }
+
+    function fitScenarioCanvas() {
+        if (!canvas || canvas.width <= 0 || canvas.height <= 0) return
+        var source = root.units || []
+        var minX = canvas.mapSize.w
+        var maxX = 0
+        var minY = canvas.mapSize.h
+        var maxY = 0
+        var valid = 0
+        for (var i = 0; i < source.length; ++i) {
+            var unit = source[i] || ({})
+            var x = Number(unit.x)
+            var y = Number(unit.y)
+            if (!isFinite(x) || !isFinite(y)) continue
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+            minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+            ++valid
+        }
+        if (valid === 0) {
+            minX = 0; maxX = canvas.mapSize.w; minY = 0; maxY = canvas.mapSize.h
+        }
+        var spanX = Math.max(3000, maxX - minX + 3000)
+        var spanY = Math.max(2400, maxY - minY + 2400)
+        var fit = Math.min((canvas.width - 24) / spanX, (canvas.height - 24) / spanY)
+        canvas.zoom = Math.max(0.005, Math.min(0.65, fit * 0.9))
+        canvas.centerOn((minX + maxX) / 2, (minY + maxY) / 2)
+    }
     Component.onCompleted: {
         reload()
-        canvas.zoom = 0.15
-        canvas.centerOn(canvas.mapSize.w / 2, canvas.mapSize.h / 2)
+        Qt.callLater(root.fitScenarioCanvas)
     }
+    Timer { id: layoutFitTimer; interval: 120; repeat: false; onTriggered: root.fitScenarioCanvas() }
+    onWidthChanged: layoutFitTimer.restart()
+    onHeightChanged: layoutFitTimer.restart()
     Connections {
         target: root.controller
         function onCommandExecuted() { root.reload() }
@@ -169,11 +200,16 @@ Item {
         if (!reloadTimer.running) reloadTimer.start()
     }
 
-    RowLayout {
-        anchors.fill: parent; spacing: 0
+    GridLayout {
+        anchors.fill: parent; rowSpacing: 0; columnSpacing: 0
+        columns: root.compactLayout ? 1 : 2
 
         Rectangle {
-            Layout.fillHeight: true; Layout.preferredWidth: Math.min(360, Math.max(280, root.width * 0.36))
+            Layout.fillWidth: true
+            Layout.fillHeight: !root.compactLayout
+            Layout.preferredWidth: root.compactLayout ? -1 : Math.min(360, Math.max(280, root.width * 0.36))
+            Layout.preferredHeight: root.compactLayout ? (root.narrowLayout ? 214 : 250) : -1
+            Layout.minimumHeight: root.compactLayout ? 190 : 0
             color: t.panel
             Rectangle { anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom; width: 1; color: t.border }
 
@@ -293,10 +329,13 @@ Item {
         }
 
         Item {
-            Layout.fillHeight: true; Layout.fillWidth: true
+            Layout.fillHeight: !root.compactLayout; Layout.fillWidth: true
+            Layout.minimumHeight: root.compactLayout ? (root.narrowLayout ? 390 : 430) : 0
+            Layout.preferredHeight: root.compactLayout ? (root.narrowLayout ? 390 : 430) : -1
             MapCanvas { controller: root.controller; editor: root.editor;
                 id: canvas
                 anchors.fill: parent; anchors.margins: 12
+                scenarioUnits: root.units
                 sideFilter: root.restrictedSide || root.controller.focusedSide
                 showAllSides: !root.rosterMode
                 focusUnitId: list.currentIndex >= 0 && root.units[list.currentIndex] ? root.units[list.currentIndex].id : ""

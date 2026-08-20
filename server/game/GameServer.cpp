@@ -7238,9 +7238,14 @@ QJsonObject GameServer::snapshotFor(const ClientSession& session, quint64 projec
         observerTrajectoriesFor(session));
     if (m_authoritativeRoom.runtimeUnits().isEmpty()) {
         snapshot[QStringLiteral("units")] = QJsonArray{};
-        QJsonObject scenario = snapshot.value(QStringLiteral("scenario")).toObject();
-        scenario[QStringLiteral("units")] = QJsonArray{};
-        snapshot[QStringLiteral("scenario")] = scenario;
+        // Before deployment there is no runtime roster, but the room admin
+        // still needs the initial scenario to edit it. Participant clients
+        // receive an empty scenario until they claim a seat.
+        if (normalizedRole(session) != QLatin1String("room_admin")) {
+            QJsonObject scenario = snapshot.value(QStringLiteral("scenario")).toObject();
+            scenario[QStringLiteral("units")] = QJsonArray{};
+            snapshot[QStringLiteral("scenario")] = scenario;
+        }
     }
     // Observer snapshots use a strict, read-only wire shape. Map marks are
     // participant-scoped and intentionally absent rather than represented by

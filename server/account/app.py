@@ -1302,12 +1302,16 @@ def public_room(row: sqlite3.Row) -> dict:
         except (TypeError, json.JSONDecodeError):
             return fallback
 
+    decoded_limits = decode(row["seat_limits"], {})
+    seat_limits = dict(DEFAULT_SEAT_LIMITS)
+    if isinstance(decoded_limits, dict):
+        seat_limits.update(decoded_limits)
     result = {
         "roomId": row["room_id"],
         "name": row["name"],
         "description": row["description"],
         "scenarioId": row["scenario_id"],
-        "seatLimits": decode(row["seat_limits"], {}),
+        "seatLimits": seat_limits,
         "seatParameters": decode(row["seat_parameters"], {}),
         "mode": row["mode"],
         "aiDifficulty": row["ai_difficulty"],
@@ -2273,11 +2277,11 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
             current_parameters = json.loads(existing["seat_parameters"])
         except (TypeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=503, detail="房间配置数据损坏") from exc
-        seat_limits = (
-            body.seat_limits
-            if "seat_limits" in body.model_fields_set
-            else current_limits
-        )
+        seat_limits = dict(DEFAULT_SEAT_LIMITS)
+        if isinstance(current_limits, dict):
+            seat_limits.update(current_limits)
+        if "seat_limits" in body.model_fields_set:
+            seat_limits.update(body.seat_limits)
         seat_parameters = (
             body.seat_parameters
             if "seat_parameters" in body.model_fields_set
@@ -2579,11 +2583,11 @@ def internal_room_config(
             current_parameters = json.loads(existing["seat_parameters"])
         except (TypeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=503, detail="房间配置数据损坏") from exc
-        seat_limits = (
-            body.seat_limits
-            if "seat_limits" in body.model_fields_set
-            else current_limits
-        )
+        seat_limits = dict(DEFAULT_SEAT_LIMITS)
+        if isinstance(current_limits, dict):
+            seat_limits.update(current_limits)
+        if "seat_limits" in body.model_fields_set:
+            seat_limits.update(body.seat_limits)
         seat_parameters = (
             body.seat_parameters
             if "seat_parameters" in body.model_fields_set

@@ -982,7 +982,9 @@ bool SimulationController::replaceScenario(const QVariantMap& scenario) {
 
 void SimulationController::removeUnit(const QString& id) {
     if (isNetworked()) {
-        if (!canEditScenario() || !m_engine.unit(id)) return;
+        // The remote scenario is the source of truth during room setup. Its
+        // units do not have to exist in the runtime projection yet.
+        if (!canEditScenario() || id.trimmed().isEmpty()) return;
         m_networkClient.sendScenarioRemove(id);
         return;
     }
