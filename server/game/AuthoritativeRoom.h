@@ -47,6 +47,7 @@ public:
     explicit AuthoritativeRoom(quint64 rngSeed = 1);
 
     Result setMode(const QString& mode);
+    bool setSeatLimits(const QHash<QString, int>& limits, QString* error = nullptr);
     Result syncAiRoster();
     Result deployAiSeats(double mapWidth, double mapHeight, quint64 matchGeneration);
 
@@ -122,6 +123,9 @@ private:
     void clearDeployment(Seat& seat);
 
     QHash<QString, ScenarioUnit> m_templates;
+    // Optional for standalone room tests and legacy callers. The game server
+    // always supplies this map from the complete initial scenario.
+    QHash<QString, int> m_seatLimits;
     QHash<QString, Seat> m_seats;
     QHash<qint64, Transfer> m_transfers;
     QHash<QString, Result> m_operations;

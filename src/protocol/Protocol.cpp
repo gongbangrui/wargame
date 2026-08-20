@@ -1382,7 +1382,8 @@ ValidationResult validateClientPayloadForVersion(const QString& type,
                 || !validOptionalString(args, QStringLiteral("description"),
                                         MaxRoomDescriptionLength, true)
                 || !validString(args.value(QStringLiteral("scenarioId")), 128)
-                || !validRoomSeatLimits(args.value(QStringLiteral("seatLimits")), true)
+                || (args.contains(QStringLiteral("seatLimits"))
+                    && !validRoomSeatLimits(args.value(QStringLiteral("seatLimits")), true))
                 || !validRoomSeatParameters(args.value(QStringLiteral("seatParameters")))) {
                 return invalid(QStringLiteral("房间配置结构无效"));
             }

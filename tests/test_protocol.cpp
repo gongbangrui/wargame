@@ -413,6 +413,32 @@ TEST(ProtocolTest, AbilityAndServiceCommandsRequireAValidUnitId) {
     }
 }
 
+TEST(ProtocolTest, RoomConfigUsesGisRosterWithoutClientSeatLimits) {
+    const QJsonObject args{
+        {QStringLiteral("expectedConfigVersion"), 3},
+        {QStringLiteral("name"), QStringLiteral("Main")},
+        {QStringLiteral("description"), QStringLiteral("Scenario-owned roster")},
+        {QStringLiteral("scenarioId"), QStringLiteral("default")},
+        {QStringLiteral("seatParameters"), QJsonObject{}}};
+    const QJsonObject command = Protocol::makeClientEnvelope(
+        QStringLiteral("command"), QStringLiteral("room-config-1"),
+        QJsonObject{{QStringLiteral("commandId"), QStringLiteral("room-config-command-1")},
+                    {QStringLiteral("action"), QStringLiteral("updateRoomConfig")},
+                    {QStringLiteral("stateRevision"), 9},
+                    {QStringLiteral("args"), args}});
+    EXPECT_TRUE(Protocol::validateClientEnvelope(command).valid);
+
+    QJsonObject legacyArgs = args;
+    legacyArgs[QStringLiteral("seatLimits")] = QJsonObject{};
+    const QJsonObject malformedLegacy = Protocol::makeClientEnvelope(
+        QStringLiteral("command"), QStringLiteral("room-config-2"),
+        QJsonObject{{QStringLiteral("commandId"), QStringLiteral("room-config-command-2")},
+                    {QStringLiteral("action"), QStringLiteral("updateRoomConfig")},
+                    {QStringLiteral("stateRevision"), 9},
+                    {QStringLiteral("args"), legacyArgs}});
+    EXPECT_FALSE(Protocol::validateClientEnvelope(malformedLegacy).valid);
+}
+
 TEST(ProtocolTest, RejectsExcessivelyNestedJson) {
     QJsonValue nested = QJsonObject{};
     for (int i = 0; i < Protocol::MaxJsonDepth + 2; ++i) {

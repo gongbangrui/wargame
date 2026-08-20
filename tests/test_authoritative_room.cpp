@@ -308,6 +308,107 @@ TEST(GameServerAdmissionTest, ConfiguresExactPendingConnectionLimit) {
     EXPECT_EQ(server.m_server.maxPendingConnections(), 64);
 }
 
+TEST(GameServerScenarioRosterTest, InitialUnitsDriveSeatCapacityAndAdminMap) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+
+    EXPECT_EQ(server.m_runInitialScenario.units.size(), 10U);
+    EXPECT_EQ(server.m_seatLimits.value(QStringLiteral("red_attack")), 1);
+    EXPECT_EQ(server.m_seatLimits.value(QStringLiteral("red_ground")), 1);
+
+    Scenario configured = server.m_runInitialScenario;
+    const auto source = std::find_if(
+        configured.units.cbegin(), configured.units.cend(), [](const ScenarioUnit& unit) {
+            return unit.side == QLatin1String("red")
+                && unit.kind == QLatin1String("attackuav");
+        });
+    ASSERT_NE(source, configured.units.cend());
+    ScenarioUnit added = *source;
+    added.id = QStringLiteral("red_a2");
+    added.vmfUrn = QStringLiteral("urn:gbr:wargame:unit:red_a2");
+    added.callsign = QStringLiteral("红方攻击2");
+    added.pos.x += 500.0;
+    configured.units.push_back(added);
+    QString error;
+    ASSERT_TRUE(server.replaceInitialScenario(configured, &error)) << error.toStdString();
+    EXPECT_EQ(server.m_seatLimits.value(QStringLiteral("red_attack")), 2);
+
+    claimCommanders(server.m_authoritativeRoom);
+    GeoPos redPosition;
+    GeoPos bluePosition;
+    ASSERT_TRUE(server.initialPositionForSeat(QStringLiteral("red_commander"),
+                                              &redPosition, &error)) << error.toStdString();
+    ASSERT_TRUE(server.initialPositionForSeat(QStringLiteral("blue_commander"),
+                                              &bluePosition, &error)) << error.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.deployInitial(QStringLiteral("red_commander"),
+                                                          redPosition).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deployInitial(QStringLiteral("blue_commander"),
+                                                          bluePosition).ok);
+    ASSERT_TRUE(server.applyDeployedScenario(&error)) << error.toStdString();
+    ASSERT_EQ(server.m_engine.unitIds().size(), 2);
+    ASSERT_TRUE(server.persistScenario(&error)) << error.toStdString();
+    const Scenario persisted = ScenarioIo::loadFromFile(server.m_scenarioPath, &error);
+    ASSERT_TRUE(error.isEmpty()) << error.toStdString();
+    EXPECT_EQ(persisted.units.size(), 11U);
+
+    GameServer::ClientSession admin;
+    admin.authenticated = true;
+    admin.accountRole = QStringLiteral("room_admin");
+    admin.roomId = server.m_roomId;
+    const QJsonObject snapshot = server.snapshotFor(admin);
+    EXPECT_EQ(snapshot.value(QStringLiteral("scenario")).toObject()
+                  .value(QStringLiteral("units")).toArray().size(), 11);
+    EXPECT_EQ(snapshot.value(QStringLiteral("roomState")).toObject()
+                  .value(QStringLiteral("seatLimits")).toObject()
+                  .value(QStringLiteral("red_attack")).toInt(), 2);
+
+    ASSERT_TRUE(server.applyDurableEvent(
+        QStringLiteral("control"),
+        QJsonObject{{QStringLiteral("action"), QStringLiteral("start")}}, &error))
+        << error.toStdString();
+    EXPECT_EQ(server.m_runInitialScenario.units.size(), 11U);
+    ASSERT_TRUE(server.applyDurableEvent(
+        QStringLiteral("control"),
+        QJsonObject{{QStringLiteral("action"), QStringLiteral("end")}}, &error))
+        << error.toStdString();
+    EXPECT_EQ(server.m_engine.unitIds().size(), 11);
+}
+
+TEST(GameServerScenarioRosterTest, LegacySeatLimitsMigrateOnceIntoInitialGisUnits) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    {
+        GameServer legacy;
+        ASSERT_TRUE(legacy.m_recoveryError.isEmpty()) << legacy.m_recoveryError.toStdString();
+        Scenario deployedOnly = legacy.m_runInitialScenario;
+        std::erase_if(deployedOnly.units, [](const ScenarioUnit& unit) {
+            return unit.kind != QLatin1String("commandpost");
+        });
+        ASSERT_EQ(deployedOnly.units.size(), 2U);
+        ASSERT_TRUE(legacy.m_engine.setRemoteScenario(deployedOnly));
+        legacy.m_runInitialScenario = deployedOnly;
+        legacy.m_seatLimits[QStringLiteral("red_attack")] = 2;
+        legacy.m_seatLimits[QStringLiteral("blue_attack")] = 2;
+        QString error;
+        ASSERT_TRUE(legacy.persistRoomState(&error)) << error.toStdString();
+    }
+
+    GameServer restored;
+    ASSERT_TRUE(restored.m_recoveryError.isEmpty()) << restored.m_recoveryError.toStdString();
+    EXPECT_EQ(restored.m_runInitialScenario.units.size(), 12U);
+    EXPECT_EQ(restored.m_seatLimits.value(QStringLiteral("red_attack")), 2);
+    EXPECT_EQ(restored.m_seatLimits.value(QStringLiteral("blue_attack")), 2);
+    QString error;
+    const Scenario persisted = ScenarioIo::loadFromFile(restored.m_scenarioPath, &error);
+    ASSERT_TRUE(error.isEmpty()) << error.toStdString();
+    EXPECT_EQ(persisted.units.size(), 12U);
+}
+
 TEST(GameServerVmfPersistenceTest,
      SimulationGeneratedReconConfirmationIsDurableAndReplayIsIdempotent) {
     int argc = 1;
@@ -3813,6 +3914,29 @@ TEST(AuthoritativeRoomPveTest, AiDeploymentIsDeterministicAndRosterFreezesAfterS
     EXPECT_LE(position.y, 800.0);
 }
 
+TEST(AuthoritativeRoomPveTest, RejectsRedSeatWithoutMatchingBlueInitialUnitAtomically) {
+    auto room = configuredRoom();
+    QHash<QString, int> limits{
+        {QStringLiteral("red_commander"), 1}, {QStringLiteral("blue_commander"), 1},
+        {QStringLiteral("red_attack"), 2}, {QStringLiteral("blue_attack"), 1}};
+    QString error;
+    ASSERT_TRUE(room.setSeatLimits(limits, &error)) << error.toStdString();
+    ASSERT_TRUE(room.setMode(QStringLiteral("pve")).ok);
+    ASSERT_TRUE(room.claimSeat(1, QStringLiteral("red"), QStringLiteral("red_commander"),
+                               QStringLiteral("commandpost")).ok);
+
+    const quint64 revision = room.revision();
+    const auto rejected = room.claimSeat(
+        2, QStringLiteral("pilot"), QStringLiteral("red_attack_2"),
+        QStringLiteral("attackuav"));
+
+    EXPECT_FALSE(rejected.ok);
+    EXPECT_EQ(rejected.code, QStringLiteral("AI_ROSTER_MISMATCH"));
+    EXPECT_EQ(room.revision(), revision);
+    EXPECT_FALSE(room.hasSeat(QStringLiteral("red_attack_2")));
+    EXPECT_FALSE(room.hasSeat(QStringLiteral("blue_attack_2")));
+}
+
 TEST(GameServerPveLifecycleTest, DeploysAiBeforeRedCommanderReadiness) {
     int argc = 1;
     char applicationName[] = "game_server_pve_readiness_tests";
@@ -3870,6 +3994,32 @@ TEST(GameServerAiExecutionTest, AttackBudgetKeepsGeneratedMovementInAuthoritativ
 
     GameServer server;
     ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    Scenario configured = server.m_runInitialScenario;
+    const auto attackTemplate = std::find_if(
+        configured.units.cbegin(), configured.units.cend(), [](const ScenarioUnit& unit) {
+            return unit.side == QLatin1String("red")
+                && unit.kind == QLatin1String("attackuav");
+        });
+    ASSERT_NE(attackTemplate, configured.units.cend());
+    const ScenarioUnit attackUnitTemplate = *attackTemplate;
+    for (const QString& side : {QStringLiteral("red"), QStringLiteral("blue")}) {
+        for (int index = 2; index <= 3; ++index) {
+            ScenarioUnit added = attackUnitTemplate;
+            added.side = side;
+            added.id = QStringLiteral("%1_a%2").arg(side).arg(index);
+            added.vmfUrn = QStringLiteral("urn:gbr:wargame:unit:%1").arg(added.id);
+            added.callsign = QStringLiteral("%1攻击%2").arg(side == QLatin1String("red")
+                                                               ? QStringLiteral("红方")
+                                                               : QStringLiteral("蓝方"))
+                .arg(index);
+            added.pos.x += (side == QLatin1String("red") ? 500.0 : -500.0) * index;
+            added.pos.y += 500.0 * (index - 1);
+            configured.units.push_back(added);
+        }
+    }
+    QString scenarioError;
+    ASSERT_TRUE(server.replaceInitialScenario(configured, &scenarioError))
+        << scenarioError.toStdString();
     ASSERT_TRUE(server.m_authoritativeRoom.setMode(QStringLiteral("pve")).ok);
     ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
         1, QStringLiteral("red-commander"), QStringLiteral("red_commander"),

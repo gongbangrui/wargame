@@ -47,6 +47,7 @@ AuthoritativeRoom::Result AuthoritativeRoom::setMode(const QString& mode) {
         return mode == QLatin1String("pve") ? syncAiRoster()
                                              : Result{true, {}, m_revision, true};
     }
+    const QJsonObject before = toJson();
     m_mode = mode;
     if (m_mode == QLatin1String("pvp")) {
         QStringList aiSeats;
@@ -57,8 +58,46 @@ AuthoritativeRoom::Result AuthoritativeRoom::setMode(const QString& mode) {
         return success();
     }
     const Result roster = syncAiRoster();
-    if (!roster.ok) return roster;
+    if (!roster.ok) {
+        restore(before);
+        return roster;
+    }
     return roster;
+}
+
+bool AuthoritativeRoom::setSeatLimits(const QHash<QString, int>& limits, QString* error) {
+    if (error) error->clear();
+    for (auto it = limits.cbegin(); it != limits.cend(); ++it) {
+        const QStringList parts = seatParts(it.key());
+        const QSet<QString> types{QStringLiteral("commander"), QStringLiteral("attack"),
+                                  QStringLiteral("recon"), QStringLiteral("ground"),
+                                  QStringLiteral("jammer")};
+        if (parts.size() != 2
+            || (parts.at(0) != QLatin1String("red")
+                && parts.at(0) != QLatin1String("blue"))
+            || !types.contains(parts.at(1))
+            || (parts.at(1) == QLatin1String("commander") && it.value() != 1)
+            || it.value() < 0 || it.value() > 64) {
+            if (error) *error = QStringLiteral("invalid seat limit: %1").arg(it.key());
+            return false;
+        }
+    }
+    for (const Seat& seat : m_seats) {
+        const QStringList parts = seatParts(seat.seatId);
+        const QString baseId = parts.size() >= 2
+            ? parts.at(0) + QLatin1Char('_') + parts.at(1) : QString{};
+        bool ok = false;
+        const int index = parts.size() == 2 ? 1 : parts.value(2).toInt(&ok);
+        const int normalizedIndex = parts.size() == 2 ? 1 : (ok ? index : -1);
+        if (baseId.isEmpty() || normalizedIndex <= 0
+            || limits.value(baseId, 0) < normalizedIndex) {
+            if (error) *error = QStringLiteral("seat %1 is outside the initial scenario")
+                                      .arg(seat.seatId);
+            return false;
+        }
+    }
+    m_seatLimits = limits;
+    return true;
 }
 
 AuthoritativeRoom::Result AuthoritativeRoom::installAiSeat(const QString& seatId,
@@ -273,6 +312,12 @@ bool AuthoritativeRoom::validSeatTemplate(const QString& seatId, const QString& 
         const int index = parts.value(2).toInt(&ok);
         if (!ok || index <= 0) return false;
     }
+    if (!m_seatLimits.isEmpty()) {
+        const QString baseId = parts.at(0) + QLatin1Char('_') + parts.at(1);
+        const int index = expectedType == QLatin1String("commander")
+            ? 1 : parts.value(2).toInt();
+        if (m_seatLimits.value(baseId, 0) < index) return false;
+    }
     if (side) *side = parts.first();
     if (type) *type = expectedType;
     return true;
@@ -296,6 +341,13 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
     if (m_mode == QLatin1String("pve") && side == QLatin1String("blue")) {
         return failure(QStringLiteral("SIDE_RESERVED_FOR_AI"));
     }
+    if (m_mode == QLatin1String("pve") && side == QLatin1String("red")) {
+        const QString blueSeatId = QStringLiteral("blue_")
+            + seatId.mid(QStringLiteral("red_").size());
+        if (!validSeatTemplate(blueSeatId, templateId)) {
+            return failure(QStringLiteral("AI_ROSTER_MISMATCH"));
+        }
+    }
     if (m_seats.contains(seatId) && m_seats.value(seatId).userId != userId) {
         return failure(QStringLiteral("SEAT_OCCUPIED"));
     }
@@ -312,6 +364,7 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
     if (!current.isEmpty() && current != seatId) return failure(QStringLiteral("TRANSFER_REQUIRED"));
     if (current == seatId) return Result{true, {}, m_revision, true};
 
+    const QJsonObject before = toJson();
     Seat seat;
     seat.seatId = seatId;
     seat.seatType = type;
@@ -335,8 +388,13 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
     }
     m_departedUsers.remove(userId);
     const Result result = success();
-    return m_mode == QLatin1String("pve") && side == QLatin1String("red")
-        ? syncAiRoster() : result;
+    if (m_mode != QLatin1String("pve") || side != QLatin1String("red")) return result;
+    const Result roster = syncAiRoster();
+    if (!roster.ok) {
+        restore(before);
+        return roster;
+    }
+    return roster;
 }
 
 AuthoritativeRoom::Result AuthoritativeRoom::requestTransfer(qint64 userId,
@@ -359,6 +417,13 @@ AuthoritativeRoom::Result AuthoritativeRoom::requestTransfer(qint64 userId,
     if (!validSeatTemplate(targetSeatId, templateId, &side, &type) || side != source.side
         || type == QLatin1String("commander") || m_seats.contains(targetSeatId)) {
         return failure(QStringLiteral("INVALID_TRANSFER"));
+    }
+    if (m_mode == QLatin1String("pve") && side == QLatin1String("red")) {
+        const QString blueSeatId = QStringLiteral("blue_")
+            + targetSeatId.mid(QStringLiteral("red_").size());
+        if (!validSeatTemplate(blueSeatId, templateId)) {
+            return failure(QStringLiteral("AI_ROSTER_MISMATCH"));
+        }
     }
     Result result = success();
     m_transfers.insert(userId, Transfer{userId, targetSeatId, templateId, result.revision});

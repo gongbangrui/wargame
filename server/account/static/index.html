@@ -151,7 +151,6 @@
           <span id="roomAiResolved" class="field-hint" aria-live="polite"></span>
         </div>
         <div class="room-editor-block"><div class="editor-block-head"><strong>情报时效</strong></div><div class="seat-editor-grid"><label>失联阈值（秒）<input id="roomIntelStale" type="number" min="0.1" max="86400" step="0.1" required><span>超过后标记为失联。</span></label><label>归档阈值（秒）<input id="roomIntelArchive" type="number" min="0.2" max="604800" step="0.1" required><span>必须大于失联阈值。</span></label></div></div>
-        <div class="room-editor-block"><div class="editor-block-head"><strong>战位容量</strong></div><div id="seatLimitEditor" class="seat-editor-grid"></div></div>
         <div class="room-editor-block"><div class="editor-block-head"><strong>通信与侦察参数</strong></div><div id="seatParameterEditor" class="seat-editor-grid"></div></div>
         <details class="advanced-room-config"><summary>高级参数 JSON</summary><label>额外战位参数<textarea id="roomParameters" rows="4">{}</textarea><span class="field-hint">键名可使用 red_attack 或 red_attack_1；当前支持 communicationRange、detectRange。</span></label></details>
         <label class="toggle-line"><input id="roomEnabled" type="checkbox" checked><span class="toggle-ui"></span><span>允许进入</span></label><div class="modal-actions"><button id="roomCancel" type="button" class="secondary">取消</button><button id="roomSave" type="submit" class="primary">保存房间</button></div></form>

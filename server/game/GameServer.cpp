@@ -392,7 +392,116 @@ QString seatParameterKey(const QString& seatId) {
     return descriptor.baseId;
 }
 
-QString validateNetworkScenario(const Scenario& scenario) {
+QString seatBaseIdForScenarioUnit(const ScenarioUnit& unit) {
+    if (unit.side != QLatin1String("red") && unit.side != QLatin1String("blue")) return {};
+    const QString type = unit.kind == QLatin1String("commandpost")
+        ? QStringLiteral("commander")
+        : unit.kind == QLatin1String("attackuav") ? QStringLiteral("attack")
+        : unit.kind == QLatin1String("reconuav") ? QStringLiteral("recon")
+        : unit.kind == QLatin1String("groundscout") ? QStringLiteral("ground")
+        : unit.kind == QLatin1String("jammeruav") ? QStringLiteral("jammer") : QString{};
+    return type.isEmpty() ? QString{} : QStringLiteral("%1_%2").arg(unit.side, type);
+}
+
+QHash<QString, int> seatLimitsForScenario(const Scenario& scenario) {
+    QHash<QString, int> limits;
+    for (const QString& side : {QStringLiteral("red"), QStringLiteral("blue")}) {
+        for (const QString& type : {QStringLiteral("commander"), QStringLiteral("attack"),
+                                    QStringLiteral("recon"), QStringLiteral("ground"),
+                                    QStringLiteral("jammer")}) {
+            limits.insert(QStringLiteral("%1_%2").arg(side, type), 0);
+        }
+    }
+    for (const ScenarioUnit& unit : scenario.units) {
+        const QString key = seatBaseIdForScenarioUnit(unit);
+        if (!key.isEmpty()) limits[key] = limits.value(key) + 1;
+    }
+    return limits;
+}
+
+QJsonObject seatLimitsJson(const QHash<QString, int>& limits) {
+    QJsonObject object;
+    for (auto it = limits.cbegin(); it != limits.cend(); ++it) object[it.key()] = it.value();
+    return object;
+}
+
+bool migrateLegacyInitialRoster(const Scenario& source, const QJsonObject& legacyLimits,
+                                Scenario* migrated, bool* changed, QString* error) {
+    if (error) error->clear();
+    if (!migrated || !changed) {
+        if (error) *error = QStringLiteral("旧版初始阵容迁移参数无效");
+        return false;
+    }
+    *migrated = source;
+    *changed = false;
+    if (legacyLimits.isEmpty()) return true;
+
+    const Scenario defaults = ScenarioIo::defaultScenario();
+    QHash<QString, int> current = seatLimitsForScenario(*migrated);
+    QSet<QString> unitIds;
+    for (const ScenarioUnit& unit : migrated->units) unitIds.insert(unit.id);
+
+    for (auto it = legacyLimits.constBegin(); it != legacyLimits.constEnd(); ++it) {
+        const SeatDescriptor descriptor = describeSeat(it.key());
+        const int target = it.value().toInt(-1);
+        if (descriptor.baseId != it.key() || !it.value().isDouble()
+            || target < 0 || target > 64) {
+            if (error) *error = QStringLiteral("旧版战位容量无效: %1").arg(it.key());
+            return false;
+        }
+        const int existing = current.value(descriptor.baseId, 0);
+        if (target <= existing) continue;
+
+        const QString kind = descriptor.type == QLatin1String("commander")
+            ? QStringLiteral("commandpost")
+            : descriptor.type == QLatin1String("attack") ? QStringLiteral("attackuav")
+            : descriptor.type == QLatin1String("recon") ? QStringLiteral("reconuav")
+            : descriptor.type == QLatin1String("ground") ? QStringLiteral("groundscout")
+                                                           : QStringLiteral("jammeruav");
+        const auto templateUnit = std::find_if(
+            defaults.units.cbegin(), defaults.units.cend(),
+            [&descriptor, &kind](const ScenarioUnit& unit) {
+                return unit.side == descriptor.side && unit.kind == kind;
+            });
+        if (templateUnit == defaults.units.cend()) {
+            if (error) *error = QStringLiteral("缺少旧版战位迁移模板: %1").arg(it.key());
+            return false;
+        }
+
+        for (int index = existing + 1; index <= target; ++index) {
+            ScenarioUnit unit = *templateUnit;
+            QString unitId = index == 1 ? templateUnit->id
+                                        : QStringLiteral("%1_initial_%2").arg(it.key()).arg(index);
+            for (int suffix = 2; unitIds.contains(unitId); ++suffix) {
+                unitId = QStringLiteral("%1_initial_%2_%3")
+                             .arg(it.key()).arg(index).arg(suffix);
+            }
+            unit.id = unitId;
+            unit.vmfUrn = QStringLiteral("urn:gbr:wargame:unit:%1").arg(unit.id);
+            unit.side = descriptor.side;
+            if (index > 1) unit.callsign = QStringLiteral("%1 %2").arg(templateUnit->callsign).arg(index);
+            const double widthRatio = migrated->map.widthMeters / defaults.map.widthMeters;
+            const double heightRatio = migrated->map.heightMeters / defaults.map.heightMeters;
+            const double spacing = std::max(
+                100.0, std::min(migrated->map.widthMeters, migrated->map.heightMeters) * 0.025);
+            const double direction = descriptor.side == QLatin1String("red") ? 1.0 : -1.0;
+            unit.pos.x = qBound(0.0, templateUnit->pos.x * widthRatio
+                                        + direction * spacing * ((index - 1) % 4),
+                                migrated->map.widthMeters);
+            unit.pos.y = qBound(0.0, templateUnit->pos.y * heightRatio
+                                        + spacing * ((index - 1) / 4),
+                                migrated->map.heightMeters);
+            unit.schedule.clear();
+            migrated->units.push_back(unit);
+            unitIds.insert(unit.id);
+            *changed = true;
+        }
+        current[it.key()] = target;
+    }
+    return true;
+}
+
+QString validateNetworkScenario(const Scenario& scenario, bool requireCompleteRoster = true) {
     if (scenario.units.empty()) return QStringLiteral("场景至少需要一个单元");
     if (static_cast<qsizetype>(scenario.units.size()) > kMaxScenarioUnits) {
         return QStringLiteral("场景单元数量不能超过 %1").arg(kMaxScenarioUnits);
@@ -475,6 +584,17 @@ QString validateNetworkScenario(const Scenario& scenario) {
             }
         }
     }
+    const QHash<QString, int> limits = seatLimitsForScenario(scenario);
+    for (auto it = limits.cbegin(); it != limits.cend(); ++it) {
+        if (it.value() > 64) {
+            return QStringLiteral("同类初始单位不能超过 64 个: %1").arg(it.key());
+        }
+    }
+    if (requireCompleteRoster
+        && (limits.value(QStringLiteral("red_commander")) != 1
+            || limits.value(QStringLiteral("blue_commander")) != 1)) {
+        return QStringLiteral("红蓝双方必须各有且仅有一个指挥所");
+    }
     return {};
 }
 
@@ -495,12 +615,12 @@ GameServer::GameServer(QObject* parent)
                     env("COMMAND_LOG_PATH", QDir(m_dataDir).filePath(QStringLiteral("room-commands.jsonl"))), m_dataDir),
       m_roomId(env("GAME_ROOM_ID", QStringLiteral("main"))) {
     m_server.setMaxPendingConnections(kMaxPendingConnections);
-    m_seatLimits = {
-        {QStringLiteral("red_commander"), 1}, {QStringLiteral("red_attack"), 2},
-        {QStringLiteral("red_recon"), 1}, {QStringLiteral("red_ground"), 2},
-        {QStringLiteral("red_jammer"), 1}, {QStringLiteral("blue_commander"), 1},
-        {QStringLiteral("blue_attack"), 2}, {QStringLiteral("blue_recon"), 1},
-        {QStringLiteral("blue_ground"), 2}, {QStringLiteral("blue_jammer"), 1}};
+    m_seatLimits = seatLimitsForScenario(ScenarioIo::defaultScenario());
+    QString seatLimitError;
+    if (!m_authoritativeRoom.setSeatLimits(m_seatLimits, &seatLimitError)) {
+        m_recoveryError = seatLimitError;
+        return;
+    }
     QString templateError;
     if (!m_authoritativeRoom.setTemplateCatalog(
             AuthoritativeRoom::defaultTemplateCatalog(), &templateError)) {
@@ -629,8 +749,14 @@ GameServer::GameServer(QObject* parent)
         }
         if (!loaded) m_engine.loadDefaultScenario();
         m_runInitialScenario = m_engine.scenario();
-        persistScenario();
+        m_seatLimits = seatLimitsForScenario(m_runInitialScenario);
         QString checkpointError;
+        if (!m_authoritativeRoom.setSeatLimits(m_seatLimits, &checkpointError)) {
+            m_recoveryError = checkpointError;
+            qCritical() << "默认场景战位配置无效:" << checkpointError;
+            return;
+        }
+        persistScenario();
         if (!persistRoomState(&checkpointError)) {
             m_recoveryError = checkpointError;
             qCritical() << "无法创建初始检查点:" << checkpointError;
@@ -932,18 +1058,9 @@ void GameServer::refreshRoomControlForJoin(QWebSocket* socket, const QJsonObject
                                    static_cast<qint64>(configuredVersion)},
                                   {QStringLiteral("phase"), m_phase}});
             }
-            const QJsonObject configuredLimits = selected.value(QStringLiteral("seatLimits")).toObject();
-            if (!configuredLimits.isEmpty() && m_phase == QLatin1String("preparing")) {
-                QHash<QString, int> nextLimits;
-                for (auto it = configuredLimits.begin(); it != configuredLimits.end(); ++it) {
-                    if (!it.value().isDouble()) continue;
-                    const SeatDescriptor descriptor = describeSeat(it.key());
-                    if (descriptor.side != QLatin1String("red")
-                        && descriptor.side != QLatin1String("blue")) continue;
-                    nextLimits.insert(descriptor.baseId, qBound(0, it.value().toInt(), 64));
-                }
-                if (!nextLimits.isEmpty()) m_seatLimits = nextLimits;
-            }
+            // The configured initial scenario is the single roster source.
+            // seatLimits from the account service is a legacy control-plane
+            // mirror and must never replace the unit-derived capacity.
             QHash<QString, QJsonObject> nextParameters;
             const QJsonObject configuredParameters = selected.value(QStringLiteral("seatParameters")).toObject();
             for (auto it = configuredParameters.begin(); it != configuredParameters.end(); ++it) {
@@ -1051,7 +1168,7 @@ void GameServer::reconcileSeatConfiguration(bool resetReadinessForParameterChang
     }
     broadcastEvent(QJsonObject{
         {QStringLiteral("kind"), QStringLiteral("seatConfigurationChanged")},
-        {QStringLiteral("message"), QStringLiteral("网页管理员更新了战位容量或通信参数，已重新校验席位")}});
+        {QStringLiteral("message"), QStringLiteral("GIS 初始单位或通信参数已更新，战位已重新同步")}});
     broadcastSnapshots(true);
 }
 
@@ -1633,30 +1750,9 @@ void GameServer::syncRoomControl(QWebSocket* requester) {
                                static_cast<qint64>(configuredVersion)},
                               {QStringLiteral("phase"), m_phase}});
         }
-        const QJsonObject configuredLimits = selected.value(QStringLiteral("seatLimits")).toObject();
-        if (!configuredLimits.isEmpty()) {
-            QHash<QString, int> nextLimits;
-            for (auto it = configuredLimits.begin(); it != configuredLimits.end(); ++it) {
-                if (!it.value().isDouble()) continue;
-                const SeatDescriptor descriptor = describeSeat(it.key());
-                if (descriptor.side != QLatin1String("red")
-                    && descriptor.side != QLatin1String("blue")) continue;
-                const int limit = qBound(0, it.value().toInt(), 64);
-                // Room configuration uses a base key (red_attack). Accepting
-                // a suffixed key keeps older room JSON files readable while
-                // the runtime always expands it into concrete seat ids.
-                nextLimits.insert(descriptor.baseId, limit);
-            }
-            if (!nextLimits.isEmpty()) {
-                if (m_phase == QLatin1String("preparing")) {
-                    m_seatLimits = nextLimits;
-                } else if (nextLimits != m_seatLimits) {
-                    audit(QStringLiteral("security"),
-                          QJsonObject{{QStringLiteral("event"), QStringLiteral("activeSeatLimitChangeRejected")},
-                                      {QStringLiteral("phase"), m_phase}});
-                }
-            }
-        }
+        // Capacity follows the complete initial scenario. Ignore the legacy
+        // account-side mirror so periodic room refreshes cannot hide units or
+        // create seats that have no map object.
         QHash<QString, QJsonObject> nextParameters;
         const QJsonObject configuredParameters = selected.value(QStringLiteral("seatParameters")).toObject();
         for (auto it = configuredParameters.begin(); it != configuredParameters.end(); ++it) {
@@ -1794,7 +1890,6 @@ void GameServer::syncRoomControl(QWebSocket* requester) {
                 : AuthoritativeRoom::Result{false, QStringLiteral("ENGINE_NOT_READY"),
                                             m_authoritativeRoom.revision()};
             if (startResult.ok) {
-                m_runInitialScenario = m_engine.scenario();
                 m_phase = QStringLiteral("running");
                 m_engine.setRunning(true);
                 broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("matchStarted")},
@@ -3883,7 +3978,7 @@ void GameServer::handleRoomConfigCommand(QWebSocket* socket, const QJsonObject& 
         {QStringLiteral("name"), args.value(QStringLiteral("name"))},
         {QStringLiteral("description"), args.value(QStringLiteral("description"))},
         {QStringLiteral("scenario_id"), args.value(QStringLiteral("scenarioId"))},
-        {QStringLiteral("seat_limits"), args.value(QStringLiteral("seatLimits"))},
+        {QStringLiteral("seat_limits"), seatLimitsJson(m_seatLimits)},
         {QStringLiteral("seat_parameters"), args.value(QStringLiteral("seatParameters"))}};
     const QUrl url(m_authServiceUrl + QStringLiteral("/api/internal/rooms/%1/config")
                        .arg(QUrl::toPercentEncoding(m_roomId)));
@@ -3972,6 +4067,12 @@ void GameServer::handleRoomConfigCommand(QWebSocket* socket, const QJsonObject& 
                                          QStringLiteral("账号服务返回的战位配置不完整")));
             return;
         }
+        if (nextLimits != m_seatLimits) {
+            finish(CommandResult::reject(
+                QStringLiteral("ROOM_CONFIG_UPDATE_FAILED"),
+                QStringLiteral("战位容量必须与 GIS 初始场景单位保持一致")));
+            return;
+        }
         QHash<QString, QJsonObject> nextParameters;
         for (auto it = parametersObject.constBegin(); it != parametersObject.constEnd(); ++it) {
             const SeatDescriptor descriptor = describeSeat(it.key());
@@ -4007,7 +4108,6 @@ void GameServer::handleRoomConfigCommand(QWebSocket* socket, const QJsonObject& 
         m_scenarioId = room.value(QStringLiteral("scenarioId")).toString(m_scenarioId);
         m_configVersion = nextVersion;
         m_lastRoomUpdate = room.value(QStringLiteral("updatedAt")).toString(m_lastRoomUpdate);
-        m_seatLimits = nextLimits;
         m_seatParameters = nextParameters;
         reconcileSeatConfiguration(true);
         const CommandResult success = CommandResult::ok(QStringLiteral("房间配置已保存"));
@@ -4463,7 +4563,7 @@ void GameServer::handleScenarioUpsert(QWebSocket* socket, const QJsonObject& pay
         sendError(socket, QStringLiteral("SCENARIO_UPDATE_FAILED"), error);
         return;
     }
-    broadcastSnapshots(true);
+    publishInitialScenarioChange();
 }
 
 void GameServer::handleScenarioRemove(QWebSocket* socket, const QJsonObject& payload) {
@@ -4489,7 +4589,7 @@ void GameServer::handleScenarioRemove(QWebSocket* socket, const QJsonObject& pay
         sendError(socket, QStringLiteral("SCENARIO_UPDATE_FAILED"), error);
         return;
     }
-    broadcastSnapshots(true);
+    publishInitialScenarioChange();
 }
 
 void GameServer::handleScenarioReplace(QWebSocket* socket, const QJsonObject& payload) {
@@ -4511,6 +4611,17 @@ void GameServer::handleScenarioReplace(QWebSocket* socket, const QJsonObject& pa
         sendError(socket, QStringLiteral("SCENARIO_UPDATE_FAILED"), error);
         return;
     }
+    publishInitialScenarioChange();
+}
+
+void GameServer::publishInitialScenarioChange() {
+    syncAuthoritativeSeats();
+    for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
+        if (it->authenticated && !it->observer && it->roomId == m_roomId) {
+            sendSeatDirectory(it.key());
+        }
+    }
+    broadcastRoomDirectory();
     broadcastSnapshots(true);
 }
 
@@ -4529,7 +4640,7 @@ bool GameServer::applyInitialScenarioState(const Scenario& initialScenario,
         return false;
     }
     if (!runtimeScenario.units.empty()) {
-        const QString runtimeValidation = validateNetworkScenario(runtimeScenario);
+        const QString runtimeValidation = validateNetworkScenario(runtimeScenario, false);
         if (!runtimeValidation.isEmpty()) {
             if (error) *error = runtimeValidation;
             return false;
@@ -4551,7 +4662,14 @@ bool GameServer::applyInitialScenarioState(const Scenario& initialScenario,
         if (error) *error = m_engine.lastError();
         return false;
     }
+    const QHash<QString, int> scenarioSeatLimits = seatLimitsForScenario(initialScenario);
+    QString seatLimitError;
+    if (!m_authoritativeRoom.setSeatLimits(scenarioSeatLimits, &seatLimitError)) {
+        if (error) *error = seatLimitError;
+        return false;
+    }
     m_runInitialScenario = initialScenario;
+    m_seatLimits = scenarioSeatLimits;
     m_scenarioRevision = scenarioRevision;
     resetReadiness();
     return true;
@@ -4642,7 +4760,9 @@ bool GameServer::replaceInitialScenario(const Scenario& scenario, QString* error
 
 bool GameServer::persistScenario(QString* error) {
     QString localError;
-    const bool saved = ScenarioIo::saveToFile(m_engine.scenario(), m_scenarioPath, &localError);
+    const Scenario& initialScenario = m_runInitialScenario.units.empty()
+        ? m_engine.scenario() : m_runInitialScenario;
+    const bool saved = ScenarioIo::saveToFile(initialScenario, m_scenarioPath, &localError);
     if (!saved) qWarning() << "场景持久化失败" << localError;
     if (error) *error = localError;
     return saved;
@@ -4813,7 +4933,7 @@ bool GameServer::restoreRoomState(QString* error) {
     const bool emptyPreparingRuntime = checkpoint.phase == QLatin1String("preparing")
         && checkpoint.scenario.units.empty() && checkpoint.runtimeUnits.isEmpty();
     const QString scenarioError = emptyPreparingRuntime
-        ? QString() : validateNetworkScenario(checkpoint.scenario);
+        ? QString() : validateNetworkScenario(checkpoint.scenario, false);
     if (!scenarioError.isEmpty()) {
         if (error) *error = QStringLiteral("检查点场景无效: %1").arg(scenarioError);
         return false;
@@ -4850,6 +4970,31 @@ bool GameServer::restoreRoomState(QString* error) {
                                &m_vmfMessageIdOrder);
     }
     m_runInitialScenario = checkpoint.runInitialScenario;
+    if (m_runInitialScenario.units.empty()) m_runInitialScenario = checkpoint.scenario;
+    Scenario migratedInitialScenario;
+    bool legacyRosterMigrated = false;
+    QString migrationError;
+    if (!migrateLegacyInitialRoster(m_runInitialScenario, checkpoint.seatLimits,
+                                    &migratedInitialScenario, &legacyRosterMigrated,
+                                    &migrationError)) {
+        if (error) *error = migrationError;
+        return false;
+    }
+    if (legacyRosterMigrated) {
+        m_runInitialScenario = migratedInitialScenario;
+        qWarning() << "已将旧版战位容量迁移为 GIS 初始单位";
+    }
+    const QString initialScenarioError = validateNetworkScenario(m_runInitialScenario);
+    if (!initialScenarioError.isEmpty()) {
+        if (error) *error = QStringLiteral("检查点初始场景无效: %1").arg(initialScenarioError);
+        return false;
+    }
+    m_seatLimits = seatLimitsForScenario(m_runInitialScenario);
+    QString seatLimitError;
+    if (!m_authoritativeRoom.setSeatLimits(m_seatLimits, &seatLimitError)) {
+        if (error) *error = seatLimitError;
+        return false;
+    }
     m_phase = checkpoint.phase;
     if (!checkpoint.roomName.isEmpty()) m_roomName = checkpoint.roomName;
     m_roomDescription = checkpoint.roomDescription;
@@ -4857,24 +5002,6 @@ bool GameServer::restoreRoomState(QString* error) {
     if (!checkpoint.roomStatus.isEmpty()) m_roomStatus = checkpoint.roomStatus;
     m_configVersion = checkpoint.configVersion > 0 ? checkpoint.configVersion : 1;
     m_lastRoomUpdate = checkpoint.lastRoomUpdate;
-    if (!checkpoint.seatLimits.isEmpty()) {
-        QHash<QString, int> restoredLimits;
-        for (auto it = checkpoint.seatLimits.constBegin(); it != checkpoint.seatLimits.constEnd(); ++it) {
-            const SeatDescriptor descriptor = describeSeat(it.key());
-            if (descriptor.baseId != it.key() || !it.value().isDouble()) {
-                if (error) *error = QStringLiteral("检查点战位容量无效");
-                return false;
-            }
-            const int limit = it.value().toInt(-1);
-            if (limit < 0 || limit > 64
-                || (descriptor.type == QLatin1String("commander") && limit != 1)) {
-                if (error) *error = QStringLiteral("检查点战位容量超出范围");
-                return false;
-            }
-            restoredLimits.insert(it.key(), limit);
-        }
-        if (restoredLimits.size() == 10) m_seatLimits = restoredLimits;
-    }
     if (!checkpoint.seatParameters.isEmpty()) {
         QHash<QString, QJsonObject> restoredParameters;
         for (auto it = checkpoint.seatParameters.constBegin(); it != checkpoint.seatParameters.constEnd(); ++it) {
@@ -5174,7 +5301,6 @@ bool GameServer::applyDurableEvent(const QString& kind, const QJsonObject& paylo
     if (kind == QLatin1String("control")) {
         const QString action = payload.value(QStringLiteral("action")).toString();
         if (action == QLatin1String("start")) {
-            m_runInitialScenario = m_engine.scenario();
             m_phase = QStringLiteral("running");
             m_engine.setRunning(true);
         } else if (action == QLatin1String("pause")) {
@@ -5352,7 +5478,7 @@ bool GameServer::applyDeployedScenario(QString* error) {
             return false;
         }
     }
-    const QString validationError = validateNetworkScenario(scenario);
+    const QString validationError = validateNetworkScenario(scenario, false);
     if (!validationError.isEmpty() || !m_engine.setScenario(scenario)) {
         if (error) *error = validationError.isEmpty() ? m_engine.lastError() : validationError;
         return false;
@@ -5486,11 +5612,16 @@ bool GameServer::restoreRoomStateBackup(const RoomStateBackup& backup, QString* 
     m_roomName = backup.roomName;
     m_roomDescription = backup.roomDescription;
     m_scenarioId = backup.scenarioId;
-    m_seatLimits = backup.seatLimits;
     m_seatParameters = backup.seatParameters;
     m_configVersion = backup.configVersion;
     m_lastRoomUpdate = backup.lastRoomUpdate;
     m_runInitialScenario = backup.runInitialScenario;
+    m_seatLimits = seatLimitsForScenario(
+        m_runInitialScenario.units.empty() ? backup.scenario : m_runInitialScenario);
+    if (!m_authoritativeRoom.setSeatLimits(m_seatLimits, &localError)) {
+        if (error) *error = localError;
+        return false;
+    }
     m_redReady = backup.redReady;
     m_blueReady = backup.blueReady;
     m_mapMarks = backup.mapMarks;
@@ -5801,7 +5932,6 @@ void GameServer::processRoomOperation(const QJsonObject& operation) {
             rollback(started.code);
             return;
         }
-        m_runInitialScenario = m_engine.scenario();
         m_phase = QStringLiteral("running");
         m_roomStatus = QStringLiteral("running");
         m_engine.setRunning(true);
@@ -7214,6 +7344,7 @@ void GameServer::removeParticipantMarksForUser(qint64 userId, const QString& leg
 
 QJsonObject GameServer::snapshotFor(const ClientSession& session, quint64 projectedRevision) const {
     const quint64 revision = projectedRevision > 0 ? projectedRevision : m_stateRevision;
+    const QString role = normalizedRole(session);
     QJsonObject projectedRoomState = roomState();
     projectedRoomState[QStringLiteral("stateRevision")] = static_cast<qint64>(revision);
     if (session.observer) {
@@ -7233,15 +7364,20 @@ QJsonObject GameServer::snapshotFor(const ClientSession& session, quint64 projec
         }
     }
     QJsonObject snapshot = StateProjector::snapshotFor(
-        m_engine, normalizedRole(session), revision, projectedRoomState,
+        m_engine, role, revision, projectedRoomState,
         m_sharedIntel.value(session.seatId), m_authoritativeRoom.seat(session.seatId).unitId,
         observerTrajectoriesFor(session));
+    if (role == QLatin1String("room_admin") && m_phase == QLatin1String("preparing")) {
+        const Scenario& configured = m_runInitialScenario.units.empty()
+            ? m_engine.scenario() : m_runInitialScenario;
+        snapshot[QStringLiteral("scenario")] = ScenarioIo::toJson(configured);
+    }
     if (m_authoritativeRoom.runtimeUnits().isEmpty()) {
         snapshot[QStringLiteral("units")] = QJsonArray{};
         // Before deployment there is no runtime roster, but the room admin
         // still needs the initial scenario to edit it. Participant clients
         // receive an empty scenario until they claim a seat.
-        if (normalizedRole(session) != QLatin1String("room_admin")) {
+        if (role != QLatin1String("room_admin")) {
             QJsonObject scenario = snapshot.value(QStringLiteral("scenario")).toObject();
             scenario[QStringLiteral("units")] = QJsonArray{};
             snapshot[QStringLiteral("scenario")] = scenario;

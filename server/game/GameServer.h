@@ -221,6 +221,7 @@ private:
                                    quint64 scenarioRevision,
                                    QString* error = nullptr);
     bool replaceInitialScenario(const Scenario& scenario, QString* error = nullptr);
+    void publishInitialScenarioChange();
     void handleFastDdsEnvelope(const QString& topic, const QJsonObject& payload);
     void runAiDecision();
     void applyAiConfiguration(const QJsonObject& config);

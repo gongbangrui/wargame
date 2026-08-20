@@ -179,10 +179,10 @@ ROLES = {"player", "room_admin"}
 SEAT_TYPES = {"commander", "attack", "recon", "ground", "jammer"}
 SEAT_BASE_KEYS = {f"{side}_{seat_type}" for side in ("red", "blue") for seat_type in SEAT_TYPES}
 DEFAULT_SEAT_LIMITS = {
-    "red_commander": 1, "red_attack": 2, "red_recon": 1,
-    "red_ground": 2, "red_jammer": 1,
-    "blue_commander": 1, "blue_attack": 2, "blue_recon": 1,
-    "blue_ground": 2, "blue_jammer": 1,
+    "red_commander": 1, "red_attack": 1, "red_recon": 1,
+    "red_ground": 1, "red_jammer": 1,
+    "blue_commander": 1, "blue_attack": 1, "blue_recon": 1,
+    "blue_ground": 1, "blue_jammer": 1,
 }
 DEFAULT_OLLAMA_BASE_URL: Final = "http://host.docker.internal:11434"
 DEFAULT_OLLAMA_MODEL: Final = "auto"
@@ -2228,6 +2228,8 @@ def kick_room_occupant(
 @app.post("/api/admin/rooms", status_code=201)
 def create_room(body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict:
     now = iso_time(utc_now())
+    compatibility_limits = dict(DEFAULT_SEAT_LIMITS)
+    compatibility_limits.update(body.seat_limits)
     if body.intel_archive_after_sec <= body.intel_stale_after_sec:
         raise HTTPException(status_code=422, detail="情报归档阈值必须大于失联阈值")
     try:
@@ -2252,7 +2254,7 @@ def create_room(body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict
                 "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,intel_stale_after_sec,intel_archive_after_sec,status,enabled,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (body.room_id, body.name, body.description, body.scenario_id,
-                 json.dumps(body.seat_limits, ensure_ascii=False),
+                 json.dumps(compatibility_limits, ensure_ascii=False),
                  json.dumps(body.seat_parameters, ensure_ascii=False), body.mode,
                  body.ai_difficulty, ai_provider, ai_model, "", 1,
                  body.intel_stale_after_sec, body.intel_archive_after_sec, "stopped",

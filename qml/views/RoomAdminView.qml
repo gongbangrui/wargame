@@ -25,7 +25,6 @@ Item {
     property color orange: AppContext.warning
     property color danger: AppContext.danger
     property color success: AppContext.success
-    property var draftLimits: ({})
     property var draftParameters: ({})
     property bool compactLayout: width < 860
     property bool narrowLayout: width < 560
@@ -57,7 +56,8 @@ Item {
     function seatSide(key) { return String(key).split("_")[0] === "red" ? "red" : "blue" }
 
     function limitFor(key) {
-        var value = Number(root.draftLimits ? root.draftLimits[key] : 0)
+        var limits = root.controller ? root.controller.onlineSeatLimits : ({})
+        var value = Number(limits ? limits[key] : 0)
         return isFinite(value) ? Math.max(0, Math.min(64, Math.round(value))) : 0
     }
 
@@ -69,16 +69,6 @@ Item {
     function parameterText(key, name) {
         var value = root.parameterFor(key)[name]
         return value === undefined || value === null ? "" : String(value)
-    }
-
-    function setLimit(key, value) {
-        var next = JSON.parse(JSON.stringify(root.draftLimits || ({})))
-        next[key] = Math.max(0, Math.min(64, Math.round(Number(value) || 0)))
-        root.draftLimits = next
-        if (!root.loadingDraft) {
-            root.dirty = true
-            root.statusKind = "dirty"
-        }
     }
 
     function setParameter(key, name, text) {
@@ -99,22 +89,9 @@ Item {
         }
     }
 
-    function defaultLimits() {
-        return ({ red_commander: 1, red_attack: 2, red_recon: 1, red_ground: 2,
-            red_jammer: 1, blue_commander: 1, blue_attack: 2, blue_recon: 1,
-            blue_ground: 2, blue_jammer: 1 })
-    }
-
     function loadDraft() {
         if (!root.controller) return
         root.loadingDraft = true
-        var limits = defaultLimits()
-        var remoteLimits = root.controller.onlineSeatLimits || ({})
-        for (var i = 0; i < root.seatKeys.length; ++i) {
-            var key = root.seatKeys[i]
-            if (remoteLimits[key] !== undefined) limits[key] = remoteLimits[key]
-        }
-        root.draftLimits = JSON.parse(JSON.stringify(limits))
         root.draftParameters = JSON.parse(JSON.stringify(root.controller.onlineSeatParameters || ({})))
         roomNameField.text = root.controller.roomName || ""
         roomDescriptionField.text = root.controller.roomDescription || ""
@@ -226,8 +203,6 @@ Item {
         }
         var parameters = JSON.parse(JSON.stringify(root.draftParameters || ({})))
         if (!root.validateParameterDraft(parameters)) return
-        var limits = ({})
-        for (var i = 0; i < root.seatKeys.length; ++i) limits[root.seatKeys[i]] = root.limitFor(root.seatKeys[i])
         root.statusText = "正在保存配置..."
         root.statusKind = "saving"
         root.configSaving = true
@@ -235,7 +210,6 @@ Item {
             name: name,
             description: roomDescriptionField.text,
             scenarioId: scenarioIdField.text.trim() || "default",
-            seatLimits: limits,
             seatParameters: parameters,
             expectedConfigVersion: Math.max(1, Number(root.controller.configVersion) || 1)
         })
@@ -439,7 +413,6 @@ Item {
             ColumnLayout {
                 width: configDialog.width - 28
                 spacing: 12
-                Text { Layout.fillWidth: true; text: "准备阶段保存后立即同步。容量数字与操作按钮分离，避免误触。"; color: root.dim; font.pixelSize: 10; wrapMode: Text.WordWrap }
                 GridLayout {
                     Layout.fillWidth: true; columns: root.narrowLayout ? 1 : 2; columnSpacing: 10; rowSpacing: 8
                     ColumnLayout { Layout.fillWidth: true; Text { text: "房间名称"; color: root.dim; font.pixelSize: 9 }
@@ -476,7 +449,8 @@ Item {
                         }
                     }
                 }
-                SectionTitle { text: "战位容量" }
+                SectionTitle { text: "初始单位与战位" }
+                Text { Layout.fillWidth: true; text: "每个 GIS 初始单位对应一个可用战位"; color: root.dim; font.pixelSize: 9 }
                 GridLayout {
                     Layout.fillWidth: true; columns: root.narrowLayout ? 1 : 2; columnSpacing: 8; rowSpacing: 7
                     Repeater {
@@ -491,25 +465,10 @@ Item {
                                     Text { text: root.occupiedFor(limitCard.modelData) + " 个已占用"; color: root.occupiedFor(limitCard.modelData) ? root.orange : root.dim; font.pixelSize: 8 }
                                 }
                                 Rectangle {
-                                    Layout.preferredWidth: 104; Layout.preferredHeight: 30; color: root.page; border.color: root.line; radius: 4
-                                    RowLayout { anchors.fill: parent; spacing: 0
-                                        ToolButton {
-                                            id: minusButton
-                                            Layout.preferredWidth: 30; Layout.fillHeight: true
-                                            enabled: root.limitFor(limitCard.modelData) > 0 && !(limitCard.modelData.indexOf("commander") >= 0 && root.limitFor(limitCard.modelData) === 1)
-                                            onClicked: root.setLimit(limitCard.modelData, root.limitFor(limitCard.modelData) - 1)
-                                            contentItem: Icon { name: "minus"; iconColor: minusButton.enabled ? root.ink : root.dim; iconSize: 13 }
-                                            background: Rectangle { color: minusButton.hovered ? root.panel : "transparent" }
-                                        }
-                                        Text { Layout.fillWidth: true; text: root.limitFor(limitCard.modelData); color: root.ink; font.pixelSize: 12; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                                        ToolButton {
-                                            id: plusButton
-                                            Layout.preferredWidth: 30; Layout.fillHeight: true
-                                            enabled: root.limitFor(limitCard.modelData) < 64 && !(limitCard.modelData.indexOf("commander") >= 0)
-                                            onClicked: root.setLimit(limitCard.modelData, root.limitFor(limitCard.modelData) + 1)
-                                            contentItem: Icon { name: "plus"; iconColor: plusButton.enabled ? root.ink : root.dim; iconSize: 13 }
-                                            background: Rectangle { color: plusButton.hovered ? root.panel : "transparent" }
-                                        }
+                                    Layout.preferredWidth: 82; Layout.preferredHeight: 30; color: root.page; border.color: root.line; radius: 4
+                                    RowLayout { anchors.centerIn: parent; spacing: 6
+                                        Icon { name: "unit"; iconColor: root.cyan; iconSize: 13 }
+                                        Text { text: root.limitFor(limitCard.modelData); color: root.ink; font.pixelSize: 13; font.bold: true }
                                     }
                                 }
                             }

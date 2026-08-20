@@ -1951,6 +1951,9 @@ void SimulationController::updateOnlineRoomConfig(const QVariantMap& config) {
         return;
     }
     QVariantMap args = config;
+    // Seat capacity is derived by the server from the complete GIS scenario.
+    // Drop the legacy field so room metadata cannot become a second source.
+    args.remove(QStringLiteral("seatLimits"));
     if (!args.contains(QStringLiteral("expectedConfigVersion"))) {
         args.insert(QStringLiteral("expectedConfigVersion"), m_configVersion);
     }

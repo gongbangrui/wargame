@@ -4,11 +4,9 @@ const roomOperationTimeoutMs = 25000;
 const state = { token: sessionStorage.getItem("adminToken") || "", users: [], rooms: [], roomsLoaded: false, deleteId: null, roomDeleteId: null, roomOperations: {}, autoPausingRooms: new Set(), autoPausedOperations: {}, roomKickRequests: new Set(), roomStatusFilter: "all", openRoomMenuId: "", roomSaving: false, overview: null, events: [], terminalUnlocked: false, terminalSocket: null, monitorTimer: null, monitorRequestGeneration: 0, roomTimer: null, roomRefreshInFlight: false, occupantsRoomId: "", occupants: [], occupantsTimer: null, activeModal: null, modalReturnFocus: null, activePage: "users", aiConfigDirty: false, aiConfigSaving: false, ollamaModels: { state: "idle", baseUrl: "", modelNames: [], checkedAt: "", error: "", request: null, generation: 0 }, roomModalRoom: null, aiHistory: { status: "all", items: [], nextBefore: null, hasMore: false, listState: "idle", listError: "", selectedId: "", detail: null, detailState: "empty", detailError: "", activeTab: "prompts", requestGeneration: 0, detailGeneration: 0, pageSize: 24 }, uiScale: Number.isFinite(storedUiScale) ? Math.max(0.85, Math.min(1.15, storedUiScale)) : 1 };
 const $ = (id) => document.getElementById(id);
 const seatDefinitions = [
-  ["red_commander", "红方指挥官", true], ["red_attack", "红方攻击机", false], ["red_recon", "红方侦察机", false], ["red_ground", "红方地面单位", false], ["red_jammer", "红方干扰机", false],
-  ["blue_commander", "蓝方指挥官", true], ["blue_attack", "蓝方攻击机", false], ["blue_recon", "蓝方侦察机", false], ["blue_ground", "蓝方地面单位", false], ["blue_jammer", "蓝方干扰机", false],
+  ["red_commander", "红方指挥官"], ["red_attack", "红方攻击机"], ["red_recon", "红方侦察机"], ["red_ground", "红方地面单位"], ["red_jammer", "红方干扰机"],
+  ["blue_commander", "蓝方指挥官"], ["blue_attack", "蓝方攻击机"], ["blue_recon", "蓝方侦察机"], ["blue_ground", "蓝方地面单位"], ["blue_jammer", "蓝方干扰机"],
 ];
-const defaultSeatLimits = { red_commander: 1, red_attack: 2, red_recon: 1, red_ground: 2, red_jammer: 1,
-  blue_commander: 1, blue_attack: 2, blue_recon: 1, blue_ground: 2, blue_jammer: 1 };
 
 function numberInput(value, min = 0, max = 1000000, disabled = false) {
   const input = document.createElement("input");
@@ -19,16 +17,11 @@ function numberInput(value, min = 0, max = 1000000, disabled = false) {
 }
 
 function renderSeatEditors(room = null) {
-  const limits = { ...defaultSeatLimits, ...(room?.seatLimits || {}) };
   const parameters = room?.seatParameters || {};
-  const limitEditor = $("seatLimitEditor");
   const parameterEditor = $("seatParameterEditor");
-  if (!limitEditor || !parameterEditor) return;
-  limitEditor.replaceChildren(); parameterEditor.replaceChildren();
-  for (const [key, label, commander] of seatDefinitions) {
-    const limitRow = document.createElement("div"); limitRow.className = "seat-config-row capacity"; limitRow.dataset.seatKey = key;
-    const title = document.createElement("strong"); title.textContent = label; limitRow.appendChild(title);
-    const limit = numberInput(commander ? 1 : limits[key], 0, 64, commander); limit.className = "seat-limit"; limitRow.appendChild(limit); limitEditor.appendChild(limitRow);
+  if (!parameterEditor) return;
+  parameterEditor.replaceChildren();
+  for (const [key, label] of seatDefinitions) {
 
     const parameterRow = document.createElement("div"); parameterRow.className = "seat-config-row"; parameterRow.dataset.seatKey = key;
     const parameterTitle = document.createElement("strong"); parameterTitle.textContent = label; parameterRow.appendChild(parameterTitle);
@@ -37,16 +30,6 @@ function renderSeatEditors(room = null) {
     const detect = numberInput(base.detectRange, 0, 1000000); detect.className = "seat-detect"; detect.placeholder = "侦察"; parameterRow.appendChild(detect);
     parameterEditor.appendChild(parameterRow);
   }
-}
-
-function collectSeatLimits() {
-  const result = {};
-  document.querySelectorAll("#seatLimitEditor .seat-config-row").forEach((row) => {
-    const input = row.querySelector(".seat-limit");
-    const value = Number(input.value);
-    if (Number.isFinite(value) && value >= 0) result[row.dataset.seatKey] = Math.min(64, Math.trunc(value));
-  });
-  return result;
 }
 
 function collectSeatParameters() {
@@ -364,14 +347,6 @@ function appendHistoryLabelValue(container, label, value, className = "") {
   return wrapper;
 }
 
-function roomCapacity(room) {
-  const limits = Object.entries(room.seatLimits || {});
-  const total = limits.reduce((sum, [, value]) => sum + Number(value || 0), 0);
-  const red = limits.filter(([key]) => key.startsWith("red_")).reduce((sum, [, value]) => sum + Number(value || 0), 0);
-  const blue = limits.filter(([key]) => key.startsWith("blue_")).reduce((sum, [, value]) => sum + Number(value || 0), 0);
-  return { total, detail: limits.length ? `红 ${red} · 蓝 ${blue}` : "默认战位" };
-}
-
 function roomOperation(room) {
   const local = state.roomOperations[room.roomId];
   const remote = room.operation || null;
@@ -478,7 +453,7 @@ function renderRooms() {
         <div class="room-status-main"><span class="badge room-status-badge"></span><span class="room-enabled"></span></div>
       </header>
       <div class="room-card-body">
-        <div class="room-fact"><span>战位</span><strong class="capacity-total"></strong><small class="capacity-detail"></small></div>
+        <div class="room-fact"><span>初始阵容</span><strong>GIS 场景</strong><small>由初始单位定义</small></div>
         <div class="room-fact"><span>模式</span><strong class="room-mode"></strong><small class="room-operation"></small></div>
         <div class="room-fact"><span>就绪</span><strong class="room-readiness"></strong><small class="room-readiness-detail"></small></div>
       </div>
@@ -522,9 +497,6 @@ function renderRooms() {
     }
     if (!operation) setTextWithTitle(card.querySelector(".room-operation"), `配置版本 ${room.configVersion || 1}`);
     setTextWithTitle(card.querySelector(".room-readiness-detail"), room.readyForStart ? "可开始推演" : "等待部署和就绪");
-    const capacity = roomCapacity(room);
-    setTextWithTitle(card.querySelector(".capacity-total"), `${capacity.total} 席`);
-    setTextWithTitle(card.querySelector(".capacity-detail"), capacity.detail);
     const menu = card.querySelector(".room-menu");
     if (state.openRoomMenuId === room.roomId) menu.open = true;
     menu.addEventListener("toggle", () => {
@@ -1432,10 +1404,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.roomSaving = true;
     $("roomSave").disabled = true;
     try {
-      const seatLimits = collectSeatLimits();
       const seatParameters = collectSeatParameters();
       const roomId = $("roomId").value || $("roomKey").value.trim();
-      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_limits: seatLimits, seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value, ai_provider: $("roomAiProvider").value, ai_model: $("roomAiModel").value.trim(), intel_stale_after_sec: Number($("roomIntelStale").value), intel_archive_after_sec: Number($("roomIntelArchive").value) };
+      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value, ai_provider: $("roomAiProvider").value, ai_model: $("roomAiModel").value.trim(), intel_stale_after_sec: Number($("roomIntelStale").value), intel_archive_after_sec: Number($("roomIntelArchive").value) };
       await api(roomId && $("roomId").value ? `/api/admin/rooms/${encodeURIComponent(roomId)}` : "/api/admin/rooms", { method: roomId && $("roomId").value ? "PUT" : "POST", body: JSON.stringify(body) });
       closeRoomModal(); await loadRooms(); toast("房间已保存");
     } catch (error) { toast(error.message || "房间配置 JSON 无效", true); state.roomSaving = false; $("roomSave").disabled = false; }
