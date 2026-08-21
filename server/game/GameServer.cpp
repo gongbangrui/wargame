@@ -2894,7 +2894,7 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
         }
         return;
     }
-    const QJsonObject before = m_authoritativeRoom.toJson();
+    const RoomStateBackup backup = captureRoomState();
     const AuthoritativeRoom::Result claimed = m_authoritativeRoom.claimSeat(
         session.userId, session.username, seatId, templateId);
     if (!claimed.ok) {
@@ -2904,7 +2904,7 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
     const AuthoritativeRoom::Result initialDeployment =
         m_authoritativeRoom.deployInitial(seatId, initialPosition);
     if (!initialDeployment.ok) {
-        m_authoritativeRoom.restore(before);
+        restoreRoomStateBackup(backup);
         sendError(socket, initialDeployment.code, QStringLiteral("初始部署位置无效"));
         return;
     }
@@ -2935,15 +2935,13 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
     syncAuthoritativeSeats();
     QString deploymentError;
     if (!applyDeployedScenario(&deploymentError)) {
-        m_authoritativeRoom.restore(before);
-        syncAuthoritativeSeats();
+        restoreRoomStateBackup(backup);
         sendError(socket, QStringLiteral("INITIAL_DEPLOYMENT_FAILED"), deploymentError);
         return;
     }
     QString claimPersistenceError;
     if (!persistRoomState(&claimPersistenceError)) {
-        m_authoritativeRoom.restore(before);
-        syncAuthoritativeSeats();
+        restoreRoomStateBackup(backup);
         sendError(socket, QStringLiteral("PERSISTENCE_FAILED"), claimPersistenceError);
         return;
     }

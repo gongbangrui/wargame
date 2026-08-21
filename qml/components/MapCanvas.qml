@@ -147,6 +147,25 @@ Item {
             return root.scenarioUnits
         return root.controller ? root.controller.units : []
     }
+    function unitPosition(source) {
+        var position = source.position
+        var hasTopLevelCoordinates = source.x !== undefined && source.y !== undefined
+        var hasArrayCoordinates = position && typeof position.length === "number"
+                                   && position.length >= 2
+        var hasObjectCoordinates = position && position.x !== undefined
+                                   && position.y !== undefined
+        var x = hasTopLevelCoordinates ? Number(source.x)
+              : hasArrayCoordinates ? Number(position[0])
+              : hasObjectCoordinates ? Number(position.x) : NaN
+        var y = hasTopLevelCoordinates ? Number(source.y)
+              : hasArrayCoordinates ? Number(position[1])
+              : hasObjectCoordinates ? Number(position.y) : NaN
+        if (!isFinite(x) || !isFinite(y)) return null
+        var alt = hasTopLevelCoordinates ? Number(source.alt || 0)
+                : hasArrayCoordinates && position.length >= 3 ? Number(position[2])
+                : hasObjectCoordinates ? Number(position.alt || 0) : 0
+        return [x, y, isFinite(alt) ? alt : 0]
+    }
     function canvasUnits() {
         var sourceList = root.unitListSource()
         if (!sourceList || typeof sourceList.length !== "number") return []
@@ -154,10 +173,9 @@ Item {
         for (var i = 0; i < sourceList.length; ++i) {
             var source = sourceList[i] || ({})
             var unit = JSON.parse(JSON.stringify(source))
-            var x = Number(source.x)
-            var y = Number(source.y)
-            if (!isFinite(x) || !isFinite(y)) continue
-            unit.position = [x, y, Number(source.alt || 0)]
+            var position = root.unitPosition(source)
+            if (!position) continue
+            unit.position = position
             unit.alive = source.alive !== false
             unit.hp = source.hp === undefined ? Number(source.maxHp || 100) : source.hp
             unit.maxHp = source.maxHp === undefined ? 100 : source.maxHp

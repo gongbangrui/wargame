@@ -1236,6 +1236,46 @@ TEST(GameServerRoomAdminTest, UsesInitialSeatPositionAndConfiguredRangesOnFirstD
     EXPECT_DOUBLE_EQ(unit->detectRange(), 4321.0);
 }
 
+TEST(GameServerRoomAdminTest, FailedSeatClaimPersistenceRestoresRuntimeAndSession) {
+    int argc = 1;
+    char applicationName[] = "room_admin_claim_rollback_tests";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) {
+        application = std::make_unique<QCoreApplication>(argc, argv);
+    }
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    const QStringList originalUnitIds = server.m_engine.unitIds();
+    const quint64 originalScenarioRevision = server.m_scenarioRevision;
+
+    const QString checkpointBlocker = temporary.filePath(QStringLiteral("checkpoint-blocker"));
+    ASSERT_TRUE(QDir().mkpath(checkpointBlocker));
+    server.m_persistence = RoomPersistence(
+        checkpointBlocker, temporary.filePath(QStringLiteral("events.jsonl")), temporary.path());
+
+    QWebSocket socket;
+    auto& session = server.m_clients[&socket];
+    session.authenticated = true;
+    session.userId = 41;
+    session.username = QStringLiteral("red-commander");
+    session.accountRole = QStringLiteral("player");
+    session.roomId = server.m_roomId;
+
+    server.handleClaimSeat(
+        &socket, QJsonObject{{QStringLiteral("seatId"), QStringLiteral("red_commander")},
+                             {QStringLiteral("templateId"), QStringLiteral("commandpost")}});
+
+    EXPECT_FALSE(server.m_authoritativeRoom.hasUser(41));
+    EXPECT_TRUE(session.seatId.isEmpty());
+    EXPECT_EQ(server.m_engine.unitIds(), originalUnitIds);
+    EXPECT_EQ(server.m_scenarioRevision, originalScenarioRevision);
+}
+
 TEST(AuthoritativeRoomTest, ResetAndRedeployHaveDistinctAtomicSemantics) {
     auto room = configuredRoom();
     claimCommanders(room);
