@@ -97,7 +97,8 @@ cmake --build build/debug --target all_qmllint
 发布时使用 `WARGAME_VERSION=2.0.0 ./tools/build-release.sh --clean` 生成统一的桌面客户端、
 根项目服务端和 Qt 6.4 独立服务端身份；服务器一键包随后由
 `WARGAME_VERSION=2.0.0 DIST_DIR=dist ./deploy/package-one-click.sh` 生成。包内身份文件会在
-全新主机安装前校验 v7/schema 7 和源码摘要，避免客户端与两个服务端错配。
+全新主机安装前校验 v8/schema 8 和源码摘要，避免客户端与两个服务端错配；普通房间仍可按
+协商结果兼容 v7/v6/v4，严格 VMF 房间只接受 v8/schema 8。
 
 ### 下载发布包部署
 

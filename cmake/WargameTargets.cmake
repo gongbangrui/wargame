@@ -64,6 +64,8 @@ function(wargame_add_domain_library target source_root)
         ${source_root}/src/units/GroundScout.cpp
         ${source_root}/src/units/JammerUAV.h
         ${source_root}/src/units/JammerUAV.cpp
+        ${source_root}/src/units/GroundTarget.h
+        ${source_root}/src/units/GroundTarget.cpp
     )
     target_link_libraries(${target} PUBLIC Qt6::Core wargame_vmf)
     target_include_directories(${target} PUBLIC ${source_root}/src)

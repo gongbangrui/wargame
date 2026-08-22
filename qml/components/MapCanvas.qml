@@ -180,7 +180,8 @@ Item {
             unit.hp = source.hp === undefined ? Number(source.maxHp || 100) : source.hp
             unit.maxHp = source.maxHp === undefined ? 100 : source.maxHp
             unit.movable = source.movable === undefined
-                ? source.kind !== "commandpost" : source.movable
+                ? source.kind !== "commandpost" && source.kind !== "groundtarget"
+                : source.movable
             output.push(unit)
         }
         return output
@@ -1664,7 +1665,7 @@ Item {
                         if (!root.isVisible(gfu)) continue
                         if (!gfu.alive) continue
                         if (gfu.side !== root.sideFilter) continue
-                        if (gfu.kind === "commandpost") continue
+                        if (!gfu.movable) continue
                         var gfp = root.toPixel(gfu.position[0], gfu.position[1])
                         var gfdx = mouse.x - gfp.x, gfdy = mouse.y - gfp.y
                         if (gfdx*gfdx + gfdy*gfdy < root.unitHitRadiusPx(gfu) * root.unitHitRadiusPx(gfu)) {

@@ -104,7 +104,7 @@ Rectangle {
                 Text {
                     text: {
                         var k = root.snap.kind || ""
-                        var kinds = { "commandpost": "\u6307\u6325\u6240", "reconuav": "\u4fa6\u5bdf\u65e0\u4eba\u673a", "attackuav": "\u653b\u51fb\u65e0\u4eba\u673a", "groundscout": "\u5730\u9762\u5206\u961f", "jammeruav": "\u7535\u5b50\u5e72\u6270" }
+                        var kinds = { "commandpost": "\u6307\u6325\u6240", "reconuav": "\u4fa6\u5bdf\u65e0\u4eba\u673a", "attackuav": "\u653b\u51fb\u65e0\u4eba\u673a", "groundscout": "\u5730\u9762\u5206\u961f", "jammeruav": "\u7535\u5b50\u5e72\u6270", "groundtarget": "\u5730\u9762\u9759\u6001\u76ee\u6807" }
                         var label = kinds[k] || k
                         return label + " \u00b7 " + (root.snap.side === "red" ? "\u7ea2\u65b9" : (root.snap.side === "blue" ? "\u84dd\u65b9" : root.snap.side || "-"))
                     }

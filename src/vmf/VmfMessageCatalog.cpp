@@ -161,6 +161,41 @@ std::shared_ptr<VmfMessageCatalog> fallbackCatalog() {
                 QStringLiteral("NetworkMonitoring"), {QStringLiteral("any")},
                 {QStringLiteral("any")}, QStringLiteral("controlCommand"), {}, false,
                 QStringLiteral("low"), 30, {QStringLiteral("command")});
+    addFallback(&entries, QStringLiteral("47016"), {QStringLiteral("IdentityReport")},
+                QStringLiteral("NetworkMonitoring"), {QStringLiteral("attack"), QStringLiteral("ground")},
+                {QStringLiteral("attack"), QStringLiteral("ground")}, QStringLiteral("identityHandshake"),
+                {QStringLiteral("identityHandshakePending")}, true, QStringLiteral("high"), 80,
+                {QStringLiteral("taskId"), QStringLiteral("unitId"), QStringLiteral("time")});
+    addFallback(&entries, QStringLiteral("47017"), {QStringLiteral("GroundTargetReport")},
+                QStringLiteral("Target Report"), {QStringLiteral("attack"), QStringLiteral("ground")},
+                {QStringLiteral("attack"), QStringLiteral("ground")}, QStringLiteral("groundTargetReported"),
+                {QStringLiteral("guidancePackagePending")}, true, QStringLiteral("high"), 82,
+                {QStringLiteral("taskId"), QStringLiteral("targetId"), QStringLiteral("position")});
+    addFallback(&entries, QStringLiteral("47018"), {QStringLiteral("RouteAcceptance")},
+                QStringLiteral("NetworkMonitoring"), {QStringLiteral("attack")},
+                {QStringLiteral("commander"), QStringLiteral("ground")}, QStringLiteral("routeAccepted"),
+                {QStringLiteral("enRoute"), QStringLiteral("attackLanePending")}, true, QStringLiteral("high"), 84,
+                {QStringLiteral("taskId"), QStringLiteral("route")});
+    addFallback(&entries, QStringLiteral("47019"), {QStringLiteral("AttackReadyReport")},
+                QStringLiteral("NetworkMonitoring"), {QStringLiteral("attack")},
+                {QStringLiteral("ground")}, QStringLiteral("attackReady"),
+                {QStringLiteral("attackAuthorizationPending")}, true, QStringLiteral("high"), 86,
+                {QStringLiteral("taskId"), QStringLiteral("position")});
+    addFallback(&entries, QStringLiteral("47020"), {QStringLiteral("AttackAuthorization")},
+                QStringLiteral("NetworkMonitoring"), {QStringLiteral("ground")},
+                {QStringLiteral("attack")}, QStringLiteral("attackAuthorized"),
+                {QStringLiteral("engaging")}, true, QStringLiteral("critical"), 96,
+                {QStringLiteral("taskId"), QStringLiteral("targetId")});
+    addFallback(&entries, QStringLiteral("47021"), {QStringLiteral("BattleDamageReport")},
+                QStringLiteral("Target Report"), {QStringLiteral("attack")},
+                {QStringLiteral("ground")}, QStringLiteral("battleDamageReported"),
+                {QStringLiteral("damageAssessmentPending")}, true, QStringLiteral("high"), 88,
+                {QStringLiteral("taskId"), QStringLiteral("targetId"), QStringLiteral("damage")});
+    addFallback(&entries, QStringLiteral("47022"), {QStringLiteral("DamageAssessmentConfirm")},
+                QStringLiteral("NetworkMonitoring"), {QStringLiteral("ground")},
+                {QStringLiteral("attack")}, QStringLiteral("damageAssessmentConfirmed"),
+                {QStringLiteral("reconConfirmationPending")}, true, QStringLiteral("critical"), 94,
+                {QStringLiteral("taskId"), QStringLiteral("targetId"), QStringLiteral("destroyed")});
     return VmfMessageCatalog::create(1, std::move(entries));
 }
 

@@ -151,7 +151,20 @@ Item {
         if (kind === "reconuav") return 300
         if (kind === "jammeruav") return 260
         if (kind === "groundscout") return 36
+        if (kind === "groundtarget") return 0
         return 0
+    }
+
+    function onlineMapVisibleUnitIds() {
+        if (!root.controller || root.controller.isObserver) return null
+        var ids = root.deployedUnitIds()
+        var projectedUnits = root.controller.units || []
+        for (var i = 0; i < projectedUnits.length; ++i) {
+            var unit = projectedUnits[i] || ({})
+            if (unit.kind === "groundtarget" && unit.id && ids.indexOf(unit.id) < 0)
+                ids.push(unit.id)
+        }
+        return ids
     }
 
     function editableUnitSpeedLimit(unit) {
@@ -374,8 +387,18 @@ Item {
         return null
     }
     function canClaimSeat(seat) {
-        if (!seat || seat.occupied || seat.controllerType === "ai"
-                || root.controller.matchPhase !== "preparing") return false
+        if (!seat || seat.controllerType === "ai") return false
+        if (seat.controllerType === "placeholder") {
+            if (root.controller.protocolProfile !== "vmf-guided-strike-v1"
+                    || root.controller.currentSeatId) return false
+            var phase = root.controller.matchPhase
+            if (phase !== "preparing" && phase !== "running" && phase !== "paused") return false
+            var takeoverRedCommander = root.seatById("red_commander")
+            var takeoverBlueCommander = root.seatById("blue_commander")
+            return takeoverRedCommander && takeoverRedCommander.occupied
+                    && takeoverBlueCommander && takeoverBlueCommander.occupied
+        }
+        if (seat.occupied || root.controller.matchPhase !== "preparing") return false
         if (root.controller.roomMode === "pve" && seat.side !== "red") return false
         if (root.switchSeatSelection) {
             return !root.switchRequestPending && seat.side === root.controller.currentSeatSide
@@ -390,6 +413,7 @@ Item {
     }
     function seatHint(seat) {
         if (seat.controllerType === "ai") return "AI 控制"
+        if (seat.controllerType === "placeholder") return "服务器占位，可由人工接管"
         if (seat.occupied) return seat.displayName || "已占用"
         if (root.switchSeatSelection && seat.side !== root.controller.currentSeatSide)
             return "只能申请本方战位"
@@ -402,6 +426,7 @@ Item {
         return "等待双方指挥官就位"
     }
     function seatStatusLabel(seat) {
+        if (seat.controllerType === "placeholder") return "等待人工接管"
         if (!seat.occupied) return "空缺"
         if (seat.controllerType === "ai") return seat.deployed ? "AI 执行中" : "AI 已就位"
         if (seat.pendingTransfer) return "交接中"
@@ -411,6 +436,7 @@ Item {
         return "已部署"
     }
     function seatStatusColor(seat) {
+        if (seat.controllerType === "placeholder") return root.orange
         if (!seat.occupied) return root.dim
         if (seat.controllerType === "ai") return seat.deployed ? root.cyan : root.info
         if (seat.pendingTransfer || !seat.deployed) return root.orange
@@ -1262,7 +1288,7 @@ Item {
                                                 Text { Layout.fillWidth: true; text: seatDelegate.modelData.occupied && seatDelegate.modelData.selectedTemplate ? (root.seatHint(seatDelegate.modelData) + " · " + seatDelegate.modelData.selectedTemplate) : root.seatHint(seatDelegate.modelData); color: root.dim; font.pixelSize: 9; elide: Text.ElideRight }
                                             }
                                             Text { text: root.seatStatusLabel(seatDelegate.modelData); color: root.seatStatusColor(seatDelegate.modelData); font.pixelSize: 9; font.bold: true }
-                                            Button { id: claimSeatButton; visible: !seatDelegate.modelData.occupied; enabled: root.canClaimSeat(seatDelegate.modelData); text: root.switchSeatSelection ? "申请" : "进入"; onClicked: root.requestSeat(seatDelegate.modelData)
+                                            Button { id: claimSeatButton; visible: !seatDelegate.modelData.occupied || seatDelegate.modelData.controllerType === "placeholder"; enabled: root.canClaimSeat(seatDelegate.modelData); text: seatDelegate.modelData.controllerType === "placeholder" ? "接管" : root.switchSeatSelection ? "申请" : "进入"; onClicked: root.requestSeat(seatDelegate.modelData)
                                                 Component.onCompleted: if (claimSeatButton.enabled) Qt.callLater(claimSeatButton.forceActiveFocus)
                                                 onEnabledChanged: if (enabled) Qt.callLater(claimSeatButton.forceActiveFocus)
                                                 contentItem: Text { text: claimSeatButton.text; color: claimSeatButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
@@ -1288,7 +1314,7 @@ Item {
             Item {
                     GridLayout { id: battleLayout; anchors.fill: parent; columns: root.compactLayout ? 1 : 2; columnSpacing: 12; rowSpacing: 12
                     Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 420; Layout.preferredWidth: root.compactLayout ? -1 : Math.max(420, battleLayout.width - 368); Layout.minimumHeight: root.compactLayout ? 250 : 0; Layout.preferredHeight: root.compactLayout ? battleLayout.height : -1; color: root.panel; border.color: root.line; radius: 6
-                            MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.controller.isObserver ? null : root.deployedUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); intelRecords: root.controller.isObserver ? [] : root.controller.onlineIntelRecords; showIntelLive: root.showIntelLive; showIntelStale: root.showIntelStale; showIntelManual: root.showIntelManual; showIntelUncertainty: root.showIntelUncertainty; selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId
+                            MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.onlineMapVisibleUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); intelRecords: root.controller.isObserver ? [] : root.controller.onlineIntelRecords; showIntelLive: root.showIntelLive; showIntelStale: root.showIntelStale; showIntelManual: root.showIntelManual; showIntelUncertainty: root.showIntelUncertainty; selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId
                             onClickedMap: function(point) {
                                 if (root.controller.isObserver) return
                                 if (root.canDeploy) {

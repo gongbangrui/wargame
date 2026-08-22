@@ -45,8 +45,8 @@ release_validate_manifest() {
 
   for expected in \
     'releaseManifestVersion=1' \
-    'protocolVersion=7' \
-    'schemaVersion=7' \
+    'protocolVersion=8' \
+    'schemaVersion=8' \
     'clientArtifact=appindex' \
     'accountArtifact=account-web' \
     'serverArtifact=game-server' \
@@ -144,8 +144,8 @@ release_validate_identity() {
     "wargameVersion=$expected_version" \
     "sourceDigest=$expected_digest" \
     "releaseId=$expected_version-${expected_digest:0:12}" \
-    'protocolVersion=7' \
-    'schemaVersion=7' \
+    'protocolVersion=8' \
+    'schemaVersion=8' \
     'clientArtifact=appindex' \
     'accountArtifact=account-web' \
     'serverArtifact=game-server' \

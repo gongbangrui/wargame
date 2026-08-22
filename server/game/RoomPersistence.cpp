@@ -31,15 +31,16 @@ namespace gbr {
 
 namespace {
 
-constexpr int kCheckpointSchemaVersion = 6;
+constexpr int kCheckpointSchemaVersion = 7;
 constexpr int kOldestSupportedCheckpointSchemaVersion = 2;
 constexpr int kLegacyCheckpointProtocolVersion = 4;
-constexpr int kPreviousCheckpointProtocolVersion = 5;
-// Checkpoint files retain the v6 storage contract while live WebSocket/DDS
-// envelopes move to protocol v7.  This keeps rollback/recovery compatible
+constexpr int kSchemaFiveCheckpointProtocolVersion = 5;
+constexpr int kNativeCheckpointProtocolVersion = 6;
+// Checkpoint files retain the v7 storage contract while live WebSocket/DDS
+// envelopes use protocol v8.  This keeps rollback/recovery compatible
 // with already-issued room data; the checkpoint schema carries the new
 // scenario communication policy independently.
-constexpr int kCurrentCheckpointProtocolVersion = 6;
+constexpr int kCurrentCheckpointProtocolVersion = 8;
 constexpr qint64 kMaxEventLogBytes = 16 * 1024 * 1024;
 constexpr qint64 kMaxCheckpointBytes = 64 * 1024 * 1024;
 
@@ -343,9 +344,18 @@ bool aiStateFromJson(const QJsonObject& object, AiCheckpointState* state, QStrin
 }
 
 QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
+    // Native rooms remain readable by the v6/v6 checkpoint contract.  The
+    // strict VMF profile opts into the v7 storage additions (task state and
+    // protocol v8) so upgrading a room never rewrites an ordinary checkpoint
+    // merely because the server binary is newer.
+    const bool strictProfile = checkpoint.protocolProfile
+        == QLatin1String("vmf-guided-strike-v1");
+    const int schemaVersion = strictProfile ? kCheckpointSchemaVersion : 6;
+    const int protocolVersion = strictProfile ? kCurrentCheckpointProtocolVersion
+                                              : kNativeCheckpointProtocolVersion;
     QJsonObject object{
-        {QStringLiteral("checkpointSchemaVersion"), kCheckpointSchemaVersion},
-        {QStringLiteral("protocolVersion"), kCurrentCheckpointProtocolVersion},
+        {QStringLiteral("checkpointSchemaVersion"), schemaVersion},
+        {QStringLiteral("protocolVersion"), protocolVersion},
         {QStringLiteral("savedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
         {QStringLiteral("scenario"), ScenarioIo::toJson(checkpoint.scenario)},
         {QStringLiteral("runInitialScenario"), ScenarioIo::toJson(checkpoint.runInitialScenario)},
@@ -360,6 +370,8 @@ QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
                      {QStringLiteral("roomName"), checkpoint.roomName},
                      {QStringLiteral("roomDescription"), checkpoint.roomDescription},
                      {QStringLiteral("scenarioId"), checkpoint.scenarioId},
+                     {QStringLiteral("protocolProfile"), checkpoint.protocolProfile},
+                     {QStringLiteral("strictVmfTasks"), checkpoint.strictVmfTasks},
                      {QStringLiteral("seatLimits"), checkpoint.seatLimits},
                      {QStringLiteral("seatParameters"), checkpoint.seatParameters},
                      {QStringLiteral("configVersion"),
@@ -401,9 +413,11 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
     const int storedProtocolVersion = object.value(QStringLiteral("protocolVersion")).toInt();
     const bool compatibleProtocol = checkpointSchemaVersion >= kCheckpointSchemaVersion
         ? storedProtocolVersion == kCurrentCheckpointProtocolVersion
-        : checkpointSchemaVersion >= 5
-            ? storedProtocolVersion == kPreviousCheckpointProtocolVersion
-            : storedProtocolVersion == kLegacyCheckpointProtocolVersion;
+        : checkpointSchemaVersion >= 6
+            ? storedProtocolVersion == kNativeCheckpointProtocolVersion
+            : checkpointSchemaVersion >= 5
+                ? storedProtocolVersion == kSchemaFiveCheckpointProtocolVersion
+                : storedProtocolVersion == kLegacyCheckpointProtocolVersion;
     if (!compatibleProtocol) {
         return fail(QStringLiteral("检查点协议版本不兼容"));
     }
@@ -487,6 +501,9 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
     checkpoint->roomDescription = room.value(QStringLiteral("roomDescription")).toString();
     checkpoint->scenarioId = room.value(QStringLiteral("scenarioId")).toString(
         QStringLiteral("default"));
+    checkpoint->protocolProfile = room.value(QStringLiteral("protocolProfile"))
+                                     .toString(QStringLiteral("native"));
+    checkpoint->strictVmfTasks = room.value(QStringLiteral("strictVmfTasks")).toObject();
     if (room.contains(QStringLiteral("seatLimits"))
         && !room.value(QStringLiteral("seatLimits")).isObject()) {
         return fail(QStringLiteral("检查点战位容量结构无效"));

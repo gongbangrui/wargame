@@ -58,7 +58,8 @@ Dialog {
             attackuav: "攻击无人机",
             reconuav: "侦察无人机",
             jammeruav: "干扰无人机",
-            groundscout: "地面侦察"
+            groundscout: "地面侦察",
+            groundtarget: "地面静态目标"
         }
         return labels[kind] || kind || "未知单元"
     }
@@ -69,7 +70,8 @@ Dialog {
             attackuav: "missile",
             reconuav: "scan",
             jammeruav: "countermeasure",
-            groundscout: "unit"
+            groundscout: "unit",
+            groundtarget: "locate"
         }
         return icons[kind] || "unit"
     }

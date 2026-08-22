@@ -49,6 +49,8 @@ public:
     Result setMode(const QString& mode);
     bool setSeatLimits(const QHash<QString, int>& limits, QString* error = nullptr);
     Result syncAiRoster();
+    Result installPlaceholdersForMissing();
+    Result removePlaceholders();
     Result deployAiSeats(double mapWidth, double mapHeight, quint64 matchGeneration);
 
     static QHash<QString, ScenarioUnit> defaultTemplateCatalog();

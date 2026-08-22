@@ -37,6 +37,7 @@ enum class UnitKind {
     AttackUAV,
     GroundScout,
     JammerUAV,
+    GroundTarget,
 };
 
 /// @brief Ownership of a unit's runtime state.
@@ -53,6 +54,7 @@ inline QString kindName(UnitKind k) {
     case UnitKind::AttackUAV: return QStringLiteral("attackuav");
     case UnitKind::GroundScout: return QStringLiteral("groundscout");
     case UnitKind::JammerUAV: return QStringLiteral("jammeruav");
+    case UnitKind::GroundTarget: return QStringLiteral("groundtarget");
     }
     return QStringLiteral("unknown");
 }
@@ -64,6 +66,7 @@ inline UnitKind kindFromName(const QString& n) {
     if (n == QStringLiteral("attackuav")) return UnitKind::AttackUAV;
     if (n == QStringLiteral("groundscout")) return UnitKind::GroundScout;
     if (n == QStringLiteral("jammeruav")) return UnitKind::JammerUAV;
+    if (n == QStringLiteral("groundtarget")) return UnitKind::GroundTarget;
     return UnitKind::CommandPost;
 }
 
@@ -176,6 +179,7 @@ public:
         case UnitKind::AttackUAV: return 360.0;
         case UnitKind::GroundScout: return 36.0;
         case UnitKind::JammerUAV: return 260.0;
+        case UnitKind::GroundTarget: return 0.0;
         }
         return 0.0;
     }
@@ -186,6 +190,7 @@ public:
         case UnitKind::AttackUAV: return 200.0;
         case UnitKind::GroundScout: return 18.0;
         case UnitKind::JammerUAV: return 120.0;
+        case UnitKind::GroundTarget: return 0.0;
         }
         return 0.0;
     }
@@ -198,6 +203,7 @@ public:
         case UnitKind::AttackUAV: return 5000.0;
         case UnitKind::GroundScout: return 4000.0;
         case UnitKind::JammerUAV: return 6500.0;
+        case UnitKind::GroundTarget: return 0.0;
         }
         return 4000.0;
     }
@@ -208,6 +214,7 @@ public:
         case UnitKind::AttackUAV: return 45.0;
         case UnitKind::GroundScout: return 30.0;
         case UnitKind::JammerUAV: return 50.0;
+        case UnitKind::GroundTarget: return 80.0;
         }
         return 30.0;
     }
@@ -218,6 +225,7 @@ public:
         case UnitKind::AttackUAV: return 20.0;
         case UnitKind::GroundScout: return 2.0;
         case UnitKind::JammerUAV: return 20.0;
+        case UnitKind::GroundTarget: return 5.0;
         }
         return 2.0;
     }
@@ -228,6 +236,7 @@ public:
         case UnitKind::AttackUAV: return 1.00;
         case UnitKind::GroundScout: return 0.85;
         case UnitKind::JammerUAV: return 0.90;
+        case UnitKind::GroundTarget: return 0.0;
         }
         return 1.0;
     }
@@ -238,11 +247,13 @@ public:
         case UnitKind::AttackUAV: return 1.00;
         case UnitKind::GroundScout: return 0.90;
         case UnitKind::JammerUAV: return 0.80;
+        case UnitKind::GroundTarget: return 1.50;
         }
         return 1.0;
     }
     static constexpr bool isGroundCollisionLayer(UnitKind kind) {
-        return kind == UnitKind::CommandPost || kind == UnitKind::GroundScout;
+        return kind == UnitKind::CommandPost || kind == UnitKind::GroundScout
+            || kind == UnitKind::GroundTarget;
     }
 
     QVariantList position() const;

@@ -118,6 +118,10 @@ public:
     /// @brief Dispatch a named command and return a stable structured result.
     Q_INVOKABLE QVariantMap command(const QString& action, const QVariantMap& args);
     CommandResult executeCommand(const QString& action, const QVariantMap& args);
+    CommandResult validateCommandRequest(const QString& action,
+                                         const QVariantMap& args) const {
+        return validateCommand(action, args);
+    }
 
     /// @brief Incrementally add or update a unit without rebuilding all units.
     void addOrUpdateUnit(const ScenarioUnit& u);

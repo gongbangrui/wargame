@@ -32,7 +32,8 @@ bool isKnownKind(const QString& kind) {
         || kind == QLatin1String("reconuav")
         || kind == QLatin1String("attackuav")
         || kind == QLatin1String("groundscout")
-        || kind == QLatin1String("jammeruav");
+        || kind == QLatin1String("jammeruav")
+        || kind == QLatin1String("groundtarget");
 }
 
 bool finiteNonNegative(double value) {

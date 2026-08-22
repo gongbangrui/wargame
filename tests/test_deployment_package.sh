@@ -32,6 +32,9 @@ make_fixture() {
         --exclude='*/logs' \
         --exclude='*/backups' \
         -cf - CMakeLists.txt cmake src server map/metadata.json deploy .dockerignore README.md docs \
+        'design/vmf设计.docx' design/EncoderDecoder/README.txt \
+        design/EncoderDecoder/dic.xml design/EncoderDecoder/dic_content.xml \
+        design/EncoderDecoder/message_catalog.json design/EncoderDecoder/msgStruct \
         Main.qml main.cpp qml \
         | tar -C "$fixture" -xf -
 }

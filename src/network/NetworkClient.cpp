@@ -467,6 +467,10 @@ void NetworkClient::onTextMessage(const QString& text) {
         emit intelHistoryPageReceived(payload);
     } else if (type == QLatin1String("vmfEvent")) {
         emit vmfEventReceived(payload);
+    } else if (type == QLatin1String("vmfTaskResult")) {
+        emit vmfTaskResultReceived(payload);
+    } else if (type == QLatin1String("vmfTrace")) {
+        emit vmfTraceReceived(payload);
     } else if (type == QLatin1String("event")) {
         Protocol::TransferEventProjection transfer;
         if (Protocol::projectTransferEvent(payload, &transfer).valid) {
@@ -563,8 +567,11 @@ void NetworkClient::requestResync() {
 void NetworkClient::fallbackToLegacyProtocol() {
     if (m_protocolVersion == Protocol::Version) {
         reconnectWithWireVersion(Protocol::PreviousVersion, Protocol::PreviousSchemaVersion,
-                                 QStringLiteral("服务器不支持当前协议，正在切换 v5 兼容模式"));
+                                 QStringLiteral("服务器不支持当前协议，正在切换 v7 兼容模式"));
     } else if (m_protocolVersion == Protocol::PreviousVersion) {
+        reconnectWithWireVersion(Protocol::OlderVersion, Protocol::OlderSchemaVersion,
+                                 QStringLiteral("服务器版本较旧，正在切换 v6 兼容模式"));
+    } else if (m_protocolVersion == Protocol::OlderVersion) {
         reconnectWithWireVersion(Protocol::LegacyVersion, Protocol::LegacySchemaVersion,
                                  QStringLiteral("服务器版本较旧，正在切换 v4 兼容模式"));
     }
@@ -917,6 +924,18 @@ QString NetworkClient::sendVmfMessage(const QJsonObject& message) {
         return {};
     }
     if (!sendEnvelope(QString::fromLatin1(Protocol::VmfMessage), message, requestId)) {
+        return {};
+    }
+    return requestId;
+}
+
+QString NetworkClient::sendVmfTaskCommand(const QJsonObject& command) {
+    const QString requestId = command.value(QStringLiteral("requestId")).toString().isEmpty()
+        ? QStringLiteral("vmf-task-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces))
+        : command.value(QStringLiteral("requestId")).toString();
+    QJsonObject payload = command;
+    payload.insert(QStringLiteral("requestId"), requestId);
+    if (!sendEnvelope(QString::fromLatin1(Protocol::VmfTaskCommandMessage), payload, requestId)) {
         return {};
     }
     return requestId;

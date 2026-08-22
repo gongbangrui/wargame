@@ -135,6 +135,19 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
     connect(&m_engine, &SimulationEngine::messagesChanged, this, &SimulationController::messagesForward);
     connect(&m_engine, &SimulationEngine::vmfWorkflowChanged, this,
             &SimulationController::vmfWorkflowChanged);
+    connect(&m_networkClient, &NetworkClient::vmfTaskResultReceived, this,
+            [this](const QJsonObject& result) {
+                if (result.value(QStringLiteral("status")).toString()
+                        == QLatin1String("rejected")) {
+                    emit errorForward(result.value(QStringLiteral("code")).toString());
+                }
+                emit vmfTasksChanged();
+            });
+    connect(&m_networkClient, &NetworkClient::vmfTraceReceived, this,
+            [this](const QJsonObject& trace) {
+                m_remoteVmfTrace = trace;
+                emit vmfTraceChanged();
+            });
     connect(&m_engine, &SimulationEngine::timelineChanged, this, &SimulationController::timelineForward);
     connect(&m_engine, &SimulationEngine::mapChanged, this, &SimulationController::mapInfoForward);
     connect(&m_engine, &SimulationEngine::readyForSimChanged, this, &SimulationController::readyForSimForward);
@@ -930,6 +943,185 @@ QVariantMap SimulationController::withdrawGuidedStrike(const QString& attackerId
                                   {QStringLiteral("x"), homeX},
                                   {QStringLiteral("y"), homeY}};
     return sendGuidedStrikeVmf(message);
+}
+
+QVariantMap SimulationController::sendVmfTaskCommand(const QVariantMap& command) {
+    if (!isNetworked() || m_isObserver) {
+        return guidedStrikeResult(false, QStringLiteral("SEAT_REQUIRED"),
+                                  QStringLiteral("严格 VMF 任务只能由联网战位提交"));
+    }
+    if (m_protocolProfile != QLatin1String("vmf-guided-strike-v1")) {
+        return guidedStrikeResult(false, QStringLiteral("VMF_TASK_PROFILE_REQUIRED"),
+                                  QStringLiteral("当前房间未启用严格 VMF profile"));
+    }
+    QJsonObject payload = QJsonObject::fromVariantMap(command);
+    if (!payload.contains(QStringLiteral("requestId"))) {
+        payload.insert(QStringLiteral("requestId"),
+                       QStringLiteral("vmf-task-%1")
+                           .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    }
+    if (!payload.contains(QStringLiteral("taskId"))
+        || !payload.contains(QStringLiteral("action"))) {
+        return guidedStrikeResult(false, QStringLiteral("INVALID_ARGUMENT"),
+                                  QStringLiteral("严格 VMF 命令缺少 taskId 或 action"));
+    }
+    if (!payload.contains(QStringLiteral("messages"))) {
+        payload.insert(QStringLiteral("messages"), QJsonArray{});
+    }
+
+    const QString action = payload.value(QStringLiteral("action")).toString();
+    if (action != QLatin1String("createTask")
+        && payload.value(QStringLiteral("messages")).toArray().isEmpty()) {
+        QJsonObject task;
+        for (const QJsonValue& value : m_remoteVmfTasks.value(QStringLiteral("tasks")).toArray()) {
+            if (value.toObject().value(QStringLiteral("taskId"))
+                == payload.value(QStringLiteral("taskId"))) {
+                task = value.toObject();
+                break;
+            }
+        }
+        if (task.isEmpty()) {
+            return guidedStrikeResult(false, QStringLiteral("TASK_NOT_FOUND"),
+                                      QStringLiteral("严格 VMF 任务状态尚未同步"));
+        }
+        const auto unitForSeat = [this](const QString& seatId) {
+            for (const QVariant& value : m_onlineSeats) {
+                const QVariantMap seat = value.toMap();
+                if (seat.value(QStringLiteral("seatId")).toString() == seatId) {
+                    return seat.value(QStringLiteral("unitId")).toString();
+                }
+            }
+            return QString{};
+        };
+        QString senderSeat;
+        QString receiverSeat;
+        Message::Type domainType = Message::Type::CommCheck;
+        bool requiresMessage = true;
+        if (action == QLatin1String("reportTarget")) {
+            senderSeat = task.value(QStringLiteral("reconSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("commanderSeatId")).toString();
+            domainType = Message::Type::TargetReport;
+        } else if (action == QLatin1String("dispatch")) {
+            senderSeat = task.value(QStringLiteral("commanderSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("attackSeatId")).toString();
+            domainType = Message::Type::AttackOrder;
+        } else if (action == QLatin1String("acceptDispatch")
+                   || action == QLatin1String("acceptGuidance")) {
+            senderSeat = task.value(QStringLiteral("attackSeatId")).toString();
+            receiverSeat = action == QLatin1String("acceptDispatch")
+                ? task.value(QStringLiteral("commanderSeatId")).toString()
+                : task.value(QStringLiteral("groundSeatId")).toString();
+            domainType = Message::Type::RouteAcceptance;
+        } else if (action == QLatin1String("orderGroundGuidance")) {
+            senderSeat = task.value(QStringLiteral("commanderSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("groundSeatId")).toString();
+            domainType = Message::Type::GroundGuideOrder;
+        } else if (action == QLatin1String("identityHello")
+                   || action == QLatin1String("identityConfirm")) {
+            senderSeat = action == QLatin1String("identityHello")
+                ? task.value(QStringLiteral("attackSeatId")).toString()
+                : task.value(QStringLiteral("groundSeatId")).toString();
+            receiverSeat = action == QLatin1String("identityHello")
+                ? task.value(QStringLiteral("groundSeatId")).toString()
+                : task.value(QStringLiteral("attackSeatId")).toString();
+            domainType = Message::Type::IdentityReport;
+        } else if (action == QLatin1String("sendGuidancePackage")) {
+            senderSeat = task.value(QStringLiteral("groundSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("attackSeatId")).toString();
+            domainType = Message::Type::GroundTargetReport;
+        } else if (action == QLatin1String("reportAttackReady")) {
+            senderSeat = task.value(QStringLiteral("attackSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("groundSeatId")).toString();
+            domainType = Message::Type::AttackReadyReport;
+        } else if (action == QLatin1String("authorizeAttack")) {
+            senderSeat = task.value(QStringLiteral("groundSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("attackSeatId")).toString();
+            domainType = Message::Type::AttackAuthorization;
+        } else if (action == QLatin1String("reportBattleDamage")) {
+            senderSeat = task.value(QStringLiteral("attackSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("groundSeatId")).toString();
+            domainType = Message::Type::BattleDamageReport;
+        } else if (action == QLatin1String("confirmDamageAssessment")) {
+            senderSeat = task.value(QStringLiteral("groundSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("attackSeatId")).toString();
+            domainType = Message::Type::DamageAssessmentConfirm;
+        } else if (action == QLatin1String("confirmTargetDestroyed")) {
+            senderSeat = task.value(QStringLiteral("reconSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("commanderSeatId")).toString();
+            domainType = Message::Type::TargetDestroyed;
+        } else if (action == QLatin1String("withdraw")) {
+            senderSeat = task.value(QStringLiteral("commanderSeatId")).toString();
+            receiverSeat = task.value(QStringLiteral("attackSeatId")).toString();
+            domainType = Message::Type::WithdrawOrder;
+        } else {
+            requiresMessage = false;
+        }
+        if (requiresMessage) {
+            Message source;
+            source.id = QStringLiteral("strict-%1")
+                            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+            source.traceId = source.id;
+            source.correlationId = task.value(QStringLiteral("correlationId")).toString();
+            source.type = domainType;
+            source.sender = unitForSeat(senderSeat);
+            source.receiver = unitForSeat(receiverSeat);
+            source.timestamp = QDateTime::currentDateTimeUtc();
+            source.payload = QJsonObject{{QStringLiteral("taskId"),
+                                           task.value(QStringLiteral("taskId"))},
+                                          {QStringLiteral("targetId"),
+                                           task.value(QStringLiteral("targetId"))}};
+            const QString routePointUnitId = domainType == Message::Type::WithdrawOrder
+                ? source.sender : task.value(QStringLiteral("targetId")).toString();
+            const QJsonArray targetPosition = m_engine.unitSnapshot(routePointUnitId)
+                                                  .value(QStringLiteral("position")).toArray();
+            if (targetPosition.size() >= 2) {
+                source.payload.insert(QStringLiteral("x"), targetPosition.at(0));
+                source.payload.insert(QStringLiteral("y"), targetPosition.at(1));
+                source.payload.insert(QStringLiteral("waypoints"), QJsonArray{
+                    QJsonObject{{QStringLiteral("x"), targetPosition.at(0)},
+                                {QStringLiteral("y"), targetPosition.at(1)}}});
+            }
+            if (domainType == Message::Type::BattleDamageReport
+                || domainType == Message::Type::DamageAssessmentConfirm) {
+                const QJsonObject target = m_engine.unitSnapshot(
+                    task.value(QStringLiteral("targetId")).toString());
+                source.payload.insert(QStringLiteral("hp"), target.value(QStringLiteral("hp")));
+                source.payload.insert(QStringLiteral("alive"),
+                                      target.value(QStringLiteral("alive")));
+                source.payload.insert(QStringLiteral("destroyed"),
+                                      !target.value(QStringLiteral("alive")).toBool(true));
+            }
+            Message encoded;
+            QString encodeError;
+            if (source.sender.isEmpty() || source.receiver.isEmpty()
+                || !m_engine.prepareVmfMessage(source, &encoded, &encodeError)) {
+                return guidedStrikeResult(false, QStringLiteral("VMF_CODEC_FAILED"),
+                                          encodeError.isEmpty()
+                                              ? QStringLiteral("严格 VMF 绑定单元不可用")
+                                              : encodeError);
+            }
+            payload.insert(QStringLiteral("messages"), QJsonArray{QJsonObject{
+                {QStringLiteral("messageId"), encoded.id},
+                {QStringLiteral("traceId"), encoded.traceId},
+                {QStringLiteral("timestamp"), encoded.timestamp.toString(Qt::ISODateWithMs)},
+                {QStringLiteral("domainType"), Message::typeName(encoded.type)},
+                {QStringLiteral("vmfMessage"), encoded.vmfMessage},
+                {QStringLiteral("catalogId"),
+                 encoded.payload.value(QStringLiteral("vmfCatalogId"))},
+                {QStringLiteral("payload"), source.payload},
+                {QStringLiteral("wireBytes"),
+                 QString::fromLatin1(encoded.wireBytes.toBase64())},
+                {QStringLiteral("wireBitLength"), encoded.wireBitLength},
+                {QStringLiteral("correlationId"), encoded.correlationId}}});
+        }
+    }
+    const QString requestId = m_networkClient.sendVmfTaskCommand(payload);
+    if (requestId.isEmpty()) {
+        return guidedStrikeResult(false, QStringLiteral("NETWORK_UNAVAILABLE"),
+                                  QStringLiteral("联网会话尚未建立"));
+    }
+    return guidedStrikeResult(true, QStringLiteral("PENDING"),
+                              QStringLiteral("严格 VMF 任务命令已发送，等待服务器回执"), requestId);
 }
 
 QJsonObject SimulationController::unitsJson() const {
@@ -1753,6 +1945,9 @@ void SimulationController::useLocalMode() {
     m_remoteMessages.clear();
     const bool hadVmfWorkflow = !m_remoteVmfWorkflow.isEmpty();
     m_remoteVmfWorkflow = {};
+    m_remoteVmfTasks = {};
+    m_remoteVmfTrace = {};
+    m_protocolProfile = QStringLiteral("native");
     m_remoteProjectiles.clear();
     m_chatMessages.clear();
     m_remoteScenarioRevision = -1;
@@ -1790,6 +1985,8 @@ void SimulationController::useLocalMode() {
     emit networkStatusChanged();
     emit messagesForward();
     if (hadVmfWorkflow) emit vmfWorkflowChanged();
+    emit vmfTasksChanged();
+    emit vmfTraceChanged();
     emit projectilesForward();
     emit chatMessagesChanged();
     emit commandStatusChanged();
@@ -2095,6 +2292,9 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_roomName.clear();
     m_roomDescription.clear();
     m_scenarioId = QStringLiteral("default");
+    m_protocolProfile = QStringLiteral("native");
+    m_remoteVmfTasks = {};
+    m_remoteVmfTrace = {};
     m_onlineSeatLimits = {};
     m_onlineSeatParameters = {};
     m_remoteReadyForSim = false;
@@ -2137,6 +2337,8 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     if (hadObserverTrajectories) emit observerTrajectoriesChanged();
     emit pendingSeatTransfersChanged();
     emit messagesForward();
+    emit vmfTasksChanged();
+    emit vmfTraceChanged();
     if (hadProjectiles) emit projectilesForward();
     emit chatMessagesChanged();
     emit commandStatusChanged();
@@ -2194,6 +2396,8 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     const QString previousCommunicationState = m_communicationState;
     const QVariantList previousMessages = m_remoteMessages;
     const QJsonObject previousVmfWorkflow = m_remoteVmfWorkflow;
+    const QJsonObject previousVmfTasks = m_remoteVmfTasks;
+    const QString previousProtocolProfile = m_protocolProfile;
     const QVariantList previousMapMarks = m_onlineMapMarks;
     const QVariantList previousIntelRecords = m_onlineIntelRecords;
     const qint64 previousIntelRevision = m_onlineIntelRevision;
@@ -2234,6 +2438,8 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     m_roomName = room.roomName;
     m_roomDescription = room.roomDescription;
     m_scenarioId = room.scenarioId;
+    m_protocolProfile = room.protocolProfile;
+    m_remoteVmfTasks = room.vmfTasks;
     m_onlineSeatLimits = room.seatLimits;
     m_onlineSeatParameters = room.seatParameters;
     const QString projectedCommunication = payload.value(QStringLiteral("roomState"))
@@ -2389,6 +2595,7 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     ensureFocusedConsistent();
     if (m_remoteMessages != previousMessages) emit messagesForward();
     if (m_remoteVmfWorkflow != previousVmfWorkflow) emit vmfWorkflowChanged();
+    if (m_remoteVmfTasks != previousVmfTasks) emit vmfTasksChanged();
     if (m_onlineMapMarks != previousMapMarks) emit onlineMapMarksChanged();
     if (m_onlineSeats != previousSeats) {
         emit onlineSeatsChanged();
@@ -2410,7 +2617,8 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
         || m_scenarioId != previousScenarioId
         || m_onlineSeatLimits != previousSeatLimits
         || m_onlineSeatParameters != previousSeatParameters
-        || m_communicationState != previousCommunicationState) {
+        || m_communicationState != previousCommunicationState
+        || m_protocolProfile != previousProtocolProfile) {
         emit roomStateChanged();
     }
     if (m_isObserver != previousObserver || m_currentRoomId != previousRoomId

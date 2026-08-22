@@ -212,6 +212,29 @@ class AccountRoomLifecycleTest(unittest.TestCase):
         self.assertEqual(response["room"]["winner"], "blue")
         self.assertEqual(response["room"]["statusReason"], "commander disconnected")
 
+    def test_internal_room_config_persists_strict_vmf_profile(self) -> None:
+        with self.app.database() as db:
+            db.execute("UPDATE rooms SET status='preparing' WHERE room_id='main'")
+        response = self.app.internal_room_config(
+            "main",
+            self.app.InternalRoomConfigBody(
+                expected_config_version=1,
+                name="Strict VMF Room",
+                description="",
+                scenario_id="default",
+                protocol_profile="vmf-guided-strike-v1",
+            ),
+            self.app.INTERNAL_KEY,
+        )
+
+        self.assertEqual(response["room"]["protocolProfile"], "vmf-guided-strike-v1")
+        self.assertEqual(response["room"]["configVersion"], 2)
+        with self.app.database() as db:
+            stored = db.execute(
+                "SELECT protocol_profile FROM rooms WHERE room_id='main'"
+            ).fetchone()[0]
+        self.assertEqual(stored, "vmf-guided-strike-v1")
+
     def test_concurrent_lifecycle_operations_leave_one_pending(self) -> None:
         self.app.GAME_STATUS_PATH.write_text(
             json.dumps({"roomState": {"roomId": "main", "lifecycleRevision": 17}}),

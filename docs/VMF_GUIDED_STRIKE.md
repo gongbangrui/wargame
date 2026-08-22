@@ -5,6 +5,45 @@ Qt/C++20 兵棋系统的实现。VMF 是场景级通信策略，不会改变旧�
 JSON 消息场景；只有 `communicationPolicy.format` 明确设置为
 `vmf-design-v1` 时才启用 XML 字典和 bit wire。
 
+## 0. 严格联网 profile
+
+协议 v8/schema 8 增加房间级 `protocolProfile=vmf-guided-strike-v1`。该 profile
+只接受 v8/schema 8 客户端，WebSocket 仍是登录、snapshot/delta、命令和 resync
+的唯一权威数据面。下文原有 `GuidedStrikeWorkflow` 继续用于 native/兼容流程；
+严格 profile 改由服务器的 `StrictVmfTaskSet` 推进，客户端不能发送普通命令绕过
+任务阶段。
+
+严格任务的权威阶段链为：
+
+```text
+awaitingTargetReport -> targetReported -> dispatchPending -> enRoute
+-> groundGuidancePending -> rendezvousReady -> identityHandshakePending
+-> guidancePackagePending -> routeAcceptancePending -> attackLanePending
+-> attackAuthorizationPending -> engaging -> damageReportPending
+-> damageAssessmentPending -> reconConfirmationPending -> targetDestroyed
+-> withdrawPending -> returning -> completed
+```
+
+客户端每次只提交一个带 `expectedTaskRevision` 的原子 `vmfTaskCommand`。除创建任务和
+无 wire 的状态确认外，命令必须包含一条由当前字典编码的 canonical VMF 消息，并携带
+`messageId`、`traceId`、UTC timestamp、catalog ID、domain type、payload、base64 wire、
+bit length 和 correlation ID。服务器重新编码并逐字节比较，同时校验当前阶段、发送战位、
+接收战位、阵营、通信链、目标可见性和目录 47001-47022；任一检查失败都不会推进任务或
+执行仿真命令。`requestId` 必须与 envelope `messageId` 相同，已处理结果按用户和 request ID
+幂等返回。
+
+`dispatch`、`engage` 和 `withdraw` 分别映射到权威引擎的真实航路、交战和返航命令。
+毁伤报告中的 HP/alive 来自服务器状态；目标仍存活时，毁伤评估返回 `engaging`，只有目标
+已经死亡才允许侦察确认。攻击机进入 `returning` 后，服务器在其距离本方指挥所不超过
+250 米时自动完成任务。
+
+严格场景由服务器注入每方 4 个静态 `groundtarget`（稳定 ID 为 `red_gt_1..4` 和
+`blue_gt_1..4`）。缺席的非指挥战位由 `placeholder` 占位并保持 seat/unit/task 绑定；
+准备阶段或运行/暂停阶段均可由未占席的人类接管，接管不会重建运行单位。开放状态的
+blocked 任务仍参与每方 16 个任务上限和资源独占。任务集随 strict checkpoint 使用
+schema 7/protocol 8 保存；普通房间继续写 schema 6/protocol 6，并可恢复更早的
+schema 5/protocol 5 和 schema 2-4/protocol 4 数据。
+
 ## 1. 端到端流程
 
 每一方维护一个 `GuidedStrikeWorkflow`，阶段是：
@@ -248,10 +287,10 @@ wire 解码、发送战位/阵营/目录/工作流校验并更新 `GuidedStrikeW
 
 ```bash
 cmake --build build/debug --target wargame_tests -j2
-./build/debug/wargame_tests --gtest_filter='VmfCodec.*:VmfCatalog.*:VmfGatewayTest.*:VmfMessageBusTest.*:GuidedStrikeWorkflowTest.*:ProtocolTest.*'
+./build/debug/wargame_tests --gtest_filter='VmfCodec.*:VmfCatalog.*:VmfGatewayTest.*:VmfMessageBusTest.*:GuidedStrikeWorkflowTest.*:StrictVmfTaskSetTest.*:StrictVmfRoomTest.*:ProtocolTest.*'
 ```
 
-联网服务启动后，使用隔离账号和临时房间运行完整 VMF 验收：
+联网服务启动后，使用隔离账号和临时房间运行 native VMF 兼容流程验收：
 
 ```bash
 ADMIN_PASSWORD='管理员密码' node tools/vmf-guided-strike-smoke.mjs

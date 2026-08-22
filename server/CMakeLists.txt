@@ -93,6 +93,8 @@ add_library(wargame_serverlib STATIC
     game/OllamaConversationStore.cpp
     game/AuthoritativeRoom.h
     game/AuthoritativeRoom.cpp
+    game/StrictVmfTask.h
+    game/StrictVmfTask.cpp
     game/IntelLedger.h
     game/IntelLedger.cpp
     game/GameServer.h

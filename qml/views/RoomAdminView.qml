@@ -96,6 +96,7 @@ Item {
         roomNameField.text = root.controller.roomName || ""
         roomDescriptionField.text = root.controller.roomDescription || ""
         scenarioIdField.text = root.controller.scenarioId || "default"
+        protocolProfileCombo.currentIndex = root.controller.protocolProfile === "vmf-guided-strike-v1" ? 1 : 0
         root.dirty = false
         root.configSaving = false
         root.loadingDraft = false
@@ -210,6 +211,7 @@ Item {
             name: name,
             description: roomDescriptionField.text,
             scenarioId: scenarioIdField.text.trim() || "default",
+            protocolProfile: protocolProfileCombo.currentValue || "native",
             seatParameters: parameters,
             expectedConfigVersion: Math.max(1, Number(root.controller.configVersion) || 1)
         })
@@ -433,6 +435,20 @@ Item {
                             color: root.ink; placeholderTextColor: root.dim
                             background: Rectangle { color: root.panelAlt; border.color: scenarioIdField.activeFocus ? root.cyan : root.line; radius: 4 }
                             onTextChanged: if (!root.loadingDraft) { root.dirty = true; root.statusKind = "dirty" }
+                        }
+                    }
+                    ColumnLayout { Layout.fillWidth: true; Text { text: "联网协议方案"; color: root.dim; font.pixelSize: 9 }
+                        ComboBox {
+                            id: protocolProfileCombo
+                            Layout.fillWidth: true; implicitHeight: 32
+                            model: [
+                                { text: "标准联网", value: "native" },
+                                { text: "VMF 严格引导打击 v1", value: "vmf-guided-strike-v1" }
+                            ]
+                            textRole: "text"; valueRole: "value"
+                            contentItem: Text { text: protocolProfileCombo.currentText; color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; elide: Text.ElideRight; font.pixelSize: 9 }
+                            background: Rectangle { color: root.panelAlt; border.color: protocolProfileCombo.activeFocus ? root.cyan : root.line; radius: 4 }
+                            onActivated: if (!root.loadingDraft) { root.dirty = true; root.statusKind = "dirty" }
                         }
                     }
                     ColumnLayout { Layout.fillWidth: true; Layout.columnSpan: root.narrowLayout ? 1 : 2; Text { text: "房间说明"; color: root.dim; font.pixelSize: 9 }

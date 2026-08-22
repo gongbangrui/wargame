@@ -18,7 +18,7 @@ usage() {
 Usage: tools/build-release.sh [--version VERSION] [--clean]
 
 Builds appindex, the root-project game server, and the Qt 6.4 standalone
-game server with one v7/schema 7 release identity. Outputs are placed under
+game server with one v8/schema 8 release identity. Outputs are placed under
 dist/release-VERSION unless WARGAME_RELEASE_OUTPUT is set.
 EOF
 }

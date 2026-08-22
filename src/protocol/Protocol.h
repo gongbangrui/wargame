@@ -1,21 +1,24 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QString>
+#include <QStringList>
 #include <QVariantList>
 #include <QtGlobal>
 
 namespace gbr::Protocol {
 
-// v7 is the current VMF contract. v6 contains the intelligence-ledger
-// fields and v4 is the pre-ledger contract; both remain valid during a
-// rolling deployment so a new client can downgrade without losing its room.
-inline constexpr int Version = 7;
-inline constexpr int SchemaVersion = 7;
+// v8 is the strict VMF task contract. v7/v6/v4 remain valid for ordinary
+// rooms during rolling deployment and legacy client downgrade.
+inline constexpr int Version = 8;
+inline constexpr int SchemaVersion = 8;
 inline constexpr int IntelVersion = 5;
 inline constexpr int IntelSchemaVersion = 5;
-inline constexpr int PreviousVersion = 6;
-inline constexpr int PreviousSchemaVersion = 6;
+inline constexpr int PreviousVersion = 7;
+inline constexpr int PreviousSchemaVersion = 7;
+inline constexpr int OlderVersion = 6;
+inline constexpr int OlderSchemaVersion = 6;
 inline constexpr int LegacyVersion = 4;
 inline constexpr int LegacySchemaVersion = 4;
 inline constexpr int MaxMessageBytes = 256 * 1024;
@@ -80,6 +83,22 @@ struct SeatProjection {
     QString controllerType = QStringLiteral("human");
 };
 
+struct VmfTaskCommand {
+    QString requestId;
+    QString taskId;
+    quint64 expectedTaskRevision = 0;
+    QString action;
+    QJsonArray messages;
+};
+
+struct VmfTaskResultProjection {
+    QString status;
+    quint64 taskRevision = 0;
+    QStringList messageIds;
+    QString code;
+    bool retryable = false;
+};
+
 struct RoomLifecycleProjection {
     QString phase = QStringLiteral("preparing");
     QString roomId;
@@ -106,6 +125,8 @@ struct RoomLifecycleProjection {
     QJsonObject seatParameters;
     QJsonObject vmfWorkflow;
     QJsonObject vmfWorkflows;
+    QString protocolProfile = QStringLiteral("native");
+    QJsonObject vmfTasks;
 };
 
 struct SnapshotProjection {
@@ -165,6 +186,8 @@ ValidationResult projectIntelShare(const QJsonObject& payload,
                                    IntelShareProjection* projection);
 ValidationResult projectCommandResult(const QJsonObject& payload,
                                       CommandResultProjection* projection);
+ValidationResult projectVmfTaskResult(const QJsonObject& payload,
+                                      VmfTaskResultProjection* projection);
 ValidationResult projectTransferEvent(const QJsonObject& payload,
                                       TransferEventProjection* projection);
 ValidationResult projectServerEvent(const QJsonObject& payload);
@@ -222,6 +245,9 @@ inline constexpr const char* IntelShareEventMessage = "intelShare";
 inline constexpr const char* IntelHistoryPageMessage = "intelHistoryPage";
 inline constexpr const char* VmfMessage = "vmfMessage";
 inline constexpr const char* VmfEventMessage = "vmfEvent";
+inline constexpr const char* VmfTaskCommandMessage = "vmfTaskCommand";
+inline constexpr const char* VmfTaskResultMessage = "vmfTaskResult";
+inline constexpr const char* VmfTraceMessage = "vmfTrace";
 
 inline constexpr int MaxObserverTrajectoryUnits = 8;
 inline constexpr int MaxObserverTrajectoryPoints = 90;

@@ -377,6 +377,7 @@ if(BUILD_TESTING)
             tests/test_state_projector.cpp
             tests/test_rules_ai.cpp
             tests/test_ollama_conversation_store.cpp
+            tests/test_strict_vmf_task.cpp
         )
         target_link_libraries(wargame_tests PRIVATE wargame_serverlib)
 

@@ -304,6 +304,7 @@ class RoomBody(BaseModel):
     name: str = Field(min_length=1, max_length=96)
     description: str = Field(default="", max_length=512)
     scenario_id: str = Field(default="default", max_length=128)
+    protocol_profile: Literal["native", "vmf-guided-strike-v1"] = "native"
     seat_limits: dict[str, int] = Field(default_factory=dict)
     seat_parameters: dict[str, dict[str, float | int | bool]] = Field(default_factory=dict)
     enabled: bool = True
@@ -458,6 +459,7 @@ class InternalRoomConfigBody(BaseModel):
     name: str = Field(min_length=1, max_length=96)
     description: str = Field(default="", max_length=512)
     scenario_id: str = Field(default="default", max_length=128)
+    protocol_profile: Literal["native", "vmf-guided-strike-v1"] = "native"
     seat_limits: dict[str, int] = Field(default_factory=dict)
     seat_parameters: dict[str, dict[str, float | int | bool]] = Field(default_factory=dict)
 
@@ -600,6 +602,7 @@ def initialize_database() -> None:
                 name TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 scenario_id TEXT NOT NULL DEFAULT 'default',
+                protocol_profile TEXT NOT NULL DEFAULT 'native',
                 seat_limits TEXT NOT NULL DEFAULT '{}',
                 seat_parameters TEXT NOT NULL DEFAULT '{}',
                 mode TEXT NOT NULL DEFAULT 'pvp',
@@ -728,12 +731,17 @@ def initialize_database() -> None:
             ("config_version", "INTEGER NOT NULL DEFAULT 1"),
             ("intel_stale_after_sec", "REAL NOT NULL DEFAULT 10.0"),
             ("intel_archive_after_sec", "REAL NOT NULL DEFAULT 120.0"),
+            ("protocol_profile", "TEXT NOT NULL DEFAULT 'native'"),
         ):
             if name not in room_columns:
                 db.execute(f"ALTER TABLE rooms ADD COLUMN {name} {declaration}")
                 added_room_ai_columns.add(name)
         db.execute(
             "UPDATE rooms SET mode='pvp' WHERE mode NOT IN ('pvp', 'pve') OR mode IS NULL"
+        )
+        db.execute(
+            "UPDATE rooms SET protocol_profile='native' "
+            "WHERE protocol_profile NOT IN ('native', 'vmf-guided-strike-v1') OR protocol_profile IS NULL"
         )
         db.execute(
             "UPDATE rooms SET ai_difficulty='normal' "
@@ -843,9 +851,9 @@ def initialize_database() -> None:
         if db.execute("SELECT 1 FROM rooms WHERE room_id=?", (ACTIVE_GAME_ROOM_ID,)).fetchone() is None:
             now = iso_time(utc_now())
             db.execute(
-                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,intel_stale_after_sec,intel_archive_after_sec,status,enabled,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (ACTIVE_GAME_ROOM_ID, "主推演室", "默认联网推演房间", "default",
+                "INSERT INTO rooms(room_id,name,description,scenario_id,protocol_profile,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,intel_stale_after_sec,intel_archive_after_sec,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ACTIVE_GAME_ROOM_ID, "主推演室", "默认联网推演房间", "default", "native",
                  json.dumps(DEFAULT_SEAT_LIMITS, ensure_ascii=False),
                  json.dumps({}, ensure_ascii=False), "pvp", "normal", "rules", "", "", 1,
                  10.0, 120.0, "stopped", 1, now, now),
@@ -1311,6 +1319,7 @@ def public_room(row: sqlite3.Row) -> dict:
         "name": row["name"],
         "description": row["description"],
         "scenarioId": row["scenario_id"],
+        "protocolProfile": row["protocol_profile"] if "protocol_profile" in row.keys() else "native",
         "seatLimits": seat_limits,
         "seatParameters": decode(row["seat_parameters"], {}),
         "mode": row["mode"],
@@ -2251,9 +2260,9 @@ def create_room(body: RoomBody, _: sqlite3.Row = Depends(require_admin)) -> dict
                 # never make a rules-only room depend on Ollama.
                 ai_model = ai_model or ""
             db.execute(
-                "INSERT INTO rooms(room_id,name,description,scenario_id,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,intel_stale_after_sec,intel_archive_after_sec,status,enabled,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (body.room_id, body.name, body.description, body.scenario_id,
+                "INSERT INTO rooms(room_id,name,description,scenario_id,protocol_profile,seat_limits,seat_parameters,mode,ai_difficulty,ai_provider,ai_model,ai_resolved_model,config_version,intel_stale_after_sec,intel_archive_after_sec,status,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (body.room_id, body.name, body.description, body.scenario_id, body.protocol_profile,
                  json.dumps(compatibility_limits, ensure_ascii=False),
                  json.dumps(body.seat_parameters, ensure_ascii=False), body.mode,
                  body.ai_difficulty, ai_provider, ai_model, "", 1,
@@ -2298,6 +2307,11 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
             body.intel_archive_after_sec
             if "intel_archive_after_sec" in body.model_fields_set
             else float(existing["intel_archive_after_sec"])
+        )
+        protocol_profile = (
+            body.protocol_profile
+            if "protocol_profile" in body.model_fields_set
+            else existing["protocol_profile"]
         )
         if intel_archive_after_sec <= intel_stale_after_sec:
             raise HTTPException(status_code=422, detail="情报归档阈值必须大于失联阈值")
@@ -2351,13 +2365,14 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
             or model != room_ai_model(existing["ai_model"])
             or intel_stale_after_sec != float(existing["intel_stale_after_sec"])
             or intel_archive_after_sec != float(existing["intel_archive_after_sec"])
+            or protocol_profile != existing["protocol_profile"]
         )
         if changed:
             config_version += 1
         now = iso_time(utc_now())
         db.execute(
-            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,mode=?,ai_difficulty=?,ai_provider=?,ai_model=?,ai_resolved_model=?,config_version=?,intel_stale_after_sec=?,intel_archive_after_sec=?,enabled=?,updated_at=? WHERE room_id=?",
-            (body.name, body.description, body.scenario_id,
+            "UPDATE rooms SET name=?,description=?,scenario_id=?,protocol_profile=?,seat_limits=?,seat_parameters=?,mode=?,ai_difficulty=?,ai_provider=?,ai_model=?,ai_resolved_model=?,config_version=?,intel_stale_after_sec=?,intel_archive_after_sec=?,enabled=?,updated_at=? WHERE room_id=?",
+            (body.name, body.description, body.scenario_id, protocol_profile,
              json.dumps(seat_limits, ensure_ascii=False),
              json.dumps(seat_parameters, ensure_ascii=False), mode, ai_difficulty,
              provider, model, "" if ai_changed or mode_changed else existing["ai_resolved_model"],
@@ -2595,19 +2610,25 @@ def internal_room_config(
             if "seat_parameters" in body.model_fields_set
             else current_parameters
         )
+        protocol_profile = (
+            body.protocol_profile
+            if "protocol_profile" in body.model_fields_set
+            else existing["protocol_profile"]
+        )
         changed = (
             body.name != existing["name"]
             or body.description != existing["description"]
             or body.scenario_id != existing["scenario_id"]
             or seat_limits != current_limits
             or seat_parameters != current_parameters
+            or protocol_profile != existing["protocol_profile"]
         )
         next_version = int(existing["config_version"]) + (1 if changed else 0)
         now = iso_time(utc_now())
         update = db.execute(
-            "UPDATE rooms SET name=?,description=?,scenario_id=?,seat_limits=?,seat_parameters=?,config_version=?,updated_at=? "
+            "UPDATE rooms SET name=?,description=?,scenario_id=?,protocol_profile=?,seat_limits=?,seat_parameters=?,config_version=?,updated_at=? "
             "WHERE room_id=? AND config_version=?",
-            (body.name, body.description, body.scenario_id,
+            (body.name, body.description, body.scenario_id, protocol_profile,
              json.dumps(seat_limits, ensure_ascii=False),
              json.dumps(seat_parameters, ensure_ascii=False), next_version, now,
              room_id, body.expected_config_version),

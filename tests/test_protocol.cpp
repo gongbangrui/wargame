@@ -5,6 +5,7 @@
 #include "protocol/StateDelta.h"
 
 #include <QJsonArray>
+#include <QByteArray>
 #include <QStringList>
 
 using namespace gbr;
@@ -1140,6 +1141,57 @@ TEST(ProtocolTest, RejectsMalformedOptionalPveFields) {
                                  {QStringLiteral("aiDifficulty"), QStringLiteral("normal")},
                                  {QStringLiteral("configVersion"), 1}}}});
     EXPECT_FALSE(Protocol::validateServerEnvelope(malformedSnapshot).valid);
+}
+
+TEST(ProtocolTest, StrictVmfTaskCommandsRequireV8AndCanonicalWireMetadata) {
+    const QJsonObject message{
+        {QStringLiteral("messageId"), QStringLiteral("strict-message-1")},
+        {QStringLiteral("traceId"), QStringLiteral("strict-trace-1")},
+        {QStringLiteral("timestamp"), QStringLiteral("2026-08-22T10:00:00.000Z")},
+        {QStringLiteral("domainType"), QStringLiteral("AttackAuthorization")},
+        {QStringLiteral("vmfMessage"), QStringLiteral("NetworkMonitoring")},
+        {QStringLiteral("catalogId"), QStringLiteral("47020")},
+        {QStringLiteral("payload"),
+         QJsonObject{{QStringLiteral("taskId"), QStringLiteral("red-task-1")},
+                     {QStringLiteral("targetId"), QStringLiteral("blue_gt_1")}}},
+        {QStringLiteral("wireBytes"), QString::fromLatin1(QByteArray(1, '\0').toBase64())},
+        {QStringLiteral("wireBitLength"), 8},
+        {QStringLiteral("correlationId"), QStringLiteral("corr-1")}};
+    const QJsonObject payload{
+        {QStringLiteral("requestId"), QStringLiteral("request-1")},
+        {QStringLiteral("taskId"), QStringLiteral("red-task-1")},
+        {QStringLiteral("expectedTaskRevision"), 0},
+        {QStringLiteral("action"), QStringLiteral("authorizeAttack")},
+        {QStringLiteral("messages"), QJsonArray{message}}};
+    EXPECT_TRUE(Protocol::validateClientEnvelope(
+                    Protocol::makeClientEnvelope(
+                        QString::fromLatin1(Protocol::VmfTaskCommandMessage),
+                        QStringLiteral("request-1"), payload))
+                    .valid);
+    EXPECT_FALSE(Protocol::validateClientEnvelopeForVersion(
+                     Protocol::makeClientEnvelopeForVersion(
+                         QString::fromLatin1(Protocol::VmfTaskCommandMessage),
+                         QStringLiteral("request-1"), payload,
+                         Protocol::PreviousVersion, Protocol::PreviousSchemaVersion))
+                     .valid);
+
+    EXPECT_FALSE(Protocol::validateClientEnvelope(
+                     Protocol::makeClientEnvelope(
+                         QString::fromLatin1(Protocol::VmfTaskCommandMessage),
+                         QStringLiteral("different-envelope-id"), payload))
+                     .valid);
+
+    QJsonObject malformed = payload;
+    QJsonArray malformedMessages = malformed.value(QStringLiteral("messages")).toArray();
+    QJsonObject malformedMessage = malformedMessages.first().toObject();
+    malformedMessage.remove(QStringLiteral("timestamp"));
+    malformedMessages[0] = malformedMessage;
+    malformed[QStringLiteral("messages")] = malformedMessages;
+    EXPECT_FALSE(Protocol::validateClientEnvelope(
+                     Protocol::makeClientEnvelope(
+                         QString::fromLatin1(Protocol::VmfTaskCommandMessage),
+                         QStringLiteral("request-1"), malformed))
+                     .valid);
 }
 
 TEST(StateDeltaTest, AppliesChangedUnitsAndRoomState) {

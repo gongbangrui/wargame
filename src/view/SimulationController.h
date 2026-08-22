@@ -92,6 +92,9 @@ class SimulationController : public QObject {
     Q_PROPERTY(QVariantList timeline READ timeline NOTIFY timelineForward)
     Q_PROPERTY(double replayDuration READ replayDuration NOTIFY timelineForward)
     Q_PROPERTY(QJsonObject vmfWorkflow READ vmfWorkflow NOTIFY vmfWorkflowChanged)
+    Q_PROPERTY(QString protocolProfile READ protocolProfile NOTIFY roomStateChanged)
+    Q_PROPERTY(QJsonObject vmfTasks READ vmfTasks NOTIFY vmfTasksChanged)
+    Q_PROPERTY(QJsonObject vmfTrace READ vmfTrace NOTIFY vmfTraceChanged)
 public:
     explicit SimulationController(QObject* parent = nullptr);
 
@@ -191,6 +194,9 @@ public:
     /// Projected guided-strike state for the focused side.  The QML layer sees
     /// only this bounded snapshot, never the engine workflow or MessageBus.
     QJsonObject vmfWorkflow() const;
+    QString protocolProfile() const { return m_protocolProfile; }
+    QJsonObject vmfTasks() const { return m_remoteVmfTasks; }
+    QJsonObject vmfTrace() const { return m_remoteVmfTrace; }
 
     Q_INVOKABLE void loadDefault();
     Q_INVOKABLE void saveScenario(const QString& path);
@@ -218,6 +224,7 @@ public:
         const QString& targetId, const QVariantList& waypoints);
     Q_INVOKABLE QVariantMap withdrawGuidedStrike(const QString& attackerId,
                                                  const QVariantMap& home);
+    Q_INVOKABLE QVariantMap sendVmfTaskCommand(const QVariantMap& command);
 
     Q_INVOKABLE void saveSetting(const QString& key, const QVariant& value);
     Q_INVOKABLE QVariant loadSetting(const QString& key, const QVariant& defaultValue = QVariant()) const;
@@ -342,6 +349,8 @@ signals:
     void commandStatusChanged();
     void timelineForward();
     void vmfWorkflowChanged();
+    void vmfTasksChanged();
+    void vmfTraceChanged();
 
     void viewModeChanged();
     void focusedSideChanged();
@@ -429,6 +438,9 @@ private:
     QVariantList m_remoteMessages;
     QVariantList m_remoteProjectiles;
     QJsonObject m_remoteVmfWorkflow;
+    QJsonObject m_remoteVmfTasks;
+    QJsonObject m_remoteVmfTrace;
+    QString m_protocolProfile = QStringLiteral("native");
     QVariantList m_chatMessages;
     QVariantList m_onlineRooms;
     QVariantList m_onlineSeats;

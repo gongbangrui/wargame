@@ -9,6 +9,7 @@
 #include "RoomPersistence.h"
 #include "IntelLedger.h"
 #include "FastDdsNode.h"
+#include "StrictVmfTask.h"
 #include "protocol/Protocol.h"
 
 #include <QDateTime>
@@ -105,6 +106,8 @@ private:
         QString roomName;
         QString roomDescription;
         QString scenarioId;
+        QString protocolProfile;
+        QJsonObject strictVmfTasks;
         QHash<QString, int> seatLimits;
         QHash<QString, QJsonObject> seatParameters;
         quint64 configVersion = 1;
@@ -205,6 +208,8 @@ private:
     void handleSetObserverTrajectories(QWebSocket* socket, const QJsonObject& payload);
     void handleVmfMessage(QWebSocket* socket, const QJsonObject& payload,
                           const QString& requestId);
+    void handleVmfTaskCommand(QWebSocket* socket, const QJsonObject& payload,
+                              const QString& requestId);
     void handleGeneratedVmfMessage(const QJsonObject& posted);
     void sendSeatDirectory(QWebSocket* socket);
     QString normalizedRole(const ClientSession& session) const;
@@ -277,6 +282,8 @@ private:
     void syncAuthoritativeSeats();
     bool clearDeploymentRuntime(QString* error = nullptr);
     bool applyDeployedScenario(QString* error = nullptr);
+    void appendStrictProfileTargets(Scenario* scenario) const;
+    void completeStrictReturns();
     bool applyDeploymentIfPreparing(QString* error = nullptr);
     bool applyDepartureToRuntime(const QStringList& removedUnitIds,
                                  QString* error = nullptr);
@@ -381,6 +388,8 @@ private:
     QString m_recoveryError;
     QSet<QString> m_vmfMessageIds;
     QStringList m_vmfMessageIdOrder;
+    StrictVmfTaskSet m_strictVmfTasks;
+    QString m_protocolProfile = QStringLiteral("native");
     // Bus-generated VMF observations are durable inputs during normal
     // operation, but replay must never append a second event while applying
     // the original event log.

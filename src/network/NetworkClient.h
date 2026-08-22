@@ -50,6 +50,7 @@ public:
                               const QString& title, const QString& note);
     QString requestIntelHistory(const QVariantMap& query = {});
     QString sendVmfMessage(const QJsonObject& message);
+    QString sendVmfTaskCommand(const QJsonObject& command);
     void cancelIntelHistoryRequests();
     void sendMapMark(const QVariantMap& position, const QString& label,
                      const QStringList& recipientSeatIds = {});
@@ -77,6 +78,8 @@ signals:
     void intelShareReceived(const QJsonObject& share);
     void intelHistoryPageReceived(const QJsonObject& page);
     void vmfEventReceived(const QJsonObject& event);
+    void vmfTaskResultReceived(const QJsonObject& result);
+    void vmfTraceReceived(const QJsonObject& trace);
     void transferEventReceived(const QJsonObject& event);
     void snapshotReceived(const QJsonObject& payload);
     void deltaSnapshotReceived(const QJsonObject& payload,

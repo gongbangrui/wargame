@@ -100,8 +100,8 @@ class GameSession {
 
   send(type, payload, messageId = crypto.randomUUID()) {
     this.socket.send(JSON.stringify({
-      protocolVersion: 7,
-      schemaVersion: 7,
+      protocolVersion: 8,
+      schemaVersion: 8,
       type,
       messageId,
       payload,

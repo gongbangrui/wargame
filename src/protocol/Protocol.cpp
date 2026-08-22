@@ -29,7 +29,7 @@ const QSet<QString>& clientTypes() {
         QStringLiteral("mapMark"), QStringLiteral("setUnitName"),
         QStringLiteral("requestRedeploy"), QStringLiteral("redeploy"),
         QStringLiteral("setObserverTrajectories"), QStringLiteral("setObserverTrails"),
-        QStringLiteral("vmfMessage")};
+        QStringLiteral("vmfMessage"), QStringLiteral("vmfTaskCommand")};
     return types;
 }
 
@@ -40,6 +40,7 @@ const QSet<QString>& serverTypes() {
         QStringLiteral("pong"), QStringLiteral("error"), QStringLiteral("roomDirectory"),
         QStringLiteral("seatState"), QStringLiteral("deploymentPrompt"),
         QStringLiteral("intelShare"), QStringLiteral("intelHistoryPage"),
+        QStringLiteral("vmfTaskResult"), QStringLiteral("vmfTrace"),
         QStringLiteral("vmfEvent")};
     return types;
 }
@@ -214,12 +215,14 @@ bool projectSeat(const QJsonObject& object, SeatProjection* projection) {
             && !object.value(QStringLiteral("pendingTransfer")).isBool())
         || (object.contains(QStringLiteral("redeployRequested"))
             && !object.value(QStringLiteral("redeployRequested")).isBool())
-        || (object.contains(QStringLiteral("controllerType"))
+                || (object.contains(QStringLiteral("controllerType"))
             && (!object.value(QStringLiteral("controllerType")).isString()
                 || (object.value(QStringLiteral("controllerType")).toString()
                     != QLatin1String("human")
                     && object.value(QStringLiteral("controllerType")).toString()
-                       != QLatin1String("ai"))))
+                       != QLatin1String("ai")
+                    && object.value(QStringLiteral("controllerType")).toString()
+                       != QLatin1String("placeholder"))))
         || !validOptionalString(object, QStringLiteral("unitId"), MaxIdentifierLength)
         || !validOptionalString(object, QStringLiteral("selectedTemplate"), MaxIdentifierLength)
         || !validOptionalString(object, QStringLiteral("unitName"), 128)) {
@@ -262,6 +265,75 @@ bool projectSeats(const QJsonValue& value, QList<SeatProjection>* projection) {
 bool hasOnlyFields(const QJsonObject& object, const QSet<QString>& allowed) {
     for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
         if (!allowed.contains(it.key())) return false;
+    }
+    return true;
+}
+
+bool validVmfTaskCommand(const QJsonObject& payload) {
+    static const QSet<QString> allowed{
+        QStringLiteral("requestId"), QStringLiteral("taskId"),
+        QStringLiteral("expectedTaskRevision"), QStringLiteral("action"),
+        QStringLiteral("messages"), QStringLiteral("commanderSeatId"),
+        QStringLiteral("reconSeatId"), QStringLiteral("attackSeatId"),
+        QStringLiteral("groundSeatId"), QStringLiteral("targetId"),
+        QStringLiteral("correlationId")};
+    if (!hasOnlyFields(payload, allowed)
+        || !validIdentifier(payload.value(QStringLiteral("requestId")))
+        || !validIdentifier(payload.value(QStringLiteral("taskId")))
+        || !validNonNegativeInteger(payload.value(QStringLiteral("expectedTaskRevision")))
+        || !validString(payload.value(QStringLiteral("action")), MaxActionLength)
+        || !payload.value(QStringLiteral("messages")).isArray()) return false;
+    const QString action = payload.value(QStringLiteral("action")).toString();
+    if (action == QLatin1String("createTask")) {
+        if (payload.value(QStringLiteral("expectedTaskRevision")).toInteger() != 0) {
+            return false;
+        }
+        for (const QString& field : {QStringLiteral("commanderSeatId"),
+                                     QStringLiteral("reconSeatId"),
+                                     QStringLiteral("attackSeatId"),
+                                     QStringLiteral("groundSeatId"),
+                                     QStringLiteral("targetId"),
+                                     QStringLiteral("correlationId")}) {
+            if (!validIdentifier(payload.value(field))) return false;
+        }
+    } else {
+        for (const QString& field : {QStringLiteral("commanderSeatId"),
+                                     QStringLiteral("reconSeatId"),
+                                     QStringLiteral("attackSeatId"),
+                                     QStringLiteral("groundSeatId"),
+                                     QStringLiteral("targetId"),
+                                     QStringLiteral("correlationId")}) {
+            if (payload.contains(field)) return false;
+        }
+    }
+    const QJsonArray messages = payload.value(QStringLiteral("messages")).toArray();
+    if (messages.size() > 16
+        || (action == QLatin1String("createTask") && !messages.isEmpty())) {
+        return false;
+    }
+    for (const QJsonValue& value : messages) {
+        if (!value.isObject()) return false;
+        const QJsonObject message = value.toObject();
+        static const QSet<QString> messageFields{
+            QStringLiteral("messageId"), QStringLiteral("traceId"),
+            QStringLiteral("timestamp"),
+            QStringLiteral("domainType"), QStringLiteral("vmfMessage"),
+            QStringLiteral("catalogId"), QStringLiteral("payload"),
+            QStringLiteral("wireBytes"), QStringLiteral("wireBitLength"),
+            QStringLiteral("correlationId")};
+        if (!hasOnlyFields(message, messageFields)
+            || !validIdentifier(message.value(QStringLiteral("messageId")))
+            || !validIdentifier(message.value(QStringLiteral("traceId")))
+            || !validString(message.value(QStringLiteral("timestamp")),
+                            MaxIntelTimestampLength)
+            || !validString(message.value(QStringLiteral("domainType")), MaxIdentifierLength)
+            || !validString(message.value(QStringLiteral("vmfMessage")), MaxIdentifierLength)
+            || !validIdentifier(message.value(QStringLiteral("catalogId")))
+            || !message.value(QStringLiteral("payload")).isObject()
+            || !validVmfWire(message)
+            || !validOptionalString(message, QStringLiteral("correlationId"), MaxIdentifierLength)) {
+            return false;
+        }
     }
     return true;
 }
@@ -871,12 +943,17 @@ bool validObserverRoomState(const QJsonObject& roomState) {
         QStringLiteral("configVersion"),
         QStringLiteral("running"), QStringLiteral("simTime"), QStringLiteral("speed"),
         QStringLiteral("scenarioRevision"), QStringLiteral("stateRevision"),
-        QStringLiteral("observer"), QStringLiteral("vmfWorkflows")};
+        QStringLiteral("observer"), QStringLiteral("vmfWorkflows"),
+        QStringLiteral("protocolProfile"), QStringLiteral("vmfTasks")};
     return hasOnlyFields(roomState, allowed)
         && roomState.value(QStringLiteral("observer")).isBool()
         && roomState.value(QStringLiteral("observer")).toBool()
         && (!roomState.contains(QStringLiteral("vmfWorkflows"))
-            || roomState.value(QStringLiteral("vmfWorkflows")).isObject());
+            || roomState.value(QStringLiteral("vmfWorkflows")).isObject())
+        && (!roomState.contains(QStringLiteral("protocolProfile"))
+            || roomState.value(QStringLiteral("protocolProfile")).isString())
+        && (!roomState.contains(QStringLiteral("vmfTasks"))
+            || roomState.value(QStringLiteral("vmfTasks")).isObject());
 }
 
 bool validObserverUnits(const QJsonValue& value) {
@@ -978,7 +1055,15 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
         || (roomState.contains(QStringLiteral("vmfWorkflow"))
             && !validVmfWorkflow(roomState.value(QStringLiteral("vmfWorkflow"))))
         || (roomState.contains(QStringLiteral("vmfWorkflows"))
-            && !validVmfWorkflowMap(roomState.value(QStringLiteral("vmfWorkflows"))))) {
+            && !validVmfWorkflowMap(roomState.value(QStringLiteral("vmfWorkflows"))))
+        || (roomState.contains(QStringLiteral("protocolProfile"))
+            && (!validString(roomState.value(QStringLiteral("protocolProfile")), 64)
+                || (roomState.value(QStringLiteral("protocolProfile")).toString()
+                    != QLatin1String("native")
+                    && roomState.value(QStringLiteral("protocolProfile")).toString()
+                       != QLatin1String("vmf-guided-strike-v1"))))
+        || (roomState.contains(QStringLiteral("vmfTasks"))
+            && !roomState.value(QStringLiteral("vmfTasks")).isObject())) {
         return invalid();
     }
     const QString phase = roomState.value(QStringLiteral("phase")).toString(
@@ -1044,6 +1129,9 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
     projection->seatParameters = roomState.value(QStringLiteral("seatParameters")).toObject();
     projection->vmfWorkflow = roomState.value(QStringLiteral("vmfWorkflow")).toObject();
     projection->vmfWorkflows = roomState.value(QStringLiteral("vmfWorkflows")).toObject();
+    projection->protocolProfile = roomState.value(QStringLiteral("protocolProfile"))
+                                      .toString(QStringLiteral("native"));
+    projection->vmfTasks = roomState.value(QStringLiteral("vmfTasks")).toObject();
     projection->seats = seats;
     return ValidationResult::success();
 }
@@ -1190,6 +1278,38 @@ ValidationResult projectCommandResult(const QJsonObject& payload,
     return ValidationResult::success();
 }
 
+ValidationResult projectVmfTaskResult(const QJsonObject& payload,
+                                      VmfTaskResultProjection* projection) {
+    const QString status = payload.value(QStringLiteral("status")).toString();
+    if ((status != QLatin1String("accepted") && status != QLatin1String("blocked")
+         && status != QLatin1String("rejected"))
+        || !validNonNegativeInteger(payload.value(QStringLiteral("taskRevision")))
+        || !payload.value(QStringLiteral("messageIds")).isArray()
+        || payload.value(QStringLiteral("messageIds")).toArray().size() > 16
+        || !validString(payload.value(QStringLiteral("code")), MaxIdentifierLength)
+        || (payload.contains(QStringLiteral("retryable"))
+            && !payload.value(QStringLiteral("retryable")).isBool())) {
+        return ValidationResult::failure(QStringLiteral("INVALID_PAYLOAD"),
+                                         QStringLiteral("VMF 任务回执结构无效"));
+    }
+    QStringList messageIds;
+    for (const QJsonValue& value : payload.value(QStringLiteral("messageIds")).toArray()) {
+        if (!validIdentifier(value)) {
+            return ValidationResult::failure(QStringLiteral("INVALID_PAYLOAD"),
+                                             QStringLiteral("VMF 任务消息 ID 无效"));
+        }
+        messageIds.append(value.toString());
+    }
+    if (projection) {
+        projection->status = status;
+        projection->taskRevision = payload.value(QStringLiteral("taskRevision")).toInteger();
+        projection->messageIds = messageIds;
+        projection->code = payload.value(QStringLiteral("code")).toString();
+        projection->retryable = payload.value(QStringLiteral("retryable")).toBool();
+    }
+    return ValidationResult::success();
+}
+
 ValidationResult projectTransferEvent(const QJsonObject& payload,
                                       TransferEventProjection* projection) {
     const QString kind = payload.value(QStringLiteral("kind")).toString();
@@ -1270,6 +1390,7 @@ bool isKnownServerMessageType(const QString& type) {
 bool isSupportedWireVersion(int protocolVersion, int schemaVersion) {
     return (protocolVersion == Version && schemaVersion == SchemaVersion)
         || (protocolVersion == PreviousVersion && schemaVersion == PreviousSchemaVersion)
+        || (protocolVersion == OlderVersion && schemaVersion == OlderSchemaVersion)
         || (protocolVersion == LegacyVersion && schemaVersion == LegacySchemaVersion);
 }
 
@@ -1285,10 +1406,19 @@ ValidationResult validateClientEnvelopeInternal(const QJsonObject& envelope,
         return ValidationResult::failure(QStringLiteral("INVALID_ENVELOPE"),
                                          QStringLiteral("消息 ID 缺失或过长"));
     }
-    return validateClientPayloadForVersion(
+    const ValidationResult payloadValidation = validateClientPayloadForVersion(
         envelope.value(QStringLiteral("type")).toString(),
         envelope.value(QStringLiteral("payload")).toObject(),
         envelope.value(QStringLiteral("schemaVersion")).toInteger());
+    if (!payloadValidation.valid) return payloadValidation;
+    if (envelope.value(QStringLiteral("type")) == QLatin1String("vmfTaskCommand")
+        && envelope.value(QStringLiteral("payload")).toObject()
+               .value(QStringLiteral("requestId")) != messageId) {
+        return ValidationResult::failure(
+            QStringLiteral("INVALID_ENVELOPE"),
+            QStringLiteral("严格 VMF requestId 必须与 envelope messageId 一致"));
+    }
+    return ValidationResult::success();
 }
 
 ValidationResult validateServerEnvelopeInternal(const QJsonObject& envelope,
@@ -1330,6 +1460,9 @@ ValidationResult validateClientPayloadForVersion(const QString& type,
     auto invalid = [](const QString& message) {
         return ValidationResult::failure(QStringLiteral("INVALID_PAYLOAD"), message);
     };
+    if (type == QLatin1String("vmfTaskCommand") && schemaVersion != SchemaVersion) {
+        return invalid(QStringLiteral("严格 VMF 任务需要协议 schema 8"));
+    }
     if (type == QLatin1String("auth")) {
         if (!validString(payload.value(QStringLiteral("token")), MaxTokenLength)) {
             return invalid(QStringLiteral("登录令牌缺失或过长"));
@@ -1374,7 +1507,8 @@ ValidationResult validateClientPayloadForVersion(const QString& type,
             static const QSet<QString> fields{
                 QStringLiteral("expectedConfigVersion"), QStringLiteral("name"),
                 QStringLiteral("description"), QStringLiteral("scenarioId"),
-                QStringLiteral("seatLimits"), QStringLiteral("seatParameters")};
+                QStringLiteral("seatLimits"), QStringLiteral("seatParameters"),
+                QStringLiteral("protocolProfile")};
             if (!hasOnlyFields(args, fields)
                 || !validNonNegativeInteger(args.value(QStringLiteral("expectedConfigVersion")))
                 || args.value(QStringLiteral("expectedConfigVersion")).toInteger() <= 0
@@ -1382,6 +1516,11 @@ ValidationResult validateClientPayloadForVersion(const QString& type,
                 || !validOptionalString(args, QStringLiteral("description"),
                                         MaxRoomDescriptionLength, true)
                 || !validString(args.value(QStringLiteral("scenarioId")), 128)
+                || (args.contains(QStringLiteral("protocolProfile"))
+                    && (args.value(QStringLiteral("protocolProfile")).toString()
+                            != QLatin1String("native")
+                        && args.value(QStringLiteral("protocolProfile")).toString()
+                            != QLatin1String("vmf-guided-strike-v1")))
                 || (args.contains(QStringLiteral("seatLimits"))
                     && !validRoomSeatLimits(args.value(QStringLiteral("seatLimits")), true))
                 || !validRoomSeatParameters(args.value(QStringLiteral("seatParameters")))) {
@@ -1648,7 +1787,10 @@ ValidationResult validateClientPayloadForVersion(const QString& type,
             QStringLiteral("CommCheck"), QStringLiteral("EngagementReport"),
             QStringLiteral("SharedDetect"), QStringLiteral("Pursue"),
             QStringLiteral("Halt"), QStringLiteral("CancelEngagement"),
-            QStringLiteral("SetRulesOfEngagement")};
+            QStringLiteral("SetRulesOfEngagement"), QStringLiteral("IdentityReport"),
+            QStringLiteral("GroundTargetReport"), QStringLiteral("RouteAcceptance"),
+            QStringLiteral("AttackReadyReport"), QStringLiteral("AttackAuthorization"),
+            QStringLiteral("BattleDamageReport"), QStringLiteral("DamageAssessmentConfirm")};
         if (!messageTypes.contains(payload.value(QStringLiteral("messageType")).toString())
             || (payload.contains(QStringLiteral("payload"))
                 && !payload.value(QStringLiteral("payload")).isObject())
@@ -1662,6 +1804,10 @@ ValidationResult validateClientPayloadForVersion(const QString& type,
                     || payload.value(QStringLiteral("fieldCount")).toInteger() > 4096))) {
             return invalid(QStringLiteral("VMF 消息类型或附加字段无效"));
         }
+    } else if (type == QLatin1String("vmfTaskCommand")) {
+        if (!validVmfTaskCommand(payload)) {
+            return invalid(QStringLiteral("严格 VMF 任务命令结构无效"));
+        }
     }
     return ValidationResult::success();
 }
@@ -1672,6 +1818,10 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
     auto invalid = [](const QString& message) {
         return ValidationResult::failure(QStringLiteral("INVALID_PAYLOAD"), message);
     };
+    if ((type == QLatin1String("vmfTaskResult") || type == QLatin1String("vmfTrace"))
+        && schemaVersion != SchemaVersion) {
+        return invalid(QStringLiteral("严格 VMF 服务器消息需要协议 schema 8"));
+    }
     if (type == QLatin1String("welcome")) {
         if (!validString(payload.value(QStringLiteral("username")), 128)
             || !validString(payload.value(QStringLiteral("displayName")), 128, true)) {
@@ -1809,6 +1959,13 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
         }
     } else if (type == QLatin1String("commandResult")) {
         return projectCommandResult(payload, nullptr);
+    } else if (type == QLatin1String("vmfTaskResult")) {
+        return projectVmfTaskResult(payload, nullptr);
+    } else if (type == QLatin1String("vmfTrace")) {
+        if (!validIdentifier(payload.value(QStringLiteral("traceId")))
+            || !validIdentifier(payload.value(QStringLiteral("taskId")))) {
+            return invalid(QStringLiteral("VMF trace 标识无效"));
+        }
     } else if (type == QLatin1String("event")) {
         return projectServerEvent(payload);
     } else if (type == QLatin1String("error")) {
@@ -1844,7 +2001,12 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
                     && difficulty != QLatin1String("normal")
                     && difficulty != QLatin1String("hard"))
                 || (room.contains(QStringLiteral("configVersion"))
-                    && !validNonNegativeInteger(room.value(QStringLiteral("configVersion"))))) {
+                    && !validNonNegativeInteger(room.value(QStringLiteral("configVersion"))))
+                || (room.contains(QStringLiteral("protocolProfile"))
+                    && (room.value(QStringLiteral("protocolProfile")).toString()
+                            != QLatin1String("native")
+                        && room.value(QStringLiteral("protocolProfile")).toString()
+                            != QLatin1String("vmf-guided-strike-v1")))) {
                 return invalid(QStringLiteral("房间模式配置无效"));
             }
         }
@@ -1880,7 +2042,10 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
             QStringLiteral("retryCount"), QStringLiteral("acked"),
             QStringLiteral("catalogId"), QStringLiteral("trigger"),
             QStringLiteral("informationValue"),
-            QStringLiteral("summary"), QStringLiteral("workflow")};
+            QStringLiteral("summary"), QStringLiteral("workflow"),
+            QStringLiteral("wireBytes"), QStringLiteral("fields"),
+            QStringLiteral("canonicalXml"), QStringLiteral("decodedXml"),
+            QStringLiteral("roundTripEqual"), QStringLiteral("ackState")};
         if (!hasOnlyFields(payload, fields)
             || !validString(payload.value(QStringLiteral("kind")), MaxIdentifierLength)
             || !validIdentifier(payload.value(QStringLiteral("messageId")))
@@ -1909,6 +2074,12 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
                 && !payload.value(QStringLiteral("informationValue")).isObject())
             || (payload.contains(QStringLiteral("workflow"))
                 && !validVmfWorkflow(payload.value(QStringLiteral("workflow"))))
+            || (payload.contains(QStringLiteral("wireBytes"))
+                && !payload.value(QStringLiteral("wireBytes")).isString())
+            || (payload.contains(QStringLiteral("fields"))
+                && !payload.value(QStringLiteral("fields")).isArray())
+            || (payload.contains(QStringLiteral("roundTripEqual"))
+                && !payload.value(QStringLiteral("roundTripEqual")).isBool())
             || !validOptionalString(payload, QStringLiteral("summary"), 256)) {
             return invalid(QStringLiteral("VMF 事件摘要结构无效"));
         }

@@ -10,6 +10,13 @@ Item {
         ? controller.currentSeatSide : (controller ? controller.focusedSide : "red")
     property string enemySide: side === "red" ? "blue" : "red"
     property var workflow: controller ? controller.vmfWorkflow : ({})
+    property bool strictProfile: controller && controller.networked
+        && controller.protocolProfile === "vmf-guided-strike-v1"
+    property var strictTasks: controller && controller.vmfTasks
+        && controller.vmfTasks.tasks ? controller.vmfTasks.tasks : []
+    property string selectedTaskId: ""
+    property string strictTargetId: ""
+    property var strictTrace: controller ? controller.vmfTrace : ({})
     property bool vmfAvailable: workflow && workflow.stage !== undefined
     property bool compact: width < 360
     property string selectedReconId: ""
@@ -31,19 +38,129 @@ Item {
     property color danger: AppContext.danger
     property color success: AppContext.success
 
-    visible: vmfAvailable
-    implicitHeight: body.implicitHeight + 18
+    visible: strictProfile || vmfAvailable
+    implicitHeight: strictProfile ? strictBody.implicitHeight + 18 : body.implicitHeight + 18
+
+    function strictTask() {
+        for (var i = 0; i < root.strictTasks.length; ++i)
+            if (String(root.strictTasks[i].taskId || "") === root.selectedTaskId)
+                return root.strictTasks[i]
+        return root.strictTasks.length > 0 ? root.strictTasks[0] : ({})
+    }
+
+    function strictSeat(type) {
+        var seats = root.controller ? root.controller.onlineSeats || [] : []
+        for (var i = 0; i < seats.length; ++i)
+            if (seats[i].side === root.side && seats[i].seatType === type) return seats[i]
+        return ({})
+    }
+
+    function strictActionFor(task) {
+        var role = root.controller ? root.controller.currentSeatType : ""
+        var stage = String(task.stage || "")
+        var actionByStage = {
+            awaitingTargetReport: "reportTarget", targetReported: "dispatch",
+            dispatchPending: "acceptDispatch", enRoute: "orderGroundGuidance",
+            groundGuidancePending: "markRendezvousReady", rendezvousReady: "identityHello",
+            identityHandshakePending: "identityConfirm", guidancePackagePending: "sendGuidancePackage",
+            routeAcceptancePending: "acceptGuidance", attackLanePending: "reportAttackReady",
+            attackAuthorizationPending: "authorizeAttack", engaging: "engage",
+            damageReportPending: "reportBattleDamage", damageAssessmentPending: "confirmDamageAssessment",
+            reconConfirmationPending: "confirmTargetDestroyed", targetDestroyed: "withdraw",
+            withdrawPending: "markReturning"
+        }
+        var action = actionByStage[stage] || ""
+        var roles = {
+            reportTarget: "recon", dispatch: "commander", acceptDispatch: "attack",
+            orderGroundGuidance: "commander", markRendezvousReady: "ground",
+            identityHello: "attack", identityConfirm: "ground", sendGuidancePackage: "ground",
+            acceptGuidance: "attack", reportAttackReady: "attack", authorizeAttack: "ground",
+            engage: "attack", reportBattleDamage: "attack", confirmDamageAssessment: "ground",
+            confirmTargetDestroyed: "recon", withdraw: "commander", markReturning: "attack"
+        }
+        return roles[action] === role ? action : ""
+    }
+
+    function strictActionLabel(action) {
+        var labels = {
+            reportTarget: "提交目标报告", dispatch: "下达派单", acceptDispatch: "接受派单",
+            orderGroundGuidance: "命令地面引导", markRendezvousReady: "确认会合就绪",
+            identityHello: "发起身份握手", identityConfirm: "确认身份",
+            sendGuidancePackage: "发送引导包", acceptGuidance: "接受航路",
+            reportAttackReady: "报告攻击就绪", authorizeAttack: "授权攻击",
+            engage: "实施攻击", reportBattleDamage: "报告毁伤",
+            confirmDamageAssessment: "确认毁伤评估", confirmTargetDestroyed: "确认目标摧毁",
+            withdraw: "下达撤离", markReturning: "报告返航"
+        }
+        return labels[action] || "等待绑定战位操作"
+    }
+
+    function syncStrictSelection() {
+        if (!root.strictTasks.length) { root.selectedTaskId = ""; return }
+        for (var i = 0; i < root.strictTasks.length; ++i)
+            if (root.strictTasks[i].taskId === root.selectedTaskId) return
+        root.selectedTaskId = String(root.strictTasks[0].taskId || "")
+    }
+
+    function createStrictTask() {
+        var commander = root.strictSeat("commander")
+        var recon = root.strictSeat("recon")
+        var attack = root.strictSeat("attack")
+        var ground = root.strictSeat("ground")
+        if (!commander.seatId || !recon.seatId || !attack.seatId || !ground.seatId
+                || !root.strictTargetId) {
+            root.notice = "任务绑定或目标不完整"
+            return
+        }
+        var suffix = String(Date.now())
+        root.controller.sendVmfTaskCommand({
+            requestId: "vmf-task-create-" + suffix,
+            taskId: root.side + "-strike-" + suffix,
+            expectedTaskRevision: 0,
+            action: "createTask", messages: [],
+            commanderSeatId: commander.seatId, reconSeatId: recon.seatId,
+            attackSeatId: attack.seatId, groundSeatId: ground.seatId,
+            targetId: root.strictTargetId, correlationId: "corr-" + suffix
+        })
+        root.notice = "任务创建请求已发送"
+    }
+
+    function advanceStrictTask() {
+        var task = root.strictTask()
+        var action = root.strictActionFor(task)
+        if (!task.taskId || !action) return
+        root.controller.sendVmfTaskCommand({
+            requestId: "vmf-task-action-" + String(Date.now()),
+            taskId: task.taskId,
+            expectedTaskRevision: Number(task.taskRevision || 0),
+            action: action, messages: []
+        })
+        root.notice = root.strictActionLabel(action) + "已提交"
+    }
 
     function stageLabel(stage) {
         var labels = {
             idle: "等待目标报告",
+            awaitingTargetReport: "等待目标报告",
             targetReported: "目标已报告",
             dispatchPending: "派单等待确认",
+            enRoute: "攻击机航渡中",
             strikeDispatched: "打击已派出",
             groundGuidancePending: "等待地面引导",
+            rendezvousReady: "会合点就绪",
+            identityHandshakePending: "身份握手中",
+            guidancePackagePending: "等待引导包",
+            routeAcceptancePending: "等待航路接受",
+            attackLanePending: "等待攻击就绪",
+            attackAuthorizationPending: "等待攻击授权",
             engaging: "攻击进行中",
+            damageReportPending: "等待毁伤报告",
+            damageAssessmentPending: "等待毁伤评估",
+            reconConfirmationPending: "等待侦察确认",
             targetDestroyed: "目标已摧毁",
             withdrawPending: "撤离等待确认",
+            returning: "返航中",
+            completed: "任务完成",
             withdrawn: "已下达撤离",
             failed: "工作流失败"
         }
@@ -97,7 +214,7 @@ Item {
 
     function findOptionIndex(options, id) {
         for (var i = 0; i < (options || []).length; ++i)
-            if (String(options[i].id || "") === String(id || "")) return i
+            if (String(options[i].id || options[i].taskId || "") === String(id || "")) return i
         return -1
     }
 
@@ -106,6 +223,9 @@ Item {
         if (root.selectedReconId === "" || root.findOptionIndex(recon, root.selectedReconId) < 0)
             root.selectedReconId = recon.length > 0 ? recon[0].id : root.currentSeatUnitId()
         var targets = root.targetOptions()
+        if (root.strictProfile
+                && root.findOptionIndex(targets, root.strictTargetId) < 0)
+            root.strictTargetId = targets.length > 0 ? targets[0].id : ""
         if (root.selectedTargetId && root.findOptionIndex(targets, root.selectedTargetId) < 0
                 && (!root.workflow || root.workflow.stage === "idle")) root.selectedTargetId = ""
         if (!root.selectedTargetId && targets.length > 0) root.selectedTargetId = targets[0].id
@@ -164,9 +284,98 @@ Item {
         function onOnlineStateChanged() { root.keepSelection() }
         function onVmfWorkflowChanged() { root.keepSelection() }
         function onMessagesForward() { root.keepSelection() }
+        function onVmfTasksChanged() { root.syncStrictSelection() }
     }
 
     Rectangle {
+        visible: root.strictProfile
+        anchors.fill: parent
+        color: root.panel
+        border.color: root.line
+        radius: 5
+
+        ColumnLayout {
+            id: strictBody
+            anchors.fill: parent
+            anchors.margins: 9
+            spacing: 8
+
+            RowLayout {
+                Layout.fillWidth: true
+                Rectangle { Layout.preferredWidth: 3; Layout.preferredHeight: 20; color: root.cyan; radius: 2 }
+                ColumnLayout { Layout.fillWidth: true; spacing: 1
+                    Text { text: "VMF 严格任务工作区"; color: root.ink; font.pixelSize: 12; font.bold: true }
+                    Text { text: root.side === "blue" ? "蓝方权威任务链" : "红方权威任务链"; color: root.dim; font.pixelSize: 9 }
+                }
+                Text { text: root.strictTasks.length + " 项"; color: root.cyan; font.pixelSize: 10; font.bold: true }
+            }
+
+            RowLayout {
+                visible: root.controller && root.controller.currentSeatType === "commander"
+                Layout.fillWidth: true; spacing: 5
+                ComboBox {
+                    id: strictTargetCombo
+                    Layout.fillWidth: true
+                    model: root.targetOptions(); textRole: "callsign"; valueRole: "id"
+                    onActivated: root.strictTargetId = currentValue || ""
+                    contentItem: Text { text: strictTargetCombo.currentText || "选择已发现托管目标"; color: root.ink; leftPadding: 6; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; font.pixelSize: 9 }
+                    background: Rectangle { color: root.page; border.color: root.line; radius: 3 }
+                }
+                Button {
+                    id: createStrictButton
+                    text: "新建任务"; enabled: root.strictTargetId.length > 0
+                    onClicked: root.createStrictTask()
+                    contentItem: Text { text: createStrictButton.text; color: createStrictButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 9; font.bold: true }
+                    background: Rectangle { color: createStrictButton.enabled ? root.cyan : root.line; radius: 3 }
+                }
+            }
+
+            ComboBox {
+                id: strictTaskCombo
+                Layout.fillWidth: true
+                model: root.strictTasks; textRole: "taskId"; valueRole: "taskId"
+                currentIndex: root.findOptionIndex(model, root.selectedTaskId)
+                onActivated: root.selectedTaskId = currentValue || ""
+                contentItem: Text { text: strictTaskCombo.currentText || "暂无绑定任务"; color: root.ink; leftPadding: 6; verticalAlignment: Text.AlignVCenter; elide: Text.ElideMiddle; font.pixelSize: 9 }
+                background: Rectangle { color: root.page; border.color: root.line; radius: 3 }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true; Layout.preferredHeight: 94
+                color: root.panelAlt; border.color: root.strictTask().health === "blocked" ? root.orange : root.line; radius: 4
+                ColumnLayout { anchors.fill: parent; anchors.margins: 8; spacing: 3
+                    Text { Layout.fillWidth: true; text: root.stageLabel(root.strictTask().stage); color: root.stageColor(root.strictTask().stage); font.pixelSize: 11; font.bold: true; elide: Text.ElideRight }
+                    Text { Layout.fillWidth: true; text: "目标 " + (root.strictTask().targetId || "—") + " · rev " + Number(root.strictTask().taskRevision || 0); color: root.dim; font.pixelSize: 9; elide: Text.ElideMiddle }
+                    Text { Layout.fillWidth: true; text: root.strictTask().health === "blocked" ? "等待人工接管：" + (root.strictTask().blockCode || "WAITING_FOR_HUMAN") : "资源绑定有效"; color: root.strictTask().health === "blocked" ? root.orange : root.dim; font.pixelSize: 9; elide: Text.ElideRight }
+                    Button {
+                        id: strictActionButton
+                        Layout.alignment: Qt.AlignRight
+                        property string actionName: root.strictActionFor(root.strictTask())
+                        text: root.strictActionLabel(actionName)
+                        enabled: actionName.length > 0 && root.strictTask().health !== "completed"
+                        onClicked: root.advanceStrictTask()
+                        contentItem: Text { text: strictActionButton.text; color: strictActionButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 9; font.bold: true }
+                        background: Rectangle { color: strictActionButton.enabled ? root.cyan : root.line; radius: 3 }
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true; Layout.preferredHeight: 66
+                color: root.page; border.color: root.line; radius: 4
+                ColumnLayout { anchors.fill: parent; anchors.margins: 7; spacing: 2
+                    Text { text: "Codec 检查"; color: root.ink; font.pixelSize: 9; font.bold: true }
+                    Text { Layout.fillWidth: true; text: root.strictTrace.traceId ? (root.strictTrace.vmfMessage + " · " + Number(root.strictTrace.wireBitLength || root.strictTrace.bitLength || 0) + " bit · " + (root.strictTrace.roundTripEqual ? "往返一致" : "待校验")) : "暂无服务器 VMF trace"; color: root.strictTrace.roundTripEqual ? root.success : root.dim; font.pixelSize: 9; elide: Text.ElideRight }
+                    Text { Layout.fillWidth: true; text: root.strictTrace.catalogId ? ("Catalog " + root.strictTrace.catalogId + " · " + Number(root.strictTrace.fieldCount || 0) + " fields") : ""; color: root.dim; font.pixelSize: 8; elide: Text.ElideRight }
+                }
+            }
+
+            Text { visible: root.notice.length > 0; Layout.fillWidth: true; text: root.notice; color: root.dim; font.pixelSize: 9; wrapMode: Text.WordWrap }
+        }
+    }
+
+    Rectangle {
+        visible: !root.strictProfile
         anchors.fill: parent
         color: root.panel
         border.color: root.line

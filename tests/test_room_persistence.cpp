@@ -131,6 +131,34 @@ TEST(RoomPersistenceTest, AiStateRoundTripsWithCurrentCheckpointSchema) {
     EXPECT_EQ(loaded.aiState->effectiveEngine, ai.effectiveEngine);
 }
 
+TEST(RoomPersistenceTest, StrictVmfProfileOptsIntoSchemaSevenAndProtocolEight) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    const QString checkpointPath = temporary.filePath(QStringLiteral("checkpoint.json"));
+    RoomPersistence persistence(checkpointPath,
+                                temporary.filePath(QStringLiteral("events.jsonl")));
+    RoomCheckpoint source;
+    source.scenario = ScenarioIo::defaultScenario();
+    source.runInitialScenario = source.scenario;
+    source.protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    source.strictVmfTasks = QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                                        {QStringLiteral("tasks"), QJsonArray{}}};
+
+    QString error;
+    ASSERT_TRUE(persistence.saveCheckpoint(source, &error)) << error.toStdString();
+    QFile file(checkpointPath);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    const QJsonObject saved = QJsonDocument::fromJson(file.readAll()).object();
+    EXPECT_EQ(saved.value(QStringLiteral("checkpointSchemaVersion")).toInt(), 7);
+    EXPECT_EQ(saved.value(QStringLiteral("protocolVersion")).toInt(), 8);
+
+    RoomCheckpoint loaded;
+    ASSERT_TRUE(persistence.loadCheckpoint(&loaded, &error)) << error.toStdString();
+    EXPECT_EQ(loaded.sourceSchemaVersion, 7);
+    EXPECT_EQ(loaded.protocolProfile, QStringLiteral("vmf-guided-strike-v1"));
+    EXPECT_EQ(loaded.strictVmfTasks, source.strictVmfTasks);
+}
+
 TEST(RoomPersistenceTest, SchemaTwoCheckpointLoadsWithMigrationSourceVersion) {
     QTemporaryDir temporary;
     ASSERT_TRUE(temporary.isValid());
@@ -190,6 +218,35 @@ TEST(RoomPersistenceTest, SchemaFourCheckpointLoadsWithoutIntelLedger) {
     ASSERT_TRUE(persistence.loadCheckpoint(&loaded, &error)) << error.toStdString();
     EXPECT_EQ(loaded.sourceSchemaVersion, 4);
     EXPECT_TRUE(loaded.intelLedger.isEmpty());
+}
+
+TEST(RoomPersistenceTest, SchemaFiveCheckpointKeepsProtocolFiveCompatibility) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    const QString checkpointPath = temporary.filePath(QStringLiteral("checkpoint.json"));
+    RoomPersistence persistence(checkpointPath,
+                                temporary.filePath(QStringLiteral("events.jsonl")));
+    RoomCheckpoint source;
+    source.scenario = ScenarioIo::defaultScenario();
+    source.runInitialScenario = source.scenario;
+    source.intelLedger = QJsonObject{{QStringLiteral("index"), QJsonArray{1, 2}}};
+
+    QString error;
+    ASSERT_TRUE(persistence.saveCheckpoint(source, &error)) << error.toStdString();
+    QFile file(checkpointPath);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    QJsonObject legacy = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    legacy[QStringLiteral("checkpointSchemaVersion")] = 5;
+    legacy[QStringLiteral("protocolVersion")] = 5;
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_GT(file.write(QJsonDocument(legacy).toJson()), 0);
+    file.close();
+
+    RoomCheckpoint loaded;
+    ASSERT_TRUE(persistence.loadCheckpoint(&loaded, &error)) << error.toStdString();
+    EXPECT_EQ(loaded.sourceSchemaVersion, 5);
+    EXPECT_EQ(loaded.intelLedger, source.intelLedger);
 }
 
 TEST(RoomPersistenceTest, MissingProviderModelUsesLegacyCheckpointCompatibilityValue) {
@@ -670,6 +727,119 @@ TEST(RoomPersistenceTest, RejectsPathsOutsideDataRootAndSymlinkEscapes) {
         EXPECT_FALSE(escaped.saveCheckpoint(checkpoint, &error));
         EXPECT_FALSE(QFileInfo::exists(outside.filePath(QStringLiteral("checkpoint.json"))));
     }
+}
+
+TEST(RoomPersistenceTest, StrictPlaceholderTakeoverPreservesRuntimeAndResetClearsTasks) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    qputenv("INTERNAL_API_KEY", QByteArray(32, 'k'));
+    qputenv("AUTH_SERVICE_URL", QByteArray("http://127.0.0.1:1"));
+    qputenv("SCENARIO_PATH", temporary.filePath(QStringLiteral("scenario.json")).toUtf8());
+    qputenv("MONITOR_LOG_PATH", temporary.filePath(QStringLiteral("monitor.jsonl")).toUtf8());
+    qputenv("MONITOR_STATUS_PATH", temporary.filePath(QStringLiteral("status.json")).toUtf8());
+    qputenv("CHECKPOINT_PATH", temporary.filePath(QStringLiteral("checkpoint.json")).toUtf8());
+    qputenv("COMMAND_LOG_PATH", temporary.filePath(QStringLiteral("events.jsonl")).toUtf8());
+
+    QWebSocket socket;
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    ASSERT_TRUE(server.m_authoritativeRoom.installPlaceholdersForMissing().ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        2, QStringLiteral("blue commander"), QStringLiteral("blue_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deployInitial(
+        QStringLiteral("red_commander"), GeoPos{1000.0, 1000.0, 0.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.deployInitial(
+        QStringLiteral("blue_commander"), GeoPos{19000.0, 14000.0, 0.0}).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.setReady(1, true).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.setReady(2, true).ok);
+    QString error;
+    ASSERT_TRUE(server.applyDeployedScenario(&error)) << error.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.start().ok);
+    server.m_phase = QStringLiteral("running");
+    server.m_roomStatus = QStringLiteral("running");
+    server.m_engine.setRunning(true);
+    server.syncAuthoritativeSeats();
+
+    const QString seatId = QStringLiteral("red_attack_1");
+    const QString unitId = server.m_authoritativeRoom.seat(seatId).unitId;
+    UnitBase* runtimeUnit = server.m_engine.unit(unitId);
+    ASSERT_NE(runtimeUnit, nullptr);
+    runtimeUnit->setHp(41.0);
+
+    GameServer::ClientSession session;
+    session.authenticated = true;
+    session.userId = 3;
+    session.username = QStringLiteral("attack human");
+    session.displayName = session.username;
+    session.roomId = server.m_roomId;
+    session.accountRole = QStringLiteral("player");
+    session.role = session.accountRole;
+    server.m_clients.insert(&socket, session);
+    server.handleClaimSeat(&socket, QJsonObject{{QStringLiteral("seatId"), seatId}});
+
+    EXPECT_EQ(server.m_clients.value(&socket).seatId, seatId);
+    EXPECT_EQ(server.m_authoritativeRoom.seat(seatId).controllerType,
+              QStringLiteral("human"));
+    EXPECT_EQ(server.m_authoritativeRoom.seat(seatId).unitId, unitId);
+    ASSERT_NE(server.m_engine.unit(unitId), nullptr);
+    EXPECT_DOUBLE_EQ(server.m_engine.unit(unitId)->hp(), 41.0);
+
+    const AuthoritativeRoom::Seat commander =
+        server.m_authoritativeRoom.seat(QStringLiteral("red_commander"));
+    ASSERT_NE(server.m_engine.unit(commander.unitId), nullptr);
+    server.m_engine.unit(commander.unitId)->setDetectRange(1'000'000.0);
+    server.m_sharedIntel[QStringLiteral("red_commander")].insert(
+        QStringLiteral("blue_gt_1"));
+    GameServer::ClientSession& commanderSession = server.m_clients[&socket];
+    commanderSession.userId = 1;
+    commanderSession.username = QStringLiteral("red commander");
+    commanderSession.displayName = commanderSession.username;
+    commanderSession.seatId = QStringLiteral("red_commander");
+    commanderSession.seatType = QStringLiteral("commander");
+    commanderSession.side = QStringLiteral("red");
+    ASSERT_EQ(server.m_phase, QStringLiteral("running"));
+    ASSERT_TRUE(server.m_engine.running());
+    ASSERT_NE(server.m_engine.unit(QStringLiteral("blue_gt_1")), nullptr);
+    ASSERT_EQ(server.m_engine.unit(QStringLiteral("blue_gt_1"))->kind(),
+              UnitKind::GroundTarget);
+    ASSERT_TRUE(server.visibleUnitIds(commanderSession).contains(
+        QStringLiteral("blue_gt_1")));
+    for (const QString& binding : {QStringLiteral("red_commander"),
+                                   QStringLiteral("red_recon_1"), seatId,
+                                   QStringLiteral("red_ground_1")}) {
+        ASSERT_TRUE(server.m_authoritativeRoom.hasSeat(binding));
+        ASSERT_NE(server.m_engine.unit(server.m_authoritativeRoom.seat(binding).unitId),
+                  nullptr);
+    }
+    const QString requestId = QStringLiteral("strict-create-reset");
+    server.handleVmfTaskCommand(
+        &socket,
+        QJsonObject{{QStringLiteral("requestId"), requestId},
+                    {QStringLiteral("taskId"), QStringLiteral("red-task-reset")},
+                    {QStringLiteral("expectedTaskRevision"), 0},
+                    {QStringLiteral("action"), QStringLiteral("createTask")},
+                    {QStringLiteral("messages"), QJsonArray{}},
+                    {QStringLiteral("commanderSeatId"), QStringLiteral("red_commander")},
+                    {QStringLiteral("reconSeatId"), QStringLiteral("red_recon_1")},
+                    {QStringLiteral("attackSeatId"), seatId},
+                    {QStringLiteral("groundSeatId"), QStringLiteral("red_ground_1")},
+                    {QStringLiteral("targetId"), QStringLiteral("blue_gt_1")},
+                    {QStringLiteral("correlationId"), QStringLiteral("corr-reset")}},
+        requestId);
+    const StrictVmfTaskSet::Task* created =
+        server.m_strictVmfTasks.task(QStringLiteral("red-task-reset"));
+    ASSERT_NE(created, nullptr);
+    EXPECT_EQ(created->health, QStringLiteral("blocked"));
+    ASSERT_TRUE(server.resetAuthoritativeRuntime(QStringLiteral("test-reset"), &error))
+        << error.toStdString();
+    EXPECT_TRUE(server.m_strictVmfTasks.tasks().isEmpty());
+    EXPECT_EQ(server.m_authoritativeRoom.seat(QStringLiteral("red_recon_1")).controllerType,
+              QStringLiteral("placeholder"));
 }
 
 TEST(RoomPersistenceTest, ReportsInjectedDurabilityFailure) {

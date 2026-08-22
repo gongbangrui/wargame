@@ -5,6 +5,7 @@
 #include "../units/AttackUAV.h"
 #include "../units/GroundScout.h"
 #include "../units/JammerUAV.h"
+#include "../units/GroundTarget.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -64,6 +65,7 @@ std::unique_ptr<UnitBase> UnitBase::create(const QString& id, UnitKind kind, Sid
     case UnitKind::AttackUAV:   return std::make_unique<AttackUAV>(id, side, bus, parent);
     case UnitKind::GroundScout: return std::make_unique<GroundScout>(id, side, bus, parent);
     case UnitKind::JammerUAV:   return std::make_unique<JammerUAV>(id, side, bus, parent);
+    case UnitKind::GroundTarget:return std::make_unique<GroundTarget>(id, side, bus, parent);
     }
     return nullptr;
 }
@@ -266,6 +268,11 @@ void UnitBase::configureAbilitiesAndFuelEconomy() {
         m_fuelIdleRate = 0.0;
         m_fuelMoveCoefficient = 3.0;
         break;
+    case UnitKind::GroundTarget:
+        m_countermeasure = {};
+        m_fuelIdleRate = 0.0;
+        m_fuelMoveCoefficient = 0.0;
+        break;
     }
 }
 
@@ -417,7 +424,7 @@ void UnitBase::requestService(bool value) {
     }
     m_serviceRequested = true;
     if (m_serviceCpId.isEmpty()) m_serviceCpId = m_cpId;
-        if (m_serviceDuration < 3.0) {
+    if (m_serviceDuration < 3.0) {
         m_serviceDuration = std::max(3.0, m_serviceElapsed);
     }
     emit runtimeStateChanged();

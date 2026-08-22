@@ -44,6 +44,13 @@ struct Message {
         Halt,                  // 停止指令
         CancelEngagement,      // 取消交战，保留当前位置
         SetRulesOfEngagement,  // 交战规则
+        IdentityReport,
+        GroundTargetReport,
+        RouteAcceptance,
+        AttackReadyReport,
+        AttackAuthorization,
+        BattleDamageReport,
+        DamageAssessmentConfirm,
     };
 
     static QString typeName(Type t) {
@@ -70,6 +77,13 @@ struct Message {
         case Type::Halt: return QStringLiteral("Halt");
         case Type::CancelEngagement: return QStringLiteral("CancelEngagement");
         case Type::SetRulesOfEngagement: return QStringLiteral("SetRulesOfEngagement");
+        case Type::IdentityReport: return QStringLiteral("IdentityReport");
+        case Type::GroundTargetReport: return QStringLiteral("GroundTargetReport");
+        case Type::RouteAcceptance: return QStringLiteral("RouteAcceptance");
+        case Type::AttackReadyReport: return QStringLiteral("AttackReadyReport");
+        case Type::AttackAuthorization: return QStringLiteral("AttackAuthorization");
+        case Type::BattleDamageReport: return QStringLiteral("BattleDamageReport");
+        case Type::DamageAssessmentConfirm: return QStringLiteral("DamageAssessmentConfirm");
         }
         return QStringLiteral("Unknown");
     }
@@ -83,7 +97,10 @@ struct Message {
             Type::Guidance, Type::GroundGuideOrder, Type::GroundAttackConfirm,
             Type::Ack, Type::Withdraw, Type::WithdrawOrder, Type::CommCheck,
             Type::EngagementReport, Type::SharedDetect, Type::Pursue,
-            Type::Halt, Type::CancelEngagement, Type::SetRulesOfEngagement};
+            Type::Halt, Type::CancelEngagement, Type::SetRulesOfEngagement,
+            Type::IdentityReport, Type::GroundTargetReport, Type::RouteAcceptance,
+            Type::AttackReadyReport, Type::AttackAuthorization,
+            Type::BattleDamageReport, Type::DamageAssessmentConfirm};
         for (const Type value : values) {
             if (typeName(value) == name) {
                 *output = value;

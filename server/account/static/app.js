@@ -627,6 +627,7 @@ function openRoomModal(room = null) {
   $("roomName").value = room ? room.name : "";
   $("roomDescription").value = room ? room.description : "";
   $("roomScenario").value = room ? room.scenarioId : "default";
+  $("roomProtocolProfile").value = room?.protocolProfile || "native";
   $("roomParameters").value = JSON.stringify(room ? room.seatParameters : {}, null, 2);
   $("roomEnabled").checked = room ? room.enabled : true;
   $("roomModePve").checked = room?.mode === "pve";
@@ -1406,7 +1407,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       const seatParameters = collectSeatParameters();
       const roomId = $("roomId").value || $("roomKey").value.trim();
-      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value, ai_provider: $("roomAiProvider").value, ai_model: $("roomAiModel").value.trim(), intel_stale_after_sec: Number($("roomIntelStale").value), intel_archive_after_sec: Number($("roomIntelArchive").value) };
+      const body = { room_id: roomId, name: $("roomName").value.trim(), description: $("roomDescription").value.trim(), scenario_id: $("roomScenario").value.trim(), protocol_profile: $("roomProtocolProfile").value, seat_parameters: seatParameters, enabled: $("roomEnabled").checked, mode: $("roomModePve").checked ? "pve" : "pvp", ai_difficulty: $("roomAiDifficulty").value, ai_provider: $("roomAiProvider").value, ai_model: $("roomAiModel").value.trim(), intel_stale_after_sec: Number($("roomIntelStale").value), intel_archive_after_sec: Number($("roomIntelArchive").value) };
       await api(roomId && $("roomId").value ? `/api/admin/rooms/${encodeURIComponent(roomId)}` : "/api/admin/rooms", { method: roomId && $("roomId").value ? "PUT" : "POST", body: JSON.stringify(body) });
       closeRoomModal(); await loadRooms(); toast("房间已保存");
     } catch (error) { toast(error.message || "房间配置 JSON 无效", true); state.roomSaving = false; $("roomSave").disabled = false; }

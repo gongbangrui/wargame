@@ -105,7 +105,8 @@ quint64 targetTypeCode(const QJsonObject& target) {
         {QStringLiteral("aircraft"), 0}, {QStringLiteral("plane"), 0},
         {QStringLiteral("uav"), 0}, {QStringLiteral("reconuav"), 0},
         {QStringLiteral("attackuav"), 0}, {QStringLiteral("armored"), 1},
-        {QStringLiteral("tank"), 1}, {QStringLiteral("vehicle"), 1},
+        {QStringLiteral("tank"), 1}, {QStringLiteral("groundtarget"), 1},
+        {QStringLiteral("vehicle"), 1},
         {QStringLiteral("groundvehicle"), 1}, {QStringLiteral("personnel"), 2},
         {QStringLiteral("infantry"), 2}, {QStringLiteral("groundscout"), 2},
         {QStringLiteral("commandpost"), 3}, {QStringLiteral("jammeruav"), 4},
@@ -486,6 +487,8 @@ QString VmfMessageGateway::messageNameForType(Message::Type type,
     case Message::Type::TargetDestroyed:
     case Message::Type::EngagementReport:
     case Message::Type::SharedDetect:
+    case Message::Type::GroundTargetReport:
+    case Message::Type::BattleDamageReport:
         return QStringLiteral("Target Report");
     case Message::Type::StrikePlan:
     case Message::Type::FlightPlan:
@@ -525,6 +528,24 @@ QJsonObject VmfMessageGateway::traceSummary(const Message& message,
     result.insert(QStringLiteral("wireFormat"), Message::wireFormatName(message.wireFormat));
     result.insert(QStringLiteral("bitLength"), encoded.bitLength);
     result.insert(QStringLiteral("byteLength"), encoded.bytes.size());
+    result.insert(QStringLiteral("wireBytes"), QString::fromLatin1(encoded.bytes.toBase64()));
+    result.insert(QStringLiteral("wireBitLength"), encoded.bitLength);
+    const QByteArray canonicalXml = encoded.canonicalXml.serialize(false);
+    result.insert(QStringLiteral("canonicalXml"), QString::fromUtf8(canonicalXml));
+    result.insert(QStringLiteral("decodedXml"), QString::fromUtf8(canonicalXml));
+    result.insert(QStringLiteral("roundTripEqual"), true);
+    QJsonArray fields;
+    for (const FieldLayout& field : encoded.fields) {
+        fields.append(QJsonObject{{QStringLiteral("path"), field.path},
+                                  {QStringLiteral("tag"), field.tag},
+                                  {QStringLiteral("name"), field.name},
+                                  {QStringLiteral("dfi"), field.dfi},
+                                  {QStringLiteral("dui"), field.dui},
+                                  {QStringLiteral("value"), static_cast<qint64>(field.value)},
+                                  {QStringLiteral("bitOffset"), field.bitOffset},
+                                  {QStringLiteral("bits"), field.bits}});
+    }
+    result.insert(QStringLiteral("fields"), fields);
     result.insert(QStringLiteral("fieldCount"), encoded.fields.size());
     result.insert(QStringLiteral("validated"), true);
     result.insert(QStringLiteral("retryCount"), message.retryCount);

@@ -1126,7 +1126,7 @@ main() {
       "$STAGING_DIR/deploy/release-manifest.env" "$WARGAME_VERSION" "$WARGAME_SOURCE_DIGEST" \
       || die "发布包三端身份校验失败"
   else
-    warn "发布输入未提供 release-identity.txt；将只校验 v7/schema 7 清单"
+    warn "发布输入未提供 release-identity.txt；将只校验 v8/schema 8 清单"
   fi
   WARGAME_RELEASE_ID="${WARGAME_VERSION}-${WARGAME_SOURCE_DIGEST:0:12}"
   migrate_legacy_env
