@@ -649,6 +649,7 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
         m_battleSeed = QRandomGenerator::system()->generate64();
     } while (m_battleSeed == 0);
     rebuildUnitsFromScenario();
+    applyFrozenSidePolicy();
     m_redGuidedStrikeWorkflow.reset();
     m_blueGuidedStrikeWorkflow.reset();
     if (m_vmfGateway) {
@@ -828,6 +829,24 @@ void SimulationEngine::setRunning(bool r) {
     }
 }
 
+void SimulationEngine::setSideFrozen(const QString& side, bool frozen) {
+    if (side != QLatin1String("red") && side != QLatin1String("blue")) return;
+    if (frozen) m_frozenSides.insert(side);
+    else m_frozenSides.remove(side);
+    applyFrozenSidePolicy();
+}
+
+void SimulationEngine::applyFrozenSidePolicy() {
+    for (auto& [id, unit] : m_units) {
+        Q_UNUSED(id);
+        if (!m_frozenSides.contains(unit->sideStr())) continue;
+        unit->clearSchedule();
+        unit->cancelWaypointMotion();
+        unit->cancelService();
+        unit->setStatus(QStringLiteral("固定靶"));
+    }
+}
+
 void SimulationEngine::setSpeedMul(double m) {
     if (!std::isfinite(m)) return;
     m = std::clamp(m, 0.0, 8.0);
@@ -902,7 +921,7 @@ void SimulationEngine::tickUnits(double dt,
         // Remote-owned units are mirrored state; the local process does not
         // tick them — the peer does, and we receive the new state via the
         // transport. Single-process mode never has Remote units.
-        if (u->owner() == UnitOwner::Remote) continue;
+        if (u->owner() == UnitOwner::Remote || m_frozenSides.contains(u->sideStr())) continue;
         u->onTick(dt);
         if (auto* attacker = qobject_cast<AttackUAV*>(u.get())) {
             if (auto request = attacker->takePendingShot()) {
@@ -1061,8 +1080,10 @@ void SimulationEngine::resolveUnitCollisions(
         const double minimumDistance = first->collisionRadius() + second->collisionRadius();
         if (currentDistance < minimumDistance - 1e-6) {
             const double correction = minimumDistance - currentDistance + 0.01;
-            const bool firstCanMove = first->movable();
-            const bool secondCanMove = second->movable();
+            const bool firstCanMove = first->movable()
+                && !m_frozenSides.contains(first->sideStr());
+            const bool secondCanMove = second->movable()
+                && !m_frozenSides.contains(second->sideStr());
             const double firstShare = firstCanMove && secondCanMove ? 0.5
                 : (firstCanMove ? 1.0 : 0.0);
             const double secondShare = secondCanMove && firstCanMove ? 0.5
@@ -1362,6 +1383,7 @@ void SimulationEngine::settleTerminalProjectiles(const QStringList& projectileId
 
 void SimulationEngine::advanceServices(double dt) {
     for (auto& [id, controlled] : m_units) {
+        if (m_frozenSides.contains(controlled->sideStr())) continue;
         if (!controlled->serviceRequested()) continue;
         UnitBase* cp = unit(controlled->serviceCpId());
         const bool eligible = controlled->alive() && cp && cp->alive()
@@ -1402,7 +1424,8 @@ void SimulationEngine::applyEcmJamming() {
     std::vector<std::pair<QString, UnitBase*>> jammers;
     jammers.reserve(m_units.size());
     for (auto& [id, unit] : m_units) {
-        if (unit->kind() == UnitKind::JammerUAV && unit->alive()) {
+        if (unit->kind() == UnitKind::JammerUAV && unit->alive()
+            && !m_frozenSides.contains(unit->sideStr())) {
             jammers.emplace_back(id, unit.get());
         }
     }
@@ -1455,6 +1478,7 @@ void SimulationEngine::scanReconDetections(double dt) {
     for (auto& [reconId, recon] : m_units) {
         if (recon->kind() != UnitKind::ReconUAV) continue;
         if (!recon->alive()) continue;
+        if (m_frozenSides.contains(recon->sideStr())) continue;
         const auto center = recon->pos();
         const double dr = recon->detectRange();
         const QString myCpId = commandSenderIdFor(recon.get());
@@ -1500,6 +1524,7 @@ void SimulationEngine::broadcastPositionReports(bool manual) {
     if (m_reportCounter % 4 != 0 && !manual) return;
     for (auto& [id, u] : m_units) {
         if (!u->alive()) continue;
+        if (m_frozenSides.contains(u->sideStr())) continue;
         Message m;
         m.type = Message::Type::PositionReport;
         m.sender = id;
@@ -1548,6 +1573,7 @@ void SimulationEngine::refreshDetectionCache() {
 
 void SimulationEngine::applySchedules(double simTime, double dt) {
     for (auto& [id, u] : m_units) {
+        if (m_frozenSides.contains(u->sideStr())) continue;
         if (!u->movable()) continue;
         if (!u->alive()) continue;
         if (!u->hasUsableFuel() || u->serviceRequested()) continue;
@@ -1927,6 +1953,16 @@ CommandResult SimulationEngine::executeCommand(const QString& action, const QVar
         return validation;
     }
     auto it = m_dispatch.find(action);
+    // Command handlers are intentionally void because most commands enqueue
+    // asynchronous bus messages.  Clear the previous diagnostic and treat a
+    // handler-reported error as a rejected dispatch so callers cannot commit a
+    // durable VMF task whose engine action was silently dropped.
+    m_lastError.clear();
+    it->second(args);
+    if (!m_lastError.isEmpty()) {
+        return CommandResult::reject(QString::fromLatin1(CommandCode::DispatchFailed),
+                                     m_lastError);
+    }
     if (!m_replaying) {
         m_replayCommands.push_back(ReplayCommand{simTime(), ++m_replayCommandSequence,
                                                   action, args});
@@ -1935,7 +1971,6 @@ CommandResult SimulationEngine::executeCommand(const QString& action, const QVar
                                    {QStringLiteral("args"),
                                     QJsonObject::fromVariantMap(args)}});
     }
-    it->second(args);
     return CommandResult::ok();
 }
 
@@ -1967,6 +2002,10 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
     if (!controlled->alive()) {
         return CommandResult::reject(QString::fromLatin1(CommandCode::UnitDestroyed),
                                      QStringLiteral("单元已摧毁: %1").arg(unitId));
+    }
+    if (m_frozenSides.contains(controlled->sideStr())) {
+        return CommandResult::reject(QString::fromLatin1(CommandCode::UnitFrozen),
+                                     QStringLiteral("固定靶阵营不能执行命令: %1").arg(unitId));
     }
     const bool stationaryAction = action == QLatin1String("unitOrder")
         || action == QLatin1String("activateCountermeasure")
@@ -2216,7 +2255,10 @@ void SimulationEngine::cmdAssignTarget(const QVariantMap& args) {
     if (args.value(QStringLiteral("notificationOnly")).toBool()) {
         m.payload[QStringLiteral("notificationOnly")] = true;
     }
-    m_transport->send(m);
+    if (!m_transport->send(m)) {
+        m_lastError = QStringLiteral("攻击指令消息编码失败: %1").arg(attackerId);
+        emit errorOccurred(m_lastError);
+    }
 }
 
 void SimulationEngine::cmdSetFlightPlan(const QVariantMap& args) {
@@ -2244,7 +2286,10 @@ void SimulationEngine::cmdSetFlightPlan(const QVariantMap& args) {
     }
     m.sender = cpId;
     m.payload["waypoints"] = wp;
-    m_transport->send(m);
+    if (!m_transport->send(m)) {
+        m_lastError = QStringLiteral("VMF 航路消息编码失败: %1").arg(attackerId);
+        emit errorOccurred(m_lastError);
+    }
 }
 
 void SimulationEngine::cmdEngageTarget(const QVariantMap& args) {
@@ -2265,7 +2310,10 @@ void SimulationEngine::cmdEngageTarget(const QVariantMap& args) {
     m.receiver = attackerId;
     m.payload["fireNow"] = true;
     m.payload["targetId"] = targetId;
-    m_transport->send(m);
+    if (!m_transport->send(m)) {
+        m_lastError = QStringLiteral("VMF 攻击消息编码失败: %1").arg(attackerId);
+        emit errorOccurred(m_lastError);
+    }
 }
 
 void SimulationEngine::cmdUnitOrder(const QVariantMap& args) {
@@ -2363,7 +2411,10 @@ void SimulationEngine::cmdWithdraw(const QVariantMap& args) {
             m.payload["homeY"] = u->pos().y;
         }
     }
-    m_transport->send(m);
+    if (!m_transport->send(m)) {
+        m_lastError = QStringLiteral("VMF 撤离消息编码失败: %1").arg(uid);
+        emit errorOccurred(m_lastError);
+    }
 }
 
 void SimulationEngine::cmdSetSpeed(const QVariantMap& args) {
@@ -3200,6 +3251,7 @@ bool SimulationEngine::restoreCheckpointState(const QJsonArray& units,
     }
     m_clock->setSimTime(simTime);
     m_clock->setSpeedMul(speedMul);
+    applyFrozenSidePolicy();
     m_running = running && m_readyForSim;
     if (m_running) m_timer.start();
     emit runningChanged();

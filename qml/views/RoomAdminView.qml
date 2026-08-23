@@ -29,6 +29,8 @@ Item {
     property bool compactLayout: width < 860
     property bool narrowLayout: width < 560
     property bool tinyLayout: width < 420
+    readonly property bool strictVmf: root.controller
+        && root.controller.protocolProfile === "vmf-guided-strike-v1"
     // A two-column admin workspace needs enough width for the editor's own
     // list/canvas split.  Below this point stack the panels so the canvas is
     // never reduced to a clipped sliver.
@@ -310,10 +312,10 @@ Item {
                 columnSpacing: 8; rowSpacing: 8
                 Repeater {
                     model: [
-                        { title: "战位占用", value: root.occupiedSeatCount() + " / " + root.totalCapacity(), detail: "红 " + root.sideOccupied("red") + " · 蓝 " + root.sideOccupied("blue"), color: root.cyan },
-                        { title: "初始场景", value: root.scenarioCount() + " 个单位", detail: root.controller.canEditScenario ? "可编辑" : "战位占用，已锁定", color: root.controller.canEditScenario ? root.success : root.orange },
+                        { title: "战位占用", value: root.occupiedSeatCount() + " / " + root.totalCapacity(), detail: root.strictVmf ? ("红方参演 " + root.sideOccupied("red") + " · 蓝方固定靶 " + root.sideOccupied("blue")) : ("红 " + root.sideOccupied("red") + " · 蓝 " + root.sideOccupied("blue")), color: root.cyan },
+                        { title: "初始场景", value: root.scenarioCount() + " 个单位", detail: root.controller.canEditScenario ? "双方位置与参数可编辑" : "推演阶段已锁定", color: root.controller.canEditScenario ? root.success : root.orange },
                         { title: "覆盖参数", value: root.parameterCount() + " 个战位", detail: "空白使用默认值", color: root.cyan },
-                        { title: "准备状态", value: root.controller.redReady && root.controller.blueReady ? "双方已就绪" : "等待就绪", detail: root.controller.readyForSim ? "可以开始" : "尚未满足开局条件", color: root.controller.readyForSim ? root.success : root.orange }
+                        { title: "准备状态", value: root.strictVmf ? (root.controller.redReady ? "红方已就绪" : "等待红方指挥官") : root.controller.redReady && root.controller.blueReady ? "双方已就绪" : "等待就绪", detail: root.strictVmf ? (root.controller.readyForSim ? "蓝方固定靶已托管，可以开始" : "需红方指挥官和完整固定靶场景") : root.controller.readyForSim ? "可以开始" : "尚未满足开局条件", color: root.controller.readyForSim ? root.success : root.orange }
                     ]
                     delegate: Rectangle {
                         id: metricCard
@@ -365,12 +367,12 @@ Item {
                             Icon { name: "settings"; iconColor: root.cyan; iconSize: 16 }
                             ColumnLayout { Layout.fillWidth: true; spacing: 1
                                 Text { text: "初始场景与配置"; color: root.ink; font.pixelSize: 14; font.bold: true }
-                                Text { text: root.controller.roomMode === "pve" ? "PVE 对抗" : "PVP 对抗"; color: root.dim; font.pixelSize: 9 }
+                                Text { text: root.strictVmf ? "VMF 单方作战" : root.controller.roomMode === "pve" ? "PVE 对抗" : "PVP 对抗"; color: root.dim; font.pixelSize: 9 }
                             }
                         }
                         Text { Layout.fillWidth: true; text: root.controller.roomDescription || "暂无房间说明"; color: root.dim; font.pixelSize: 10; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
                         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
-                        SectionTitle { text: "双方战位" }
+                        SectionTitle { text: root.strictVmf ? "红方参演与蓝方固定靶" : "双方战位" }
                         Repeater {
                             model: ["red", "blue"]
                             delegate: Rectangle {
@@ -381,16 +383,16 @@ Item {
                                 RowLayout { anchors.fill: parent; anchors.margins: 9; spacing: 8
                                     Rectangle { Layout.preferredWidth: 5; Layout.preferredHeight: 22; color: sideSummary.modelData === "red" ? root.danger : root.cyan; radius: 2 }
                                     ColumnLayout { Layout.fillWidth: true; spacing: 1
-                                        Text { text: sideSummary.modelData === "red" ? "红方" : "蓝方"; color: root.ink; font.pixelSize: 10; font.bold: true }
-                                        Text { text: root.sideOccupied(sideSummary.modelData) + " / " + root.sideCapacity(sideSummary.modelData) + " 个战位"; color: root.dim; font.pixelSize: 9 }
+                                        Text { text: sideSummary.modelData === "red" ? (root.strictVmf ? "红方参演战位" : "红方") : (root.strictVmf ? "蓝方固定靶" : "蓝方"); color: root.ink; font.pixelSize: 10; font.bold: true }
+                                        Text { text: root.sideOccupied(sideSummary.modelData) + " / " + root.sideCapacity(sideSummary.modelData) + (root.strictVmf && sideSummary.modelData === "blue" ? " 个托管目标" : " 个战位"); color: root.dim; font.pixelSize: 9 }
                                     }
-                                    Text { text: root.sideOccupied(sideSummary.modelData) ? "有占用" : "空闲"; color: root.sideOccupied(sideSummary.modelData) ? root.cyan : root.dim; font.pixelSize: 9 }
+                                    Text { text: root.strictVmf && sideSummary.modelData === "blue" ? "固定不行动" : root.sideOccupied(sideSummary.modelData) ? "有占用" : "空闲"; color: root.sideOccupied(sideSummary.modelData) ? root.cyan : root.dim; font.pixelSize: 9 }
                                 }
                             }
                         }
                         Item { Layout.fillHeight: true; Layout.minimumHeight: 2 }
                         Flow { Layout.fillWidth: true; spacing: 7
-                            TonalButton { text: "编辑配置"; iconName: "settings"; base: root.cyan; enabled: root.controller.matchPhase === "preparing" && !root.configSaving; onClicked: root.openConfig() }
+                            TonalButton { text: "编辑配置"; iconName: "settings"; base: root.cyan; enabled: root.controller.canEditScenario && !root.configSaving; onClicked: root.openConfig() }
                             GhostButton { text: "重载"; iconName: "refresh"; enabled: !root.configSaving; onClicked: root.reloadConfig() }
                         }
                         Text { Layout.fillWidth: true; text: root.statusText || (root.dirty ? "有未保存的修改" : "配置已同步"); color: root.statusKind === "error" ? root.danger : root.statusKind === "success" ? root.success : root.statusKind === "dirty" ? root.orange : root.dim; font.pixelSize: 9; wrapMode: Text.WordWrap; maximumLineCount: 2 }
@@ -534,7 +536,7 @@ Item {
             spacing: 7; padding: 9; background: Rectangle { color: root.panelAlt; radius: 6 }
             GhostButton { text: "重载"; iconName: "refresh"; enabled: !root.configSaving; onClicked: root.reloadConfig() }
             GhostButton { text: "取消"; iconName: "close"; enabled: !root.configSaving; onClicked: configDialog.close() }
-            TonalButton { text: root.configSaving ? "保存中..." : "保存配置"; iconName: root.configSaving ? "refresh" : "check"; base: root.cyan; enabled: !root.configSaving && root.controller.matchPhase === "preparing"; onClicked: root.saveConfig() }
+            TonalButton { text: root.configSaving ? "保存中..." : "保存配置"; iconName: root.configSaving ? "refresh" : "check"; base: root.cyan; enabled: !root.configSaving && root.controller.canEditScenario; onClicked: root.saveConfig() }
         }
     }
 

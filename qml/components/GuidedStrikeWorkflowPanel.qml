@@ -55,9 +55,7 @@ Item {
         return ({})
     }
 
-    function strictActionFor(task) {
-        var role = root.controller ? root.controller.currentSeatType : ""
-        var stage = String(task.stage || "")
+    function strictStageAction(stage) {
         var actionByStage = {
             awaitingTargetReport: "reportTarget", targetReported: "dispatch",
             dispatchPending: "acceptDispatch", enRoute: "orderGroundGuidance",
@@ -69,7 +67,10 @@ Item {
             reconConfirmationPending: "confirmTargetDestroyed", targetDestroyed: "withdraw",
             withdrawPending: "markReturning"
         }
-        var action = actionByStage[stage] || ""
+        return actionByStage[String(stage || "")] || ""
+    }
+
+    function strictActionRole(action) {
         var roles = {
             reportTarget: "recon", dispatch: "commander", acceptDispatch: "attack",
             orderGroundGuidance: "commander", markRendezvousReady: "ground",
@@ -78,7 +79,37 @@ Item {
             engage: "attack", reportBattleDamage: "attack", confirmDamageAssessment: "ground",
             confirmTargetDestroyed: "recon", withdraw: "commander", markReturning: "attack"
         }
-        return roles[action] === role ? action : ""
+        return roles[action] || ""
+    }
+
+    function strictActorSeat(task) {
+        var action = root.strictStageAction(task.stage)
+        var role = root.strictActionRole(action)
+        if (!role) return ({})
+        var seatId = String(task[role + "SeatId"] || "")
+        var seats = root.controller ? root.controller.onlineSeats || [] : []
+        for (var i = 0; i < seats.length; ++i)
+            if (String(seats[i].seatId || "") === seatId) return seats[i]
+        return root.strictSeat(role)
+    }
+
+    function strictActionFor(task) {
+        if (!root.controller || root.controller.isObserver) return ""
+        var action = root.strictStageAction(task.stage)
+        var actor = root.strictActorSeat(task)
+        return action && actor.controlMode === "human"
+                && String(actor.seatId || "") === String(root.controller.currentSeatId || "")
+            ? action : ""
+    }
+
+    function strictActorStatus(task) {
+        var actor = root.strictActorSeat(task)
+        if (!actor.seatId) return "资源绑定有效"
+        if (actor.controlMode === "vmf-auto") return "当前环节由服务器自动控制"
+        if (actor.controlMode === "fixed-target") return "蓝方固定靶不执行任务操作"
+        if (String(actor.seatId) === String(root.controller.currentSeatId || ""))
+            return "等待本战位操作"
+        return "等待人工战位：" + String(actor.displayName || actor.seatId)
     }
 
     function strictActionLabel(action) {
@@ -305,13 +336,14 @@ Item {
                 Rectangle { Layout.preferredWidth: 3; Layout.preferredHeight: 20; color: root.cyan; radius: 2 }
                 ColumnLayout { Layout.fillWidth: true; spacing: 1
                     Text { text: "VMF 严格任务工作区"; color: root.ink; font.pixelSize: 12; font.bold: true }
-                    Text { text: root.side === "blue" ? "蓝方权威任务链" : "红方权威任务链"; color: root.dim; font.pixelSize: 9 }
+                    Text { text: "红方权威任务链 · 蓝方固定靶"; color: root.dim; font.pixelSize: 9 }
                 }
                 Text { text: root.strictTasks.length + " 项"; color: root.cyan; font.pixelSize: 10; font.bold: true }
             }
 
             RowLayout {
-                visible: root.controller && root.controller.currentSeatType === "commander"
+                visible: root.controller && root.controller.currentSeatSide === "red"
+                    && root.controller.currentSeatType === "commander"
                 Layout.fillWidth: true; spacing: 5
                 ComboBox {
                     id: strictTargetCombo
@@ -346,12 +378,14 @@ Item {
                 ColumnLayout { anchors.fill: parent; anchors.margins: 8; spacing: 3
                     Text { Layout.fillWidth: true; text: root.stageLabel(root.strictTask().stage); color: root.stageColor(root.strictTask().stage); font.pixelSize: 11; font.bold: true; elide: Text.ElideRight }
                     Text { Layout.fillWidth: true; text: "目标 " + (root.strictTask().targetId || "—") + " · rev " + Number(root.strictTask().taskRevision || 0); color: root.dim; font.pixelSize: 9; elide: Text.ElideMiddle }
-                    Text { Layout.fillWidth: true; text: root.strictTask().health === "blocked" ? "等待人工接管：" + (root.strictTask().blockCode || "WAITING_FOR_HUMAN") : "资源绑定有效"; color: root.strictTask().health === "blocked" ? root.orange : root.dim; font.pixelSize: 9; elide: Text.ElideRight }
+                    Text { Layout.fillWidth: true; text: root.strictTask().health === "blocked" ? ("任务受阻：" + (root.strictTask().blockCode || "BLOCKED")) : root.strictActorStatus(root.strictTask()); color: root.strictTask().health === "blocked" ? root.orange : root.dim; font.pixelSize: 9; elide: Text.ElideRight }
                     Button {
                         id: strictActionButton
                         Layout.alignment: Qt.AlignRight
                         property string actionName: root.strictActionFor(root.strictTask())
-                        text: root.strictActionLabel(actionName)
+                        text: actionName.length > 0 ? root.strictActionLabel(actionName)
+                            : root.strictActorSeat(root.strictTask()).controlMode === "vmf-auto"
+                                ? "服务器自动推进" : "等待绑定战位操作"
                         enabled: actionName.length > 0 && root.strictTask().health !== "completed"
                         onClicked: root.advanceStrictTask()
                         contentItem: Text { text: strictActionButton.text; color: strictActionButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 9; font.bold: true }

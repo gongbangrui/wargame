@@ -107,6 +107,9 @@ public:
 
     double simTime() const { return m_clock->simTime(); }
 
+    void setSideFrozen(const QString& side, bool frozen);
+    bool sideFrozen(const QString& side) const { return m_frozenSides.contains(side); }
+
     MessageBus* bus() const { return m_transport ? m_transport->bus() : nullptr; }
     ITransport* transport() const { return m_transport; }
     MapProvider* map() const { return m_map.get(); }
@@ -264,6 +267,7 @@ private:
                         const QJsonObject& details = {},
                         const QString& level = QStringLiteral("info"));
     void captureReplayCheckpoint();
+    void applyFrozenSidePolicy();
 
     std::unique_ptr<LocalTransport> m_ownedTransport;
     ITransport* m_transport = nullptr;
@@ -292,6 +296,7 @@ private:
     bool m_inTick = false;
     bool m_outcomeReported = false;
     QSet<QString> m_destroyedReported;
+    QSet<QString> m_frozenSides;
     double m_scanAccum = 0.0;
     int m_reportCounter = 0;
     std::unordered_map<QString, QJsonArray> m_cachedDetections;

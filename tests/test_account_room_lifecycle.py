@@ -235,6 +235,50 @@ class AccountRoomLifecycleTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(stored, "vmf-guided-strike-v1")
 
+    def test_strict_vmf_rejects_pve_on_create_and_resolved_update(self) -> None:
+        with self.assertRaises(ValueError):
+            self.app.RoomBody(
+                room_id="strict-pve",
+                name="Invalid strict room",
+                protocol_profile="vmf-guided-strike-v1",
+                mode="pve",
+            )
+
+        with self.app.database() as db:
+            db.execute(
+                "UPDATE rooms SET status='stopped',mode='pve' WHERE room_id='main'"
+            )
+        body = self.app.RoomBody(
+            room_id="main",
+            name="Main Room",
+            protocol_profile="vmf-guided-strike-v1",
+        )
+        with self.assertRaises(HTTPException) as rejected:
+            self.app.update_room("main", body, None)
+        self.assertEqual(rejected.exception.status_code, 422)
+
+    def test_stopped_legacy_strict_pve_room_migrates_to_pvp(self) -> None:
+        with self.app.database() as db:
+            db.execute(
+                "UPDATE rooms SET protocol_profile='vmf-guided-strike-v1',"
+                "mode='pve',ai_provider='ollama',ai_model='legacy-model',"
+                "ai_resolved_model='resolved',status='stopped',config_version=7 "
+                "WHERE room_id='main'"
+            )
+
+        self.app.initialize_database()
+
+        with self.app.database() as db:
+            room = db.execute(
+                "SELECT mode,ai_provider,ai_model,ai_resolved_model,config_version "
+                "FROM rooms WHERE room_id='main'"
+            ).fetchone()
+        self.assertEqual(room["mode"], "pvp")
+        self.assertEqual(room["ai_provider"], "rules")
+        self.assertEqual(room["ai_model"], "")
+        self.assertEqual(room["ai_resolved_model"], "")
+        self.assertEqual(room["config_version"], 8)
+
     def test_concurrent_lifecycle_operations_leave_one_pending(self) -> None:
         self.app.GAME_STATUS_PATH.write_text(
             json.dumps({"roomState": {"roomId": "main", "lifecycleRevision": 17}}),

@@ -178,7 +178,7 @@ TEST(StrictVmfTaskSetTest, CompletedHistoryIsBoundedAndRemainsRestorable) {
     EXPECT_TRUE(restored.restore(tasks.toJson(), &error)) << error.toStdString();
 }
 
-TEST(StrictVmfRoomTest, PlaceholdersAreReadyAndHumanTakeoverKeepsUnitIdentity) {
+TEST(StrictVmfRoomTest, SingleSideRosterRequiresHumanCommanderAndAutomatesDisconnects) {
     AuthoritativeRoom room;
     QHash<QString, int> limits;
     for (const QString& side : {QStringLiteral("red"), QStringLiteral("blue")}) {
@@ -191,24 +191,29 @@ TEST(StrictVmfRoomTest, PlaceholdersAreReadyAndHumanTakeoverKeepsUnitIdentity) {
     QString error;
     ASSERT_TRUE(room.setSeatLimits(limits, &error)) << error.toStdString();
     ASSERT_TRUE(room.setTemplateCatalog(AuthoritativeRoom::defaultTemplateCatalog(), &error));
-    ASSERT_TRUE(room.installPlaceholdersForMissing().ok);
+    ASSERT_TRUE(room.setScenarioUnits(ScenarioIo::defaultScenario().units, &error))
+        << error.toStdString();
+    ASSERT_TRUE(room.setVmfSingleSide(true).ok);
+
+    EXPECT_FALSE(room.readiness().value(QStringLiteral("ready")).toBool());
+    EXPECT_FALSE(room.hasSeat(QStringLiteral("red_commander")));
+    const AuthoritativeRoom::Seat fixedTarget = room.seat(QStringLiteral("blue_commander"));
+    ASSERT_EQ(fixedTarget.controlMode, QStringLiteral("fixed-target"));
+    EXPECT_EQ(fixedTarget.sourceUnitId, QStringLiteral("blue_cp"));
+    EXPECT_EQ(room.claimSeat(9, QStringLiteral("blue human"),
+                             QStringLiteral("blue_commander"),
+                             QStringLiteral("commandpost")).code,
+              QStringLiteral("SIDE_RESERVED_FOR_FIXED_TARGET"));
+
     const AuthoritativeRoom::Seat placeholder = room.seat(QStringLiteral("red_attack_1"));
     ASSERT_EQ(placeholder.controllerType, QStringLiteral("placeholder"));
+    EXPECT_EQ(placeholder.controlMode, QStringLiteral("vmf-auto"));
     EXPECT_TRUE(placeholder.deployed);
     EXPECT_TRUE(placeholder.ready);
 
     ASSERT_TRUE(room.claimSeat(1, QStringLiteral("red commander"),
                                QStringLiteral("red_commander"),
                                QStringLiteral("commandpost")).ok);
-    ASSERT_TRUE(room.claimSeat(2, QStringLiteral("blue commander"),
-                               QStringLiteral("blue_commander"),
-                               QStringLiteral("commandpost")).ok);
-    ASSERT_TRUE(room.deployInitial(QStringLiteral("red_commander"), GeoPos{100, 100, 0}).ok);
-    ASSERT_TRUE(room.deployInitial(QStringLiteral("blue_commander"), GeoPos{900, 900, 0}).ok);
-    ASSERT_TRUE(room.setReady(1, true).ok);
-    ASSERT_TRUE(room.setReady(2, true).ok);
-    EXPECT_TRUE(room.readiness().value(QStringLiteral("ready")).toBool());
-
     ASSERT_TRUE(room.claimSeat(3, QStringLiteral("attack human"),
                                QStringLiteral("red_attack_1"),
                                QStringLiteral("attackuav")).ok);
@@ -217,12 +222,22 @@ TEST(StrictVmfRoomTest, PlaceholdersAreReadyAndHumanTakeoverKeepsUnitIdentity) {
     EXPECT_EQ(taken.unitId, placeholder.unitId);
     EXPECT_TRUE(taken.deployed);
     EXPECT_FALSE(taken.ready);
-    EXPECT_FALSE(room.seat(QStringLiteral("red_commander")).ready);
     ASSERT_TRUE(room.setReady(3, true).ok);
     ASSERT_TRUE(room.setReady(1, true).ok);
     EXPECT_TRUE(room.readiness().value(QStringLiteral("ready")).toBool());
+    ASSERT_TRUE(room.start().ok);
 
-    ASSERT_TRUE(room.removePlaceholders().ok);
-    EXPECT_TRUE(room.hasSeat(QStringLiteral("red_attack_1")));
-    EXPECT_FALSE(room.hasSeat(QStringLiteral("red_recon_1")));
+    ASSERT_TRUE(room.disconnect(3).ok);
+    const AuthoritativeRoom::Seat automated = room.seat(QStringLiteral("red_attack_1"));
+    EXPECT_EQ(automated.controllerType, QStringLiteral("placeholder"));
+    EXPECT_EQ(automated.controlMode, QStringLiteral("vmf-auto"));
+    EXPECT_EQ(automated.unitId, placeholder.unitId);
+    EXPECT_TRUE(automated.connected);
+    EXPECT_TRUE(automated.ready);
+
+    EXPECT_EQ(room.claimSeat(4, QStringLiteral("replacement"),
+                             QStringLiteral("red_attack_1"),
+                             QStringLiteral("attackuav")).code,
+              QString());
+    EXPECT_EQ(room.seat(QStringLiteral("red_attack_1")).unitId, placeholder.unitId);
 }

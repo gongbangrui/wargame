@@ -316,7 +316,15 @@ Item {
                 ColumnLayout {
                     spacing: 4
                     Text { text: root.rosterMode ? (root.restrictedSide === "red" ? "红方初始阵容" : "蓝方初始阵容") : "GIS 场景编辑器"; color: t.text; font.pixelSize: 18; font.bold: true; renderType: Text.NativeRendering }
-                    Text { text: root.editable ? "GIS 地图支持拖拽缩放；双击空白处新增单位，选中单位后可用地图选点修改初始位置" : root.controller.networked && root.controller.isRoomAdmin && root.controller.matchPhase === "preparing" ? "已有用户占用战位，清空战位后才能修改初始场景" : "推演已经开始，初始场景现为只读状态"; color: root.editable ? t.muted : t.danger; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true; renderType: Text.NativeRendering }
+                    Text {
+                        text: root.editable ? "GIS 地图支持拖拽缩放；双击空白处新增单位，选中单位后可用地图选点修改初始位置"
+                            : root.controller.networked && root.controller.isRoomAdmin
+                                && root.controller.matchPhase === "preparing"
+                                ? "服务器当前未开放初始阵容编辑权限"
+                                : "推演已经开始，初始场景现为只读状态"
+                        color: root.editable ? t.muted : t.danger; font.pixelSize: 11
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true; renderType: Text.NativeRendering
+                    }
                 }
 
                 SectionTitle { text: "场景单元" }
@@ -546,7 +554,10 @@ Item {
                     text: root.positionPickMode ? "选点模式 · 点击 GIS 地图提交选中单位的初始位置"
                         : root.positionStatus.length > 0 ? root.positionStatus
                         : root.editable ? "双击地图新增 · 选中单位后使用地图选点 · 右键单元删除"
-                        : "推演进行中，初始阵容已锁定"
+                        : root.controller.networked && root.controller.isRoomAdmin
+                            && root.controller.matchPhase === "preparing"
+                            ? "服务器当前未开放初始阵容编辑权限"
+                            : "推演进行中，初始阵容已锁定"
                     color: "#c2cad8"; font.pixelSize: 11
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter

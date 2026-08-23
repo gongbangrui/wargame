@@ -31,6 +31,8 @@ inline constexpr auto CommandPostUnavailable = "COMMAND_POST_UNAVAILABLE";
 inline constexpr auto WeaponReloading = "WEAPON_RELOADING";
 inline constexpr auto WeaponUnavailable = "WEAPON_UNAVAILABLE";
 inline constexpr auto CommunicationLost = "COMMUNICATION_LOST";
+inline constexpr auto UnitFrozen = "UNIT_FROZEN";
+inline constexpr auto DispatchFailed = "COMMAND_DISPATCH_FAILED";
 } // namespace CommandCode
 
 } // namespace gbr

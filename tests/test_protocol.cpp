@@ -653,11 +653,25 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
                            {QStringLiteral("connected"), true},
                            {QStringLiteral("deployed"), true},
                            {QStringLiteral("pendingTransfer"), false},
+                           {QStringLiteral("redeployRequested"), false},
                            {QStringLiteral("unitId"), QStringLiteral("red-r1")},
-                           {QStringLiteral("selectedTemplate"), QStringLiteral("red-recon")}};
+                           {QStringLiteral("sourceUnitId"), QStringLiteral("red_r1")},
+                           {QStringLiteral("selectedTemplate"), QStringLiteral("red-recon")},
+                           {QStringLiteral("controllerType"), QStringLiteral("placeholder")},
+                           {QStringLiteral("controlMode"), QStringLiteral("vmf-auto")},
+                           {QStringLiteral("claimable"), true}};
     const QJsonObject roomState{{QStringLiteral("phase"), QStringLiteral("preparing")},
                                 {QStringLiteral("roomId"), QStringLiteral("main")},
                                 {QStringLiteral("aiEngine"), QStringLiteral("ollama")},
+                                {QStringLiteral("protocolProfile"), QStringLiteral("vmf-guided-strike-v1")},
+                                {QStringLiteral("operationMode"), QStringLiteral("vmf-single-side")},
+                                {QStringLiteral("participantSide"), QStringLiteral("red")},
+                                {QStringLiteral("fixedTargetSide"), QStringLiteral("blue")},
+                                {QStringLiteral("scenarioEditable"), true},
+                                {QStringLiteral("vmfAutomation"), QJsonObject{
+                                     {QStringLiteral("enabled"), true},
+                                     {QStringLiteral("humanStagesRemainManual"), true},
+                                     {QStringLiteral("timeoutTakeover"), false}}},
                                 {QStringLiteral("running"), false},
                                 {QStringLiteral("simTime"), 12.5},
                                 {QStringLiteral("speed"), 2.0},
@@ -676,7 +690,18 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
     EXPECT_TRUE(snapshot.lifecycle.seats.front().connected);
     EXPECT_TRUE(snapshot.lifecycle.seats.front().deployed);
     EXPECT_EQ(snapshot.lifecycle.seats.front().unitId, QStringLiteral("red-r1"));
-    EXPECT_EQ(snapshot.lifecycle.seats.front().controllerType, QStringLiteral("human"));
+    EXPECT_EQ(snapshot.lifecycle.protocolProfile,
+              QStringLiteral("vmf-guided-strike-v1"));
+    EXPECT_EQ(snapshot.lifecycle.operationMode, QStringLiteral("vmf-single-side"));
+    EXPECT_EQ(snapshot.lifecycle.participantSide, QStringLiteral("red"));
+    EXPECT_EQ(snapshot.lifecycle.fixedTargetSide, QStringLiteral("blue"));
+    EXPECT_TRUE(snapshot.lifecycle.scenarioEditable);
+    EXPECT_TRUE(snapshot.lifecycle.vmfAutomation.value(QStringLiteral("enabled")).toBool());
+    EXPECT_EQ(snapshot.lifecycle.seats.front().controllerType,
+              QStringLiteral("placeholder"));
+    EXPECT_EQ(snapshot.lifecycle.seats.front().controlMode, QStringLiteral("vmf-auto"));
+    EXPECT_TRUE(snapshot.lifecycle.seats.front().claimable);
+    EXPECT_EQ(snapshot.lifecycle.seats.front().sourceUnitId, QStringLiteral("red_r1"));
 
     Protocol::SeatDirectoryProjection directory;
     ASSERT_TRUE(Protocol::projectSeatDirectory(
@@ -689,7 +714,12 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
     EXPECT_EQ(projectedSeat.value(QStringLiteral("selectedTemplate")).toString(),
               QStringLiteral("red-recon"));
     EXPECT_EQ(projectedSeat.value(QStringLiteral("controllerType")).toString(),
-              QStringLiteral("human"));
+              QStringLiteral("placeholder"));
+    EXPECT_EQ(projectedSeat.value(QStringLiteral("controlMode")).toString(),
+              QStringLiteral("vmf-auto"));
+    EXPECT_TRUE(projectedSeat.value(QStringLiteral("claimable")).toBool());
+    EXPECT_EQ(projectedSeat.value(QStringLiteral("sourceUnitId")).toString(),
+              QStringLiteral("red_r1"));
 
     Protocol::DeploymentPromptProjection deployment;
     ASSERT_TRUE(Protocol::projectDeploymentPrompt(
@@ -724,6 +754,40 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
                     {QStringLiteral("serverTime"), 13.0}}, &command).valid);
     EXPECT_TRUE(command.accepted);
     EXPECT_DOUBLE_EQ(command.serverTime, 13.0);
+}
+
+TEST(ProtocolTest, RejectsMalformedStrictVmfLifecycleAndSeatFields) {
+    Protocol::RoomLifecycleProjection lifecycle;
+    for (const QJsonObject& malformed : {
+             QJsonObject{{QStringLiteral("operationMode"), 1}},
+             QJsonObject{{QStringLiteral("operationMode"), QStringLiteral("single")}},
+             QJsonObject{{QStringLiteral("participantSide"), QStringLiteral("blue")}},
+             QJsonObject{{QStringLiteral("fixedTargetSide"), QStringLiteral("red")}},
+             QJsonObject{{QStringLiteral("scenarioEditable"), QStringLiteral("true")}},
+             QJsonObject{{QStringLiteral("vmfAutomation"), QJsonObject{
+                  {QStringLiteral("enabled"), QStringLiteral("yes")}}}},
+             QJsonObject{{QStringLiteral("vmfAutomation"), QJsonObject{
+                  {QStringLiteral("enabled"), true},
+                  {QStringLiteral("unknown"), false}}}}}) {
+        EXPECT_FALSE(Protocol::projectRoomLifecycle(malformed, &lifecycle).valid);
+    }
+
+    Protocol::SeatDirectoryProjection directory;
+    const auto projectSeat = [&directory](const QJsonObject& seat) {
+        return Protocol::projectSeatDirectory(
+            QJsonObject{{QStringLiteral("roomId"), QStringLiteral("main")},
+                        {QStringLiteral("seats"), QJsonArray{seat}}},
+            &directory).valid;
+    };
+    EXPECT_FALSE(projectSeat(QJsonObject{
+        {QStringLiteral("seatId"), QStringLiteral("red_recon_1")},
+        {QStringLiteral("controlMode"), QStringLiteral("automatic")}}));
+    EXPECT_FALSE(projectSeat(QJsonObject{
+        {QStringLiteral("seatId"), QStringLiteral("red_recon_1")},
+        {QStringLiteral("claimable"), QStringLiteral("yes")}}));
+    EXPECT_FALSE(projectSeat(QJsonObject{
+        {QStringLiteral("seatId"), QStringLiteral("red_recon_1")},
+        {QStringLiteral("sourceUnitId"), QString(65, QLatin1Char('x'))}}));
 }
 
 namespace {

@@ -81,6 +81,9 @@ struct SeatProjection {
     QString selectedTemplate;
     QString unitName;
     QString controllerType = QStringLiteral("human");
+    QString controlMode = QStringLiteral("human");
+    bool claimable = false;
+    QString sourceUnitId;
 };
 
 struct VmfTaskCommand {
@@ -126,6 +129,11 @@ struct RoomLifecycleProjection {
     QJsonObject vmfWorkflow;
     QJsonObject vmfWorkflows;
     QString protocolProfile = QStringLiteral("native");
+    QString operationMode = QStringLiteral("standard");
+    QString participantSide;
+    QString fixedTargetSide;
+    bool scenarioEditable = false;
+    QJsonObject vmfAutomation;
     QJsonObject vmfTasks;
 };
 

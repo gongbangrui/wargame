@@ -426,7 +426,7 @@ void FastDdsTransport::subscribeJson(const QString& topic,
     m_jsonHandlers[topic].append(std::move(handler));
 }
 
-void FastDdsTransport::send(const Message& msg) { m_compatBus->send(msg); }
+bool FastDdsTransport::send(const Message& msg) { return m_compatBus->send(msg); }
 void FastDdsTransport::subscribe(const QString& unitId, MessageBus::Handler h) { m_compatBus->subscribe(unitId, std::move(h)); }
 void FastDdsTransport::unsubscribe(const QString& unitId) { m_compatBus->unsubscribe(unitId); }
 void FastDdsTransport::unregisterUnit(const QString& unitId) { m_compatBus->unregisterUnit(unitId); }

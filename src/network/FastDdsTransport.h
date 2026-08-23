@@ -54,7 +54,7 @@ public:
     // Called by the DDS listener to suppress the writer's own loopback sample.
     bool consumeLocalPublication(const QString& messageId);
 
-    void send(const Message& msg) override;
+    bool send(const Message& msg) override;
     void subscribe(const QString& unitId, MessageBus::Handler h) override;
     void unsubscribe(const QString& unitId) override;
     void unregisterUnit(const QString& unitId) override;

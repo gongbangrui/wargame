@@ -215,7 +215,7 @@ bool projectSeat(const QJsonObject& object, SeatProjection* projection) {
             && !object.value(QStringLiteral("pendingTransfer")).isBool())
         || (object.contains(QStringLiteral("redeployRequested"))
             && !object.value(QStringLiteral("redeployRequested")).isBool())
-                || (object.contains(QStringLiteral("controllerType"))
+        || (object.contains(QStringLiteral("controllerType"))
             && (!object.value(QStringLiteral("controllerType")).isString()
                 || (object.value(QStringLiteral("controllerType")).toString()
                     != QLatin1String("human")
@@ -223,6 +223,19 @@ bool projectSeat(const QJsonObject& object, SeatProjection* projection) {
                        != QLatin1String("ai")
                     && object.value(QStringLiteral("controllerType")).toString()
                        != QLatin1String("placeholder"))))
+        || (object.contains(QStringLiteral("controlMode"))
+            && (!object.value(QStringLiteral("controlMode")).isString()
+                || (object.value(QStringLiteral("controlMode")).toString()
+                        != QLatin1String("human")
+                    && object.value(QStringLiteral("controlMode")).toString()
+                        != QLatin1String("ai")
+                    && object.value(QStringLiteral("controlMode")).toString()
+                        != QLatin1String("vmf-auto")
+                    && object.value(QStringLiteral("controlMode")).toString()
+                        != QLatin1String("fixed-target"))))
+        || (object.contains(QStringLiteral("claimable"))
+            && !object.value(QStringLiteral("claimable")).isBool())
+        || !validOptionalString(object, QStringLiteral("sourceUnitId"), MaxIdentifierLength)
         || !validOptionalString(object, QStringLiteral("unitId"), MaxIdentifierLength)
         || !validOptionalString(object, QStringLiteral("selectedTemplate"), MaxIdentifierLength)
         || !validOptionalString(object, QStringLiteral("unitName"), 128)) {
@@ -246,6 +259,14 @@ bool projectSeat(const QJsonObject& object, SeatProjection* projection) {
     projection->unitName = object.value(QStringLiteral("unitName")).toString();
     projection->controllerType = object.contains(QStringLiteral("controllerType"))
         ? object.value(QStringLiteral("controllerType")).toString() : QStringLiteral("human");
+    projection->controlMode = object.value(QStringLiteral("controlMode"))
+                                  .toString(projection->controllerType == QLatin1String("ai")
+                                                ? QStringLiteral("ai")
+                                                : QStringLiteral("human"));
+    projection->claimable = object.contains(QStringLiteral("claimable"))
+        ? object.value(QStringLiteral("claimable")).toBool()
+        : !projection->occupied;
+    projection->sourceUnitId = object.value(QStringLiteral("sourceUnitId")).toString();
     return true;
 }
 
@@ -935,6 +956,19 @@ bool validVmfWorkflowMap(const QJsonValue& value) {
     return true;
 }
 
+bool validVmfAutomation(const QJsonValue& value) {
+    if (!value.isObject()) return false;
+    const QJsonObject automation = value.toObject();
+    static const QSet<QString> fields{
+        QStringLiteral("enabled"), QStringLiteral("humanStagesRemainManual"),
+        QStringLiteral("timeoutTakeover")};
+    if (!hasOnlyFields(automation, fields)) return false;
+    for (const QString& field : fields) {
+        if (automation.contains(field) && !automation.value(field).isBool()) return false;
+    }
+    return true;
+}
+
 bool validObserverRoomState(const QJsonObject& roomState) {
     static const QSet<QString> allowed{
         QStringLiteral("phase"), QStringLiteral("roomId"), QStringLiteral("roomName"),
@@ -944,14 +978,41 @@ bool validObserverRoomState(const QJsonObject& roomState) {
         QStringLiteral("running"), QStringLiteral("simTime"), QStringLiteral("speed"),
         QStringLiteral("scenarioRevision"), QStringLiteral("stateRevision"),
         QStringLiteral("observer"), QStringLiteral("vmfWorkflows"),
-        QStringLiteral("protocolProfile"), QStringLiteral("vmfTasks")};
+        QStringLiteral("protocolProfile"), QStringLiteral("operationMode"),
+        QStringLiteral("participantSide"), QStringLiteral("fixedTargetSide"),
+        QStringLiteral("scenarioEditable"), QStringLiteral("vmfAutomation"),
+        QStringLiteral("vmfTasks")};
     return hasOnlyFields(roomState, allowed)
         && roomState.value(QStringLiteral("observer")).isBool()
         && roomState.value(QStringLiteral("observer")).toBool()
         && (!roomState.contains(QStringLiteral("vmfWorkflows"))
             || roomState.value(QStringLiteral("vmfWorkflows")).isObject())
         && (!roomState.contains(QStringLiteral("protocolProfile"))
-            || roomState.value(QStringLiteral("protocolProfile")).isString())
+            || (roomState.value(QStringLiteral("protocolProfile")).isString()
+                && (roomState.value(QStringLiteral("protocolProfile")).toString()
+                        == QLatin1String("native")
+                    || roomState.value(QStringLiteral("protocolProfile")).toString()
+                        == QLatin1String("vmf-guided-strike-v1"))))
+        && (!roomState.contains(QStringLiteral("operationMode"))
+            || (roomState.value(QStringLiteral("operationMode")).isString()
+                && (roomState.value(QStringLiteral("operationMode")).toString()
+                        == QLatin1String("standard")
+                    || roomState.value(QStringLiteral("operationMode")).toString()
+                        == QLatin1String("vmf-single-side"))))
+        && (!roomState.contains(QStringLiteral("participantSide"))
+            || (roomState.value(QStringLiteral("participantSide")).isString()
+                && (roomState.value(QStringLiteral("participantSide")).toString().isEmpty()
+                    || roomState.value(QStringLiteral("participantSide")).toString()
+                        == QLatin1String("red"))))
+        && (!roomState.contains(QStringLiteral("fixedTargetSide"))
+            || (roomState.value(QStringLiteral("fixedTargetSide")).isString()
+                && (roomState.value(QStringLiteral("fixedTargetSide")).toString().isEmpty()
+                    || roomState.value(QStringLiteral("fixedTargetSide")).toString()
+                        == QLatin1String("blue"))))
+        && (!roomState.contains(QStringLiteral("scenarioEditable"))
+            || roomState.value(QStringLiteral("scenarioEditable")).isBool())
+        && (!roomState.contains(QStringLiteral("vmfAutomation"))
+            || validVmfAutomation(roomState.value(QStringLiteral("vmfAutomation"))))
         && (!roomState.contains(QStringLiteral("vmfTasks"))
             || roomState.value(QStringLiteral("vmfTasks")).isObject());
 }
@@ -1062,6 +1123,28 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
                     != QLatin1String("native")
                     && roomState.value(QStringLiteral("protocolProfile")).toString()
                        != QLatin1String("vmf-guided-strike-v1"))))
+        || (roomState.contains(QStringLiteral("operationMode"))
+            && (!roomState.value(QStringLiteral("operationMode")).isString()
+                || (roomState.value(QStringLiteral("operationMode")).toString()
+                        != QLatin1String("standard")
+                && roomState.value(QStringLiteral("operationMode")).toString()
+                        != QLatin1String("vmf-single-side"))))
+        || (roomState.contains(QStringLiteral("participantSide"))
+            && (!roomState.value(QStringLiteral("participantSide")).isString()
+                || (roomState.value(QStringLiteral("participantSide")).toString()
+                        != QLatin1String("red")
+                    && !roomState.value(QStringLiteral("participantSide"))
+                            .toString().isEmpty())))
+        || (roomState.contains(QStringLiteral("fixedTargetSide"))
+            && (!roomState.value(QStringLiteral("fixedTargetSide")).isString()
+                || (roomState.value(QStringLiteral("fixedTargetSide")).toString()
+                        != QLatin1String("blue")
+                    && !roomState.value(QStringLiteral("fixedTargetSide"))
+                            .toString().isEmpty())))
+        || (roomState.contains(QStringLiteral("scenarioEditable"))
+            && !roomState.value(QStringLiteral("scenarioEditable")).isBool())
+        || (roomState.contains(QStringLiteral("vmfAutomation"))
+            && !validVmfAutomation(roomState.value(QStringLiteral("vmfAutomation"))))
         || (roomState.contains(QStringLiteral("vmfTasks"))
             && !roomState.value(QStringLiteral("vmfTasks")).isObject())) {
         return invalid();
@@ -1131,6 +1214,12 @@ ValidationResult projectRoomLifecycle(const QJsonObject& roomState,
     projection->vmfWorkflows = roomState.value(QStringLiteral("vmfWorkflows")).toObject();
     projection->protocolProfile = roomState.value(QStringLiteral("protocolProfile"))
                                       .toString(QStringLiteral("native"));
+    projection->operationMode = roomState.value(QStringLiteral("operationMode"))
+                                    .toString(QStringLiteral("standard"));
+    projection->participantSide = roomState.value(QStringLiteral("participantSide")).toString();
+    projection->fixedTargetSide = roomState.value(QStringLiteral("fixedTargetSide")).toString();
+    projection->scenarioEditable = roomState.value(QStringLiteral("scenarioEditable")).toBool();
+    projection->vmfAutomation = roomState.value(QStringLiteral("vmfAutomation")).toObject();
     projection->vmfTasks = roomState.value(QStringLiteral("vmfTasks")).toObject();
     projection->seats = seats;
     return ValidationResult::success();
@@ -1374,7 +1463,10 @@ QVariantList seatVariants(const QList<SeatProjection>& seats) {
                                     {QStringLiteral("unitId"), seat.unitId},
                                     {QStringLiteral("selectedTemplate"), seat.selectedTemplate},
                                     {QStringLiteral("unitName"), seat.unitName},
-                                    {QStringLiteral("controllerType"), seat.controllerType}});
+                                    {QStringLiteral("controllerType"), seat.controllerType},
+                                    {QStringLiteral("controlMode"), seat.controlMode},
+                                    {QStringLiteral("claimable"), seat.claimable},
+                                    {QStringLiteral("sourceUnitId"), seat.sourceUnitId}});
     }
     return variants;
 }

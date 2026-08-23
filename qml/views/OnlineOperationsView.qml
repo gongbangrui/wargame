@@ -63,6 +63,8 @@ Item {
     property color orange: AppContext.warning
     property color info: AppContext.info
     property color danger: AppContext.danger
+    readonly property bool strictVmf: root.controller
+        && root.controller.protocolProfile === "vmf-guided-strike-v1"
 
     onAttackTargetIdChanged: root.syncAttackTargetBox()
 
@@ -131,8 +133,9 @@ Item {
             + String(item.targetId || attributes.title || item.intelId)
     }
 
-    property bool isHumanControlledSeat: root.controller && (root.controller.roomMode !== "pve"
-        || root.controller.currentSeatSide === "red")
+    property bool isHumanControlledSeat: root.controller
+        && (!root.strictVmf || root.controller.currentSeatSide === "red")
+        && (root.controller.roomMode !== "pve" || root.controller.currentSeatSide === "red")
     property bool isCommander: root.isHumanControlledSeat && root.controller.currentSeatType === "commander"
     property bool canDeploy: root.isCommander && root.controller.matchPhase === "preparing"
                             && root.deploymentTargetSeatId.length > 0 && root.deployUnitId.length > 0
@@ -334,6 +337,8 @@ Item {
                 && ["preparing", "running", "paused", "finished"].indexOf(room.status) >= 0
     }
     function roomModeLabel(room) {
+        if (room && room.protocolProfile === "vmf-guided-strike-v1")
+            return "VMF 单方作战"
         if (room && room.mode === "pve") {
             var labels = { easy: "简单", normal: "普通", hard: "困难" }
             return "人机对抗 · " + (labels[room.aiDifficulty] || "普通")
@@ -341,6 +346,8 @@ Item {
         return "人人对抗"
     }
     function roomConfigurationLabel() {
+        if (root.strictVmf)
+            return "VMF 单方作战 · 红方参演 · 配置 v" + root.controller.configVersion
         if (root.controller.roomMode === "pve") {
             var labels = { easy: "简单", normal: "普通", hard: "困难" }
             return "人机对抗 · " + (labels[root.controller.aiDifficulty] || "普通")
@@ -388,15 +395,21 @@ Item {
     }
     function canClaimSeat(seat) {
         if (!seat || seat.controllerType === "ai") return false
-        if (seat.controllerType === "placeholder") {
-            if (root.controller.protocolProfile !== "vmf-guided-strike-v1"
+        if (root.strictVmf) {
+            if (seat.side !== "red" || seat.claimable !== true
                     || root.controller.currentSeatId) return false
-            var phase = root.controller.matchPhase
-            if (phase !== "preparing" && phase !== "running" && phase !== "paused") return false
-            var takeoverRedCommander = root.seatById("red_commander")
-            var takeoverBlueCommander = root.seatById("blue_commander")
-            return takeoverRedCommander && takeoverRedCommander.occupied
-                    && takeoverBlueCommander && takeoverBlueCommander.occupied
+            var strictPhase = root.controller.matchPhase
+            if (["preparing", "running", "paused"].indexOf(strictPhase) < 0)
+                return false
+            var strictCommander = root.seatById("red_commander")
+            var humanCommander = strictCommander && strictCommander.occupied
+                    && strictCommander.controlMode === "human"
+            if (!humanCommander)
+                return strictPhase === "preparing" && seat.seatId === "red_commander"
+            return strictPhase === "preparing" || seat.controlMode === "vmf-auto"
+        }
+        if (seat.controllerType === "placeholder") {
+            return false
         }
         if (seat.occupied || root.controller.matchPhase !== "preparing") return false
         if (root.controller.roomMode === "pve" && seat.side !== "red") return false
@@ -412,8 +425,10 @@ Item {
         return true
     }
     function seatHint(seat) {
+        if (seat.controlMode === "fixed-target") return "保留场景参数，不执行任何操作"
+        if (seat.controlMode === "vmf-auto") return "缺失环节由服务器自动分发传递"
         if (seat.controllerType === "ai") return "AI 控制"
-        if (seat.controllerType === "placeholder") return "服务器占位，可由人工接管"
+        if (seat.controllerType === "placeholder") return "服务器控制"
         if (seat.occupied) return seat.displayName || "已占用"
         if (root.switchSeatSelection && seat.side !== root.controller.currentSeatSide)
             return "只能申请本方战位"
@@ -422,11 +437,14 @@ Item {
         if (root.switchRequestPending && seat.seatId === root.switchTargetSeatId)
             return "等待本方指挥官确认"
         if (root.canClaimSeat(seat)) return "可选择"
+        if (root.strictVmf) return "请先选择红方指挥官"
         if (root.isRoomEmpty()) return "请先选择红方指挥官"
         return "等待双方指挥官就位"
     }
     function seatStatusLabel(seat) {
-        if (seat.controllerType === "placeholder") return "等待人工接管"
+        if (seat.controlMode === "fixed-target") return "固定靶"
+        if (seat.controlMode === "vmf-auto") return "服务器自动控制"
+        if (seat.controllerType === "placeholder") return "服务器控制"
         if (!seat.occupied) return "空缺"
         if (seat.controllerType === "ai") return seat.deployed ? "AI 执行中" : "AI 已就位"
         if (seat.pendingTransfer) return "交接中"
@@ -436,6 +454,8 @@ Item {
         return "已部署"
     }
     function seatStatusColor(seat) {
+        if (seat.controlMode === "fixed-target") return root.info
+        if (seat.controlMode === "vmf-auto") return root.cyan
         if (seat.controllerType === "placeholder") return root.orange
         if (!seat.occupied) return root.dim
         if (seat.controllerType === "ai") return seat.deployed ? root.cyan : root.info
@@ -1268,9 +1288,9 @@ Item {
                             background: Rectangle { color: "transparent"; border.color: root.line; radius: 4 }
                         }
                     }
-                    Text { text: root.switchSeatSelection ? (root.switchRequestPending ? "请求已提交，当前战位仍有效，等待本方指挥官确认。" : "当前战位保持不变。仅可申请本方非指挥官战位。") : root.isRoomEmpty() ? "空房间：请先选择红方指挥官。" : "红方指挥官优先，随后选择蓝方指挥官。"; color: root.isRoomEmpty() || root.switchSeatSelection ? root.orange : root.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                    GridLayout { Layout.fillWidth: true; Layout.fillHeight: true; columns: width > 900 ? 2 : 1; columnSpacing: 14; rowSpacing: 14
-                        Repeater { model: ["red", "blue"]
+                    Text { text: root.switchSeatSelection ? (root.switchRequestPending ? "请求已提交，当前战位仍有效，等待本方指挥官确认。" : "当前战位保持不变。仅可申请本方非指挥官战位。") : root.strictVmf ? "单方作战：登录用户仅选择红方；缺失任务环节由服务器自动控制，蓝方为固定靶。" : root.isRoomEmpty() ? "空房间：请先选择红方指挥官。" : "红方指挥官优先，随后选择蓝方指挥官。"; color: root.strictVmf || root.isRoomEmpty() || root.switchSeatSelection ? root.orange : root.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                    GridLayout { Layout.fillWidth: true; Layout.fillHeight: true; columns: root.strictVmf ? 1 : width > 900 ? 2 : 1; columnSpacing: 14; rowSpacing: 14
+                        Repeater { model: root.strictVmf ? ["red"] : ["red", "blue"]
                             delegate: Rectangle { id: sidePanel; required property string modelData; Layout.fillWidth: true; Layout.fillHeight: true; color: root.panel; border.color: sidePanel.modelData === "red" ? root.danger : root.info; radius: 6
                             ColumnLayout { anchors.fill: parent; anchors.margins: 14; spacing: 8
                                 Text { text: sidePanel.modelData === "red" ? "红方战位" : "蓝方战位"; color: sidePanel.modelData === "red" ? root.danger : root.info; font.bold: true; font.pixelSize: 14 }
@@ -1288,7 +1308,7 @@ Item {
                                                 Text { Layout.fillWidth: true; text: seatDelegate.modelData.occupied && seatDelegate.modelData.selectedTemplate ? (root.seatHint(seatDelegate.modelData) + " · " + seatDelegate.modelData.selectedTemplate) : root.seatHint(seatDelegate.modelData); color: root.dim; font.pixelSize: 9; elide: Text.ElideRight }
                                             }
                                             Text { text: root.seatStatusLabel(seatDelegate.modelData); color: root.seatStatusColor(seatDelegate.modelData); font.pixelSize: 9; font.bold: true }
-                                            Button { id: claimSeatButton; visible: !seatDelegate.modelData.occupied || seatDelegate.modelData.controllerType === "placeholder"; enabled: root.canClaimSeat(seatDelegate.modelData); text: seatDelegate.modelData.controllerType === "placeholder" ? "接管" : root.switchSeatSelection ? "申请" : "进入"; onClicked: root.requestSeat(seatDelegate.modelData)
+                                            Button { id: claimSeatButton; visible: seatDelegate.modelData.claimable === true; enabled: root.canClaimSeat(seatDelegate.modelData); text: seatDelegate.modelData.controlMode === "vmf-auto" ? "接管" : root.switchSeatSelection ? "申请" : "进入"; onClicked: root.requestSeat(seatDelegate.modelData)
                                                 Component.onCompleted: if (claimSeatButton.enabled) Qt.callLater(claimSeatButton.forceActiveFocus)
                                                 onEnabledChanged: if (enabled) Qt.callLater(claimSeatButton.forceActiveFocus)
                                                 contentItem: Text { text: claimSeatButton.text; color: claimSeatButton.enabled ? root.page : root.dim; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.bold: true }
@@ -1884,7 +1904,7 @@ Item {
                                         }
                                     }
                                     Text { visible: root.isCommander && root.pendingDeploymentSeats().length === 0; text: "本方已登录战位均已完成部署"; color: root.cyan; font.pixelSize: 10 }
-                                    Text { visible: root.isCommander; Layout.fillWidth: true; text: "红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + "  ·  蓝方 " + (root.controller.blueReady ? "已就绪" : "未就绪"); color: root.dim; font.pixelSize: 9 }
+                                    Text { visible: root.isCommander; Layout.fillWidth: true; text: root.strictVmf ? ("红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + "  ·  蓝方固定靶已托管") : ("红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + "  ·  蓝方 " + (root.controller.blueReady ? "已就绪" : "未就绪")); color: root.dim; font.pixelSize: 9 }
                                     Button {
                                         id: redeployButton
                                         visible: root.isCommander

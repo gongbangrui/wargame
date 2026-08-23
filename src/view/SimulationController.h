@@ -93,6 +93,10 @@ class SimulationController : public QObject {
     Q_PROPERTY(double replayDuration READ replayDuration NOTIFY timelineForward)
     Q_PROPERTY(QJsonObject vmfWorkflow READ vmfWorkflow NOTIFY vmfWorkflowChanged)
     Q_PROPERTY(QString protocolProfile READ protocolProfile NOTIFY roomStateChanged)
+    Q_PROPERTY(QString operationMode READ operationMode NOTIFY roomStateChanged)
+    Q_PROPERTY(QString participantSide READ participantSide NOTIFY roomStateChanged)
+    Q_PROPERTY(QString fixedTargetSide READ fixedTargetSide NOTIFY roomStateChanged)
+    Q_PROPERTY(QJsonObject vmfAutomation READ vmfAutomation NOTIFY roomStateChanged)
     Q_PROPERTY(QJsonObject vmfTasks READ vmfTasks NOTIFY vmfTasksChanged)
     Q_PROPERTY(QJsonObject vmfTrace READ vmfTrace NOTIFY vmfTraceChanged)
 public:
@@ -182,6 +186,7 @@ public:
         if (!isNetworked()) return true;
         if (!isRoomAdmin() || m_currentRoomId.isEmpty()
             || m_matchPhase != QLatin1String("preparing")) return false;
+        if (m_serverScenarioEditable) return true;
         for (const QVariant& value : m_onlineSeats) {
             if (value.toMap().value(QStringLiteral("occupied")).toBool()) return false;
         }
@@ -195,6 +200,10 @@ public:
     /// only this bounded snapshot, never the engine workflow or MessageBus.
     QJsonObject vmfWorkflow() const;
     QString protocolProfile() const { return m_protocolProfile; }
+    QString operationMode() const { return m_operationMode; }
+    QString participantSide() const { return m_participantSide; }
+    QString fixedTargetSide() const { return m_fixedTargetSide; }
+    QJsonObject vmfAutomation() const { return m_vmfAutomation; }
     QJsonObject vmfTasks() const { return m_remoteVmfTasks; }
     QJsonObject vmfTrace() const { return m_remoteVmfTrace; }
 
@@ -441,6 +450,11 @@ private:
     QJsonObject m_remoteVmfTasks;
     QJsonObject m_remoteVmfTrace;
     QString m_protocolProfile = QStringLiteral("native");
+    QString m_operationMode = QStringLiteral("standard");
+    QString m_participantSide;
+    QString m_fixedTargetSide;
+    bool m_serverScenarioEditable = false;
+    QJsonObject m_vmfAutomation;
     QVariantList m_chatMessages;
     QVariantList m_onlineRooms;
     QVariantList m_onlineSeats;

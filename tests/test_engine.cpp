@@ -116,6 +116,58 @@ TEST_F(EngineTest, CommandMoveTo) {
     SUCCEED();
 }
 
+TEST_F(EngineTest, FrozenSideRejectsCommandsAndRemainsStationaryButTargetable) {
+    UnitBase* blueGround = engine.unit(QStringLiteral("blue_g1"));
+    UnitBase* blueRecon = engine.unit(QStringLiteral("blue_r1"));
+    UnitBase* blueJammer = engine.unit(QStringLiteral("blue_j1"));
+    ASSERT_NE(blueGround, nullptr);
+    ASSERT_NE(blueRecon, nullptr);
+    ASSERT_NE(blueJammer, nullptr);
+
+    const GeoPos initialPosition = blueGround->pos();
+    ASSERT_TRUE(engine.executeCommand(
+        QStringLiteral("setSchedule"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("blue_g1")},
+                    {QStringLiteral("schedule"), QVariantList{QVariantMap{
+                         {QStringLiteral("time"), 0.0},
+                         {QStringLiteral("x"), initialPosition.x - 1000.0},
+                         {QStringLiteral("y"), initialPosition.y}}}}}).accepted);
+
+    engine.setSideFrozen(QStringLiteral("blue"), true);
+    EXPECT_TRUE(engine.sideFrozen(QStringLiteral("blue")));
+    EXPECT_TRUE(blueGround->schedule().empty());
+    const CommandResult move = engine.executeCommand(
+        QStringLiteral("moveTo"),
+        QVariantMap{{QStringLiteral("unitId"), QStringLiteral("blue_g1")},
+                    {QStringLiteral("pos"), QVariantMap{
+                         {QStringLiteral("x"), initialPosition.x - 2000.0},
+                         {QStringLiteral("y"), initialPosition.y}}}});
+    EXPECT_FALSE(move.accepted);
+    EXPECT_EQ(move.code, QStringLiteral("UNIT_FROZEN"));
+    EXPECT_EQ(engine.executeCommand(
+                  QStringLiteral("activateScan"),
+                  QVariantMap{{QStringLiteral("unitId"), QStringLiteral("blue_r1")}}).code,
+              QStringLiteral("UNIT_FROZEN"));
+    EXPECT_EQ(engine.executeCommand(
+                  QStringLiteral("service"),
+                  QVariantMap{{QStringLiteral("unitId"), QStringLiteral("blue_j1")}}).code,
+              QStringLiteral("UNIT_FROZEN"));
+
+    const double groundFuel = blueGround->fuelRemaining();
+    engine.stepOnce(5.0);
+    EXPECT_DOUBLE_EQ(blueGround->pos().x, initialPosition.x);
+    EXPECT_DOUBLE_EQ(blueGround->pos().y, initialPosition.y);
+    EXPECT_DOUBLE_EQ(blueGround->fuelRemaining(), groundFuel);
+    EXPECT_DOUBLE_EQ(blueJammer->jamFactor(), 1.0);
+
+    EXPECT_TRUE(engine.executeCommand(
+        QStringLiteral("engageTarget"),
+        QVariantMap{{QStringLiteral("attackerId"), QStringLiteral("red_a1")},
+                    {QStringLiteral("targetId"), QStringLiteral("blue_g1")}}).accepted);
+    blueGround->setHp(blueGround->hp() - 10.0);
+    EXPECT_LT(blueGround->hp(), blueGround->maxHp());
+}
+
 TEST_F(EngineTest, CommanderOrdersPreserveTypedTextAndSelectedPoints) {
     const QVariantMap point{{QStringLiteral("x"), 5200.0},
                             {QStringLiteral("y"), 6100.0}};

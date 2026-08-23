@@ -19,7 +19,7 @@ public:
 
     /// @brief Send a message through the transport.
     /// @details 消息交给推演域处理器，并保留 MessageBus 的通信距离规则。
-    virtual void send(const Message& msg) = 0;
+    virtual bool send(const Message& msg) = 0;
 
     /// @brief Subscribe a local handler to receive messages addressed to @p unitId.
     /// @details Implementations must be safe to call before start().

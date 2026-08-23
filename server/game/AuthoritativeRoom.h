@@ -22,7 +22,9 @@ public:
         QString username;
         QString controllerType = QStringLiteral("human");
         QString controllerId;
+        QString controlMode = QStringLiteral("human");
         QString selectedTemplate;
+        QString sourceUnitId;
         QString unitId;
         QString unitName;
         GeoPos position;
@@ -47,7 +49,9 @@ public:
     explicit AuthoritativeRoom(quint64 rngSeed = 1);
 
     Result setMode(const QString& mode);
+    Result setVmfSingleSide(bool enabled);
     bool setSeatLimits(const QHash<QString, int>& limits, QString* error = nullptr);
+    bool setScenarioUnits(const std::vector<ScenarioUnit>& units, QString* error = nullptr);
     Result syncAiRoster();
     Result installPlaceholdersForMissing();
     Result removePlaceholders();
@@ -98,6 +102,7 @@ public:
     quint64 revision() const { return m_revision; }
     quint64 rngState() const { return m_rngState; }
     QString mode() const { return m_mode; }
+    bool vmfSingleSide() const { return m_vmfSingleSide; }
     bool isAiSeat(const QString& seatId) const;
 
 private:
@@ -118,6 +123,12 @@ private:
     qint64 chooseSuccessor(const QString& side);
     Result promote(qint64 commanderUserId, qint64 successorUserId);
     Result installAiSeat(const QString& seatId, const QString& templateId);
+    Result installVmfSeat(const QString& seatId, const QString& templateId,
+                          const QString& controlMode);
+    Result syncVmfRoster();
+    Result convertToVmfAutomation(const QString& seatId);
+    QString sourceUnitIdForSeat(const QString& seatId) const;
+    const ScenarioUnit* sourceUnitForSeat(const Seat& seat) const;
     bool validAiPosition(const GeoPos& position, double mapWidth, double mapHeight,
                          const QHash<QString, GeoPos>& placements) const;
     static quint64 deterministicSeed(const QString& value, quint64 generation);
@@ -125,6 +136,8 @@ private:
     void clearDeployment(Seat& seat);
 
     QHash<QString, ScenarioUnit> m_templates;
+    QHash<QString, ScenarioUnit> m_sourceUnits;
+    QHash<QString, QString> m_seatSources;
     // Optional for standalone room tests and legacy callers. The game server
     // always supplies this map from the complete initial scenario.
     QHash<QString, int> m_seatLimits;
@@ -135,6 +148,7 @@ private:
     QSet<qint64> m_departedUsers;
     QString m_phase = QStringLiteral("preparing");
     QString m_mode = QStringLiteral("pvp");
+    bool m_vmfSingleSide = false;
     QString m_winner;
     quint64 m_revision = 1;
     quint64 m_nextUnitSequence = 1;

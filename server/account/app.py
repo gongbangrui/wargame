@@ -322,6 +322,8 @@ class RoomBody(BaseModel):
     def validate_intel_windows(self) -> "RoomBody":
         if self.intel_archive_after_sec <= self.intel_stale_after_sec:
             raise ValueError("情报归档阈值必须大于失联阈值")
+        if self.protocol_profile == "vmf-guided-strike-v1" and self.mode == "pve":
+            raise ValueError("VMF 严格引导打击为红方单方作战，不能与 PVE 同时启用")
         return self
 
     @field_validator("room_id", "name", "description", "scenario_id", mode="before")
@@ -762,6 +764,15 @@ def initialize_database() -> None:
         )
         db.execute("UPDATE rooms SET ai_model='' WHERE ai_model IS NULL")
         db.execute("UPDATE rooms SET ai_resolved_model='' WHERE ai_resolved_model IS NULL")
+        # Strict VMF owns its red-side automation independently of the PVE AI
+        # roster.  Migrate only stopped legacy rooms so no active lifecycle is
+        # changed behind the authoritative game server.
+        db.execute(
+            "UPDATE rooms SET mode='pvp',ai_provider='rules',ai_model='',"
+            "ai_resolved_model='',config_version=config_version+1,updated_at=? "
+            "WHERE protocol_profile='vmf-guided-strike-v1' AND mode='pve' AND status='stopped'",
+            (iso_time(utc_now()),),
+        )
         operation_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(room_operations)")
         }
@@ -1314,12 +1325,17 @@ def public_room(row: sqlite3.Row) -> dict:
     seat_limits = dict(DEFAULT_SEAT_LIMITS)
     if isinstance(decoded_limits, dict):
         seat_limits.update(decoded_limits)
+    protocol_profile = row["protocol_profile"] if "protocol_profile" in row.keys() else "native"
+    strict_vmf = protocol_profile == "vmf-guided-strike-v1"
     result = {
         "roomId": row["room_id"],
         "name": row["name"],
         "description": row["description"],
         "scenarioId": row["scenario_id"],
-        "protocolProfile": row["protocol_profile"] if "protocol_profile" in row.keys() else "native",
+        "protocolProfile": protocol_profile,
+        "operationMode": "vmf-single-side" if strict_vmf else "standard",
+        "participantSide": "red" if strict_vmf else "both",
+        "fixedTargetSide": "blue" if strict_vmf else "",
         "seatLimits": seat_limits,
         "seatParameters": decode(row["seat_parameters"], {}),
         "mode": row["mode"],
@@ -2325,6 +2341,11 @@ def update_room(room_id: str, body: RoomBody, _: sqlite3.Row = Depends(require_a
         if (mode_changed or difficulty_changed) and existing["status"] != "stopped":
             raise HTTPException(status_code=409, detail="只有停止状态才能修改房间模式或 AI 强度")
         mode = body.mode if "mode" in body.model_fields_set else existing["mode"]
+        if protocol_profile == "vmf-guided-strike-v1" and mode == "pve":
+            raise HTTPException(
+                status_code=422,
+                detail="VMF 严格引导打击为红方单方作战，不能与 PVE 同时启用",
+            )
         ai_difficulty = (
             body.ai_difficulty
             if "ai_difficulty" in body.model_fields_set
@@ -2615,6 +2636,11 @@ def internal_room_config(
             if "protocol_profile" in body.model_fields_set
             else existing["protocol_profile"]
         )
+        if protocol_profile == "vmf-guided-strike-v1" and existing["mode"] == "pve":
+            raise HTTPException(
+                status_code=422,
+                detail="请先将房间切换为 PVP，再启用 VMF 严格引导打击",
+            )
         changed = (
             body.name != existing["name"]
             or body.description != existing["description"]

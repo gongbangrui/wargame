@@ -19,7 +19,7 @@ public:
     ~LocalTransport() override = default;
 
     // ITransport interface
-    void send(const Message& msg) override;
+    bool send(const Message& msg) override;
     void subscribe(const QString& unitId, MessageBus::Handler h) override;
     void unsubscribe(const QString& unitId) override;
     void unregisterUnit(const QString& unitId) override;

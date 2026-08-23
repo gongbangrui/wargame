@@ -729,6 +729,117 @@ TEST(RoomPersistenceTest, RejectsPathsOutsideDataRootAndSymlinkEscapes) {
     }
 }
 
+TEST(RoomPersistenceTest, StrictSeatProjectionIsRedClaimableAndAdminEditable) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    qputenv("INTERNAL_API_KEY", QByteArray(32, 'k'));
+    qputenv("AUTH_SERVICE_URL", QByteArray("http://127.0.0.1:1"));
+    qputenv("SCENARIO_PATH", temporary.filePath(QStringLiteral("scenario.json")).toUtf8());
+    qputenv("MONITOR_LOG_PATH", temporary.filePath(QStringLiteral("monitor.jsonl")).toUtf8());
+    qputenv("MONITOR_STATUS_PATH", temporary.filePath(QStringLiteral("status.json")).toUtf8());
+    qputenv("CHECKPOINT_PATH", temporary.filePath(QStringLiteral("checkpoint.json")).toUtf8());
+    qputenv("COMMAND_LOG_PATH", temporary.filePath(QStringLiteral("events.jsonl")).toUtf8());
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    QString error;
+    ASSERT_TRUE(server.applyProtocolProfilePolicy(&error)) << error.toStdString();
+
+    const QJsonObject state = server.roomState();
+    EXPECT_EQ(state.value(QStringLiteral("operationMode")).toString(),
+              QStringLiteral("vmf-single-side"));
+    EXPECT_EQ(state.value(QStringLiteral("participantSide")).toString(),
+              QStringLiteral("red"));
+    EXPECT_EQ(state.value(QStringLiteral("fixedTargetSide")).toString(),
+              QStringLiteral("blue"));
+    EXPECT_TRUE(state.value(QStringLiteral("scenarioEditable")).toBool());
+    EXPECT_FALSE(server.m_authoritativeRoom.readiness()
+                     .value(QStringLiteral("ready")).toBool());
+
+    QJsonObject redCommander;
+    QJsonObject blueCommander;
+    for (const QJsonValue& value : state.value(QStringLiteral("seats")).toArray()) {
+        const QJsonObject seat = value.toObject();
+        if (seat.value(QStringLiteral("seatId")).toString()
+            == QLatin1String("red_commander")) {
+            redCommander = seat;
+        } else if (seat.value(QStringLiteral("seatId")).toString()
+                   == QLatin1String("blue_commander")) {
+            blueCommander = seat;
+        }
+    }
+    ASSERT_FALSE(redCommander.isEmpty());
+    EXPECT_FALSE(redCommander.value(QStringLiteral("occupied")).toBool());
+    EXPECT_TRUE(redCommander.value(QStringLiteral("claimable")).toBool());
+    ASSERT_FALSE(blueCommander.isEmpty());
+    EXPECT_TRUE(blueCommander.value(QStringLiteral("occupied")).toBool());
+    EXPECT_FALSE(blueCommander.value(QStringLiteral("claimable")).toBool());
+    EXPECT_EQ(blueCommander.value(QStringLiteral("controlMode")).toString(),
+              QStringLiteral("fixed-target"));
+    EXPECT_EQ(blueCommander.value(QStringLiteral("sourceUnitId")).toString(),
+              QStringLiteral("blue_cp"));
+
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    server.syncAuthoritativeSeats();
+    EXPECT_TRUE(server.roomState().value(QStringLiteral("scenarioEditable")).toBool());
+    Scenario edited = server.m_runInitialScenario;
+    ASSERT_FALSE(edited.units.empty());
+    edited.units.front().callsign += QStringLiteral("-管理员调整");
+    ASSERT_TRUE(server.replaceInitialScenario(edited, &error)) << error.toStdString();
+    EXPECT_EQ(server.m_authoritativeRoom.claimSeat(
+                  2, QStringLiteral("blue user"), QStringLiteral("blue_commander"),
+                  QStringLiteral("commandpost")).code,
+              QStringLiteral("SIDE_RESERVED_FOR_FIXED_TARGET"));
+}
+
+TEST(RoomPersistenceTest, StrictSeatedSnapshotRetainsOwnedUnitWhenRuntimeRosterIsEmpty) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    qputenv("INTERNAL_API_KEY", QByteArray(32, 'k'));
+    qputenv("AUTH_SERVICE_URL", QByteArray("http://127.0.0.1:1"));
+    qputenv("SCENARIO_PATH", temporary.filePath(QStringLiteral("scenario.json")).toUtf8());
+    qputenv("MONITOR_LOG_PATH", temporary.filePath(QStringLiteral("monitor.jsonl")).toUtf8());
+    qputenv("MONITOR_STATUS_PATH", temporary.filePath(QStringLiteral("status.json")).toUtf8());
+    qputenv("CHECKPOINT_PATH", temporary.filePath(QStringLiteral("checkpoint.json")).toUtf8());
+    qputenv("COMMAND_LOG_PATH", temporary.filePath(QStringLiteral("events.jsonl")).toUtf8());
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    QString error;
+    ASSERT_TRUE(server.applyProtocolProfilePolicy(&error)) << error.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        11, QStringLiteral("red commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.applyDeployedScenario(&error)) << error.toStdString();
+    server.syncAuthoritativeSeats();
+
+    QWebSocket socket;
+    auto& session = server.m_clients[&socket];
+    session.authenticated = true;
+    session.accountRole = QStringLiteral("player");
+    session.roomId = server.m_roomId;
+    session.seatId = QStringLiteral("red_commander");
+    session.seatType = QStringLiteral("commander");
+    session.side = QStringLiteral("red");
+
+    // Simulate a recovery/deployment refresh that has not rebuilt the runtime
+    // roster yet, while the authoritative seat and initial scenario remain.
+    server.m_authoritativeRoom.clearDeployment();
+    const QJsonObject snapshot = server.snapshotFor(session);
+    const QJsonArray projected = snapshot.value(QStringLiteral("units")).toArray();
+    const QString ownedId = server.m_authoritativeRoom.seat(session.seatId).unitId;
+    EXPECT_FALSE(ownedId.isEmpty());
+    EXPECT_TRUE(std::any_of(projected.cbegin(), projected.cend(),
+                            [&ownedId](const QJsonValue& value) {
+                                return value.toObject().value(QStringLiteral("id")).toString()
+                                    == ownedId;
+                            }));
+}
+
 TEST(RoomPersistenceTest, StrictPlaceholderTakeoverPreservesRuntimeAndResetClearsTasks) {
     QTemporaryDir temporary;
     ASSERT_TRUE(temporary.isValid());
@@ -743,21 +854,13 @@ TEST(RoomPersistenceTest, StrictPlaceholderTakeoverPreservesRuntimeAndResetClear
     QWebSocket socket;
     GameServer server;
     ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    QString error;
     server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
-    ASSERT_TRUE(server.m_authoritativeRoom.installPlaceholdersForMissing().ok);
+    ASSERT_TRUE(server.applyProtocolProfilePolicy(&error)) << error.toStdString();
     ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
         1, QStringLiteral("red commander"), QStringLiteral("red_commander"),
         QStringLiteral("commandpost")).ok);
-    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
-        2, QStringLiteral("blue commander"), QStringLiteral("blue_commander"),
-        QStringLiteral("commandpost")).ok);
-    ASSERT_TRUE(server.m_authoritativeRoom.deployInitial(
-        QStringLiteral("red_commander"), GeoPos{1000.0, 1000.0, 0.0}).ok);
-    ASSERT_TRUE(server.m_authoritativeRoom.deployInitial(
-        QStringLiteral("blue_commander"), GeoPos{19000.0, 14000.0, 0.0}).ok);
     ASSERT_TRUE(server.m_authoritativeRoom.setReady(1, true).ok);
-    ASSERT_TRUE(server.m_authoritativeRoom.setReady(2, true).ok);
-    QString error;
     ASSERT_TRUE(server.applyDeployedScenario(&error)) << error.toStdString();
     ASSERT_TRUE(server.m_authoritativeRoom.start().ok);
     server.m_phase = QStringLiteral("running");
@@ -794,7 +897,9 @@ TEST(RoomPersistenceTest, StrictPlaceholderTakeoverPreservesRuntimeAndResetClear
     ASSERT_NE(server.m_engine.unit(commander.unitId), nullptr);
     server.m_engine.unit(commander.unitId)->setDetectRange(1'000'000.0);
     server.m_sharedIntel[QStringLiteral("red_commander")].insert(
-        QStringLiteral("blue_gt_1"));
+        QStringLiteral("blue_cp"));
+    server.m_sharedIntel[QStringLiteral("red_recon_1")].insert(
+        QStringLiteral("blue_cp"));
     GameServer::ClientSession& commanderSession = server.m_clients[&socket];
     commanderSession.userId = 1;
     commanderSession.username = QStringLiteral("red commander");
@@ -804,11 +909,11 @@ TEST(RoomPersistenceTest, StrictPlaceholderTakeoverPreservesRuntimeAndResetClear
     commanderSession.side = QStringLiteral("red");
     ASSERT_EQ(server.m_phase, QStringLiteral("running"));
     ASSERT_TRUE(server.m_engine.running());
-    ASSERT_NE(server.m_engine.unit(QStringLiteral("blue_gt_1")), nullptr);
-    ASSERT_EQ(server.m_engine.unit(QStringLiteral("blue_gt_1"))->kind(),
-              UnitKind::GroundTarget);
+    ASSERT_NE(server.m_engine.unit(QStringLiteral("blue_cp")), nullptr);
+    ASSERT_EQ(server.m_engine.unit(QStringLiteral("blue_cp"))->kind(),
+              UnitKind::CommandPost);
     ASSERT_TRUE(server.visibleUnitIds(commanderSession).contains(
-        QStringLiteral("blue_gt_1")));
+        QStringLiteral("blue_cp")));
     for (const QString& binding : {QStringLiteral("red_commander"),
                                    QStringLiteral("red_recon_1"), seatId,
                                    QStringLiteral("red_ground_1")}) {
@@ -828,16 +933,93 @@ TEST(RoomPersistenceTest, StrictPlaceholderTakeoverPreservesRuntimeAndResetClear
                     {QStringLiteral("reconSeatId"), QStringLiteral("red_recon_1")},
                     {QStringLiteral("attackSeatId"), seatId},
                     {QStringLiteral("groundSeatId"), QStringLiteral("red_ground_1")},
-                    {QStringLiteral("targetId"), QStringLiteral("blue_gt_1")},
+                    {QStringLiteral("targetId"), QStringLiteral("blue_cp")},
                     {QStringLiteral("correlationId"), QStringLiteral("corr-reset")}},
         requestId);
     const StrictVmfTaskSet::Task* created =
         server.m_strictVmfTasks.task(QStringLiteral("red-task-reset"));
     ASSERT_NE(created, nullptr);
-    EXPECT_EQ(created->health, QStringLiteral("blocked"));
+    EXPECT_EQ(created->health, QStringLiteral("active"));
+    EXPECT_EQ(created->stage, QStringLiteral("awaitingTargetReport"));
+
+    UnitBase* automationActor = server.m_engine.unit(
+        server.m_authoritativeRoom.seat(QStringLiteral("red_recon_1")).unitId);
+    ASSERT_NE(automationActor, nullptr);
+    ASSERT_EQ(server.m_authoritativeRoom.seat(QStringLiteral("red_recon_1")).controlMode,
+              QStringLiteral("vmf-auto"));
+    ASSERT_TRUE(server.m_engine.running());
+    automationActor->setHp(0.0);
+    server.runStrictVmfAutomation();
+    ASSERT_EQ(server.m_vmfAutomationFailureCount.size(), 1);
+    const QString failedAttempt = server.m_vmfAutomationFailureCount.constBegin().key();
+    EXPECT_EQ(server.m_vmfAutomationFailureCount.value(failedAttempt), 1);
+    const double retryAt = server.m_vmfAutomationRetryAfter.value(failedAttempt);
+    EXPECT_GT(retryAt, server.m_engine.simTime());
+    server.runStrictVmfAutomation();
+    EXPECT_EQ(server.m_vmfAutomationFailureCount.value(failedAttempt), 1);
+
+    automationActor->setHp(automationActor->maxHp());
+    const double beforeStep = server.m_engine.simTime();
+    server.m_engine.setRunning(false);
+    server.m_engine.clock()->advance(0.6);
+    server.m_engine.setRunning(true);
+    EXPECT_GT(server.m_engine.simTime(), beforeStep);
+    EXPECT_TRUE(server.m_engine.running());
+    EXPECT_EQ(server.m_phase, QStringLiteral("running"));
+    EXPECT_FALSE(server.m_replayingDurableEvents);
+    server.runStrictVmfAutomation();
+    created = server.m_strictVmfTasks.task(QStringLiteral("red-task-reset"));
+    ASSERT_NE(created, nullptr);
+    ASSERT_EQ(created->stage, QStringLiteral("targetReported"));
+    const quint64 humanStageRevision = created->taskRevision;
+    server.runStrictVmfAutomation();
+    EXPECT_EQ(server.m_strictVmfTasks.task(QStringLiteral("red-task-reset"))
+                  ->taskRevision,
+              humanStageRevision);
+
+    ASSERT_TRUE(server.m_authoritativeRoom.disconnect(1).ok);
+    server.syncAuthoritativeSeats();
+    EXPECT_EQ(server.m_authoritativeRoom.seat(QStringLiteral("red_commander")).controlMode,
+              QStringLiteral("vmf-auto"));
+    const GameServer::RoomStateBackup beforeDispatch = server.captureRoomState();
+    const quint64 eventBeforeDispatch = server.m_eventSequence;
+    server.runStrictVmfAutomation();
+    created = server.m_strictVmfTasks.task(QStringLiteral("red-task-reset"));
+    ASSERT_NE(created, nullptr);
+    ASSERT_EQ(created->stage, QStringLiteral("dispatchPending"));
+    ASSERT_TRUE(server.m_engine.unit(unitId)->hasActiveWaypoints());
+    const GameServer::RoomStateBackup afterDispatch = server.captureRoomState();
+
+    const QJsonArray events = server.m_persistence.eventsAfter(eventBeforeDispatch, &error);
+    ASSERT_TRUE(error.isEmpty()) << error.toStdString();
+    ASSERT_EQ(events.size(), 1);
+    const QJsonObject dispatchEvent = events.first().toObject();
+    EXPECT_EQ(dispatchEvent.value(QStringLiteral("kind")).toString(),
+              QStringLiteral("vmfTaskCommand"));
+    const QJsonObject dispatchPayload =
+        dispatchEvent.value(QStringLiteral("payload")).toObject();
+    EXPECT_EQ(dispatchPayload.value(QStringLiteral("generatedBy")).toString(),
+              QStringLiteral("vmf-auto"));
+    EXPECT_EQ(dispatchPayload.value(QStringLiteral("engineAction")).toString(),
+              QStringLiteral("setFlightPlan"));
+
+    ASSERT_TRUE(server.restoreRoomStateBackup(beforeDispatch, &error))
+        << error.toStdString();
+    ASSERT_FALSE(server.m_engine.unit(unitId)->hasActiveWaypoints());
+    ASSERT_TRUE(server.applyDurableEvent(QStringLiteral("vmfTaskCommand"),
+                                         dispatchPayload, &error))
+        << error.toStdString();
+    EXPECT_EQ(server.m_strictVmfTasks.task(QStringLiteral("red-task-reset"))->stage,
+              QStringLiteral("dispatchPending"));
+    EXPECT_TRUE(server.m_engine.unit(unitId)->hasActiveWaypoints());
+    ASSERT_TRUE(server.restoreRoomStateBackup(afterDispatch, &error))
+        << error.toStdString();
+
     ASSERT_TRUE(server.resetAuthoritativeRuntime(QStringLiteral("test-reset"), &error))
         << error.toStdString();
     EXPECT_TRUE(server.m_strictVmfTasks.tasks().isEmpty());
+    EXPECT_TRUE(server.m_vmfAutomationRetryAfter.isEmpty());
+    EXPECT_TRUE(server.m_vmfAutomationFailureCount.isEmpty());
     EXPECT_EQ(server.m_authoritativeRoom.seat(QStringLiteral("red_recon_1")).controllerType,
               QStringLiteral("placeholder"));
 }

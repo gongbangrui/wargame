@@ -20,6 +20,21 @@ QString typeForTemplate(const QString& templateId) {
     return {};
 }
 
+QString templateForType(const QString& type) {
+    if (type == QLatin1String("commander")) return QStringLiteral("commandpost");
+    if (type == QLatin1String("attack")) return QStringLiteral("attackuav");
+    if (type == QLatin1String("recon")) return QStringLiteral("reconuav");
+    if (type == QLatin1String("ground")) return QStringLiteral("groundscout");
+    if (type == QLatin1String("jammer")) return QStringLiteral("jammeruav");
+    return {};
+}
+
+QString canonicalSeatId(const QString& side, const QString& type, int index) {
+    return type == QLatin1String("commander")
+        ? side + QStringLiteral("_commander")
+        : QStringLiteral("%1_%2_%3").arg(side, type).arg(index);
+}
+
 QStringList seatParts(const QString& seatId) {
     return seatId.split(QLatin1Char('_'), Qt::SkipEmptyParts);
 }
@@ -43,6 +58,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::setMode(const QString& mode) {
     if (mode != QLatin1String("pvp") && mode != QLatin1String("pve")) {
         return failure(QStringLiteral("INVALID_ROOM_MODE"));
     }
+    if (m_vmfSingleSide && mode == QLatin1String("pve")) {
+        return failure(QStringLiteral("VMF_PVE_CONFLICT"));
+    }
     if (m_mode == mode) {
         return mode == QLatin1String("pve") ? syncAiRoster()
                                              : Result{true, {}, m_revision, true};
@@ -63,6 +81,38 @@ AuthoritativeRoom::Result AuthoritativeRoom::setMode(const QString& mode) {
         return roster;
     }
     return roster;
+}
+
+AuthoritativeRoom::Result AuthoritativeRoom::setVmfSingleSide(bool enabled) {
+    // Reapplying the already committed strict policy is required while a
+    // room is running or paused (account reconciliation and resume both call
+    // the same policy hook).  A policy transition remains preparation-only.
+    if (m_phase != QLatin1String("preparing") && m_vmfSingleSide != enabled) {
+        return failure(QStringLiteral("SEAT_LOCKED"));
+    }
+    if (enabled && m_mode == QLatin1String("pve")) {
+        return failure(QStringLiteral("VMF_PVE_CONFLICT"));
+    }
+    if (enabled) {
+        for (const Seat& seat : m_seats) {
+            if (seat.side == QLatin1String("blue")
+                && seat.controllerType == QLatin1String("human")) {
+                return failure(QStringLiteral("BLUE_SEATS_OCCUPIED"));
+            }
+        }
+    }
+    if (m_vmfSingleSide == enabled) {
+        return enabled ? syncVmfRoster() : Result{true, {}, m_revision, true};
+    }
+    m_vmfSingleSide = enabled;
+    if (enabled) return syncVmfRoster();
+
+    QStringList serverSeats;
+    for (const Seat& seat : m_seats) {
+        if (seat.controllerType == QLatin1String("placeholder")) serverSeats.append(seat.seatId);
+    }
+    for (const QString& seatId : serverSeats) m_seats.remove(seatId);
+    return success();
 }
 
 bool AuthoritativeRoom::setSeatLimits(const QHash<QString, int>& limits, QString* error) {
@@ -89,14 +139,86 @@ bool AuthoritativeRoom::setSeatLimits(const QHash<QString, int>& limits, QString
         bool ok = false;
         const int index = parts.size() == 2 ? 1 : parts.value(2).toInt(&ok);
         const int normalizedIndex = parts.size() == 2 ? 1 : (ok ? index : -1);
+        const bool provisionedVmfSeat = m_vmfSingleSide && seat.side == QLatin1String("red")
+            && seat.controllerType == QLatin1String("placeholder")
+            && (seat.seatType == QLatin1String("recon")
+                || seat.seatType == QLatin1String("attack")
+                || seat.seatType == QLatin1String("ground"));
         if (baseId.isEmpty() || normalizedIndex <= 0
-            || limits.value(baseId, 0) < normalizedIndex) {
+            || (!provisionedVmfSeat && limits.value(baseId, 0) < normalizedIndex)) {
             if (error) *error = QStringLiteral("seat %1 is outside the initial scenario")
                                       .arg(seat.seatId);
             return false;
         }
     }
     m_seatLimits = limits;
+    return true;
+}
+
+bool AuthoritativeRoom::setScenarioUnits(const std::vector<ScenarioUnit>& units,
+                                         QString* error) {
+    if (error) error->clear();
+    QHash<QString, ScenarioUnit> sources;
+    QHash<QString, QList<QString>> buckets;
+    for (const ScenarioUnit& unit : units) {
+        const QString type = typeForTemplate(unit.kind);
+        if (type.isEmpty()) continue;
+        if (unit.id.trimmed().isEmpty() || sources.contains(unit.id)
+            || (unit.side != QLatin1String("red") && unit.side != QLatin1String("blue"))) {
+            if (error) *error = QStringLiteral("invalid scenario unit binding: %1").arg(unit.id);
+            return false;
+        }
+        sources.insert(unit.id, unit);
+        buckets[unit.side + QLatin1Char('_') + type].append(unit.id);
+    }
+    for (auto it = buckets.begin(); it != buckets.end(); ++it) std::sort(it->begin(), it->end());
+
+    QHash<QString, QString> bindings;
+    QSet<QString> assigned;
+    for (const Seat& seat : m_seats) {
+        if (seat.sourceUnitId.isEmpty()) continue;
+        const ScenarioUnit source = sources.value(seat.sourceUnitId);
+        if (source.id.isEmpty() || source.side != seat.side
+            || typeForTemplate(source.kind) != seat.seatType) {
+            if (error) {
+                *error = QStringLiteral("occupied seat source unit was removed or changed: %1")
+                             .arg(seat.sourceUnitId);
+            }
+            return false;
+        }
+        bindings.insert(seat.seatId, seat.sourceUnitId);
+        assigned.insert(seat.sourceUnitId);
+    }
+    for (auto bucket = buckets.cbegin(); bucket != buckets.cend(); ++bucket) {
+        const QStringList parts = bucket.key().split(QLatin1Char('_'));
+        int nextIndex = 1;
+        for (const QString& sourceId : bucket.value()) {
+            if (assigned.contains(sourceId)) continue;
+            QString seatId;
+            do {
+                seatId = canonicalSeatId(parts.value(0), parts.value(1), nextIndex++);
+            } while (bindings.contains(seatId));
+            bindings.insert(seatId, sourceId);
+        }
+    }
+
+    m_sourceUnits = std::move(sources);
+    m_seatSources = std::move(bindings);
+    for (auto it = m_seats.begin(); it != m_seats.end(); ++it) {
+        QString sourceId = it->sourceUnitId;
+        if (sourceId.isEmpty()) sourceId = m_seatSources.value(it.key());
+        if (sourceId.isEmpty()) continue;
+        const ScenarioUnit source = m_sourceUnits.value(sourceId);
+        it->sourceUnitId = sourceId;
+        it->selectedTemplate = source.kind;
+        it->unitId = source.id;
+        if (m_vmfSingleSide) {
+            it->position = source.pos;
+            it->deployed = true;
+            it->ready = it->controllerType != QLatin1String("human");
+            it->revision = m_revision + 1;
+        }
+    }
     return true;
 }
 
@@ -126,6 +248,7 @@ AuthoritativeRoom::Result AuthoritativeRoom::installAiSeat(const QString& seatId
     seat.username = QStringLiteral("AI");
     seat.controllerType = QStringLiteral("ai");
     seat.controllerId = QStringLiteral("ai:%1").arg(seatId);
+    seat.controlMode = QStringLiteral("ai");
     seat.selectedTemplate = templateId;
     seat.unitId = type == QLatin1String("commander")
         ? QStringLiteral("blue_cp") : allocateUnitId(side, templateId);
@@ -135,6 +258,133 @@ AuthoritativeRoom::Result AuthoritativeRoom::installAiSeat(const QString& seatId
     seat.ready = false;
     seat.revision = m_revision + 1;
     m_seats.insert(seatId, seat);
+    return success();
+}
+
+QString AuthoritativeRoom::sourceUnitIdForSeat(const QString& seatId) const {
+    return m_seatSources.value(seatId);
+}
+
+const ScenarioUnit* AuthoritativeRoom::sourceUnitForSeat(const Seat& seat) const {
+    const QString sourceId = seat.sourceUnitId.isEmpty()
+        ? sourceUnitIdForSeat(seat.seatId) : seat.sourceUnitId;
+    const auto source = m_sourceUnits.constFind(sourceId);
+    return source == m_sourceUnits.cend() ? nullptr : &source.value();
+}
+
+AuthoritativeRoom::Result AuthoritativeRoom::installVmfSeat(
+    const QString& seatId, const QString& templateId, const QString& controlMode) {
+    QString side;
+    QString type;
+    if (!m_vmfSingleSide || !validSeatTemplate(seatId, templateId, &side, &type)
+        || (controlMode != QLatin1String("vmf-auto")
+            && controlMode != QLatin1String("fixed-target"))
+        || (controlMode == QLatin1String("vmf-auto") && side != QLatin1String("red"))
+        || (controlMode == QLatin1String("fixed-target") && side != QLatin1String("blue"))) {
+        return failure(QStringLiteral("INVALID_VMF_SEAT"));
+    }
+    const bool hasExisting = m_seats.contains(seatId);
+    const Seat existing = m_seats.value(seatId);
+    if (hasExisting && existing.controllerType == QLatin1String("human")) {
+        if (side != QLatin1String("red")) return failure(QStringLiteral("SIDE_RESERVED_FOR_FIXED_TARGET"));
+        m_seats[seatId].controlMode = QStringLiteral("human");
+        return Result{true, {}, m_revision, true};
+    }
+
+    const QString sourceId = sourceUnitIdForSeat(seatId);
+    const auto sourceIt = m_sourceUnits.constFind(sourceId);
+    const ScenarioUnit* source = sourceIt == m_sourceUnits.cend() ? nullptr : &sourceIt.value();
+    if (hasExisting && existing.controllerType == QLatin1String("placeholder")
+        && existing.controlMode == controlMode && existing.sourceUnitId == sourceId
+        && existing.selectedTemplate == (source ? source->kind : templateId)) {
+        return Result{true, {}, m_revision, true};
+    }
+    Seat seat;
+    seat.seatId = seatId;
+    seat.seatType = type;
+    seat.side = side;
+    seat.username = controlMode == QLatin1String("fixed-target")
+        ? QStringLiteral("固定靶") : QStringLiteral("VMF 自动席位");
+    seat.controllerType = QStringLiteral("placeholder");
+    seat.controllerId = QStringLiteral("vmf:%1").arg(seatId);
+    seat.controlMode = controlMode;
+    seat.selectedTemplate = source ? source->kind : templateId;
+    seat.sourceUnitId = sourceId;
+    seat.unitId = source ? source->id
+        : (type == QLatin1String("commander")
+               ? side + QStringLiteral("_cp")
+               : QStringLiteral("vmf_auto_%1_%2").arg(side, type));
+    seat.position = source ? source->pos : m_templates.value(templateId).pos;
+    seat.connected = true;
+    seat.deployed = true;
+    seat.ready = true;
+    seat.revision = m_revision + 1;
+    m_seats.insert(seatId, seat);
+    return success();
+}
+
+AuthoritativeRoom::Result AuthoritativeRoom::syncVmfRoster() {
+    if (!m_vmfSingleSide) return Result{true, {}, m_revision, true};
+    if (m_phase != QLatin1String("preparing") && m_phase != QLatin1String("running")
+        && m_phase != QLatin1String("paused")) {
+        return failure(QStringLiteral("SEAT_LOCKED"));
+    }
+    const QJsonObject before = toJson();
+    QSet<QString> desiredBlue;
+    for (auto it = m_seatSources.cbegin(); it != m_seatSources.cend(); ++it) {
+        const QStringList parts = seatParts(it.key());
+        if (parts.value(0) != QLatin1String("blue")) continue;
+        const ScenarioUnit source = m_sourceUnits.value(it.value());
+        if (source.id.isEmpty()) continue;
+        desiredBlue.insert(it.key());
+        const Result installed = installVmfSeat(it.key(), source.kind,
+                                                QStringLiteral("fixed-target"));
+        if (!installed.ok) return installed;
+    }
+    QStringList staleBlue;
+    for (const Seat& seat : m_seats) {
+        if (seat.side == QLatin1String("blue") && !desiredBlue.contains(seat.seatId)) {
+            staleBlue.append(seat.seatId);
+        }
+    }
+    for (const QString& seatId : staleBlue) m_seats.remove(seatId);
+
+    for (const QString& type : {QStringLiteral("recon"), QStringLiteral("attack"),
+                                QStringLiteral("ground")}) {
+        bool present = false;
+        for (const Seat& seat : m_seats) {
+            present = present || (seat.side == QLatin1String("red") && seat.seatType == type);
+        }
+        if (present) continue;
+        const QString seatId = canonicalSeatId(QStringLiteral("red"), type, 1);
+        const Result installed = installVmfSeat(seatId, templateForType(type),
+                                                QStringLiteral("vmf-auto"));
+        if (!installed.ok) return installed;
+    }
+    if (before == toJson()) return Result{true, {}, m_revision, true};
+    return Result{true, {}, m_revision};
+}
+
+AuthoritativeRoom::Result AuthoritativeRoom::convertToVmfAutomation(const QString& seatId) {
+    if (!m_vmfSingleSide || !m_seats.contains(seatId)) {
+        return failure(QStringLiteral("INVALID_VMF_SEAT"));
+    }
+    Seat& seat = m_seats[seatId];
+    if (seat.side != QLatin1String("red")) return failure(QStringLiteral("INVALID_VMF_SEAT"));
+    const qint64 departedUser = seat.userId;
+    seat.userId = 0;
+    seat.humanUserId = 0;
+    seat.username = QStringLiteral("VMF 自动席位");
+    seat.controllerType = QStringLiteral("placeholder");
+    seat.controllerId = QStringLiteral("vmf:%1").arg(seatId);
+    seat.controlMode = QStringLiteral("vmf-auto");
+    seat.connected = true;
+    seat.ready = true;
+    seat.pendingTransfer = false;
+    seat.redeployRequested = false;
+    seat.revision = m_revision + 1;
+    m_transfers.remove(departedUser);
+    m_departedUsers.insert(departedUser);
     return success();
 }
 
@@ -179,6 +429,7 @@ AuthoritativeRoom::Result AuthoritativeRoom::installPlaceholdersForMissing() {
     if (m_phase != QLatin1String("preparing") && m_phase != QLatin1String("running")) {
         return failure(QStringLiteral("SEAT_LOCKED"));
     }
+    if (m_vmfSingleSide) return syncVmfRoster();
     const QJsonObject before = toJson();
     for (auto it = m_seatLimits.cbegin(); it != m_seatLimits.cend(); ++it) {
         const QStringList parts = seatParts(it.key());
@@ -197,6 +448,7 @@ AuthoritativeRoom::Result AuthoritativeRoom::installPlaceholdersForMissing() {
             seat.username = QStringLiteral("服务器占位");
             seat.controllerType = QStringLiteral("placeholder");
             seat.controllerId = QStringLiteral("placeholder:%1").arg(seatId);
+            seat.controlMode = QStringLiteral("vmf-auto");
             seat.selectedTemplate = templateId;
             seat.unitId = allocateUnitId(seat.side, templateId);
             seat.connected = true;
@@ -371,7 +623,12 @@ bool AuthoritativeRoom::validSeatTemplate(const QString& seatId, const QString& 
         const QString baseId = parts.at(0) + QLatin1Char('_') + parts.at(1);
         const int index = expectedType == QLatin1String("commander")
             ? 1 : parts.value(2).toInt();
-        if (m_seatLimits.value(baseId, 0) < index) return false;
+        const bool provisionedVmfSeat = m_vmfSingleSide
+            && parts.first() == QLatin1String("red") && index == 1
+            && (expectedType == QLatin1String("recon")
+                || expectedType == QLatin1String("attack")
+                || expectedType == QLatin1String("ground"));
+        if (!provisionedVmfSeat && m_seatLimits.value(baseId, 0) < index) return false;
     }
     if (side) *side = parts.first();
     if (type) *type = expectedType;
@@ -396,6 +653,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
     if (!validSeatTemplate(seatId, templateId, &side, &type)) {
         return failure(QStringLiteral("INVALID_TEMPLATE"));
     }
+    if (m_vmfSingleSide && side != QLatin1String("red")) {
+        return failure(QStringLiteral("SIDE_RESERVED_FOR_FIXED_TARGET"));
+    }
     if (m_mode == QLatin1String("pve") && side == QLatin1String("blue")) {
         return failure(QStringLiteral("SIDE_RESERVED_FOR_AI"));
     }
@@ -417,7 +677,7 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
     }
     if (type != QLatin1String("commander")
         && (!m_seats.contains(QStringLiteral("red_commander"))
-            || !m_seats.contains(QStringLiteral("blue_commander")))) {
+            || (!m_vmfSingleSide && !m_seats.contains(QStringLiteral("blue_commander"))))) {
         return failure(QStringLiteral("COMMANDER_PRIORITY"));
     }
     const QString current = seatForUser(userId);
@@ -435,12 +695,16 @@ AuthoritativeRoom::Result AuthoritativeRoom::claimSeat(qint64 userId, const QStr
     seat.username = username;
     seat.controllerType = QStringLiteral("human");
     seat.controllerId = QString::number(userId);
-    seat.selectedTemplate = templateId;
-    seat.unitId = previous.controllerType == QLatin1String("placeholder")
-        ? previous.unitId : allocateUnitId(side, templateId);
+    seat.controlMode = QStringLiteral("human");
+    seat.sourceUnitId = previous.sourceUnitId.isEmpty()
+        ? sourceUnitIdForSeat(seatId) : previous.sourceUnitId;
+    const ScenarioUnit* source = sourceUnitForSeat(seat);
+    seat.selectedTemplate = source ? source->kind : templateId;
+    seat.unitId = !previous.unitId.isEmpty() ? previous.unitId
+        : source ? source->id : allocateUnitId(side, templateId);
     seat.connected = true;
-    seat.deployed = previous.deployed;
-    seat.position = previous.position;
+    seat.deployed = m_vmfSingleSide || previous.deployed;
+    seat.position = source && m_vmfSingleSide ? source->pos : previous.position;
     seat.unitName = previous.unitName;
     seat.revision = m_revision + 1;
     m_seats.insert(seatId, seat);
@@ -631,6 +895,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::promote(qint64 commanderUserId,
 AuthoritativeRoom::Result AuthoritativeRoom::leave(qint64 userId, qint64 successorUserId) {
     const QString current = seatForUser(userId);
     if (current.isEmpty()) return Result{true, {}, m_revision, true};
+    if (m_vmfSingleSide && m_phase != QLatin1String("preparing")) {
+        return convertToVmfAutomation(current);
+    }
     if (m_seats.value(current).seatType == QLatin1String("commander")) {
         if (successorUserId <= 0) return failure(QStringLiteral("SUCCESSOR_REQUIRED"));
         return promote(userId, successorUserId);
@@ -646,6 +913,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::leave(qint64 userId, qint64 success
 AuthoritativeRoom::Result AuthoritativeRoom::leaveRoom(qint64 userId) {
     const QString current = seatForUser(userId);
     if (current.isEmpty()) return Result{true, {}, m_revision, true};
+    if (m_vmfSingleSide && m_phase != QLatin1String("preparing")) {
+        return convertToVmfAutomation(current);
+    }
     const Seat seat = m_seats.value(current);
     if (seat.seatType != QLatin1String("commander")) return leave(userId);
     const qint64 successor = chooseSuccessor(seat.side);
@@ -679,6 +949,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::disconnect(qint64 userId) {
     const QString current = seatForUser(userId);
     if (current.isEmpty()) {
         return Result{true, {}, m_revision, m_departedUsers.contains(userId)};
+    }
+    if (m_vmfSingleSide && m_phase != QLatin1String("preparing")) {
+        return convertToVmfAutomation(current);
     }
     const Seat seat = m_seats.value(current);
     if (seat.seatType != QLatin1String("commander")) return leave(userId);
@@ -773,14 +1046,24 @@ AuthoritativeRoom::Result AuthoritativeRoom::setUnitName(qint64 userId, const QS
 }
 
 QJsonObject AuthoritativeRoom::readiness() const {
-    const bool commanders = m_seats.contains(QStringLiteral("red_commander"))
-        && m_seats.contains(QStringLiteral("blue_commander"));
+    const Seat redCommander = m_seats.value(QStringLiteral("red_commander"));
+    const bool humanRedCommander = redCommander.controllerType == QLatin1String("human")
+        && redCommander.userId > 0;
+    const bool commanders = m_vmfSingleSide
+        ? humanRedCommander && m_seats.contains(QStringLiteral("blue_commander"))
+        : m_seats.contains(QStringLiteral("red_commander"))
+            && m_seats.contains(QStringLiteral("blue_commander"));
     bool allReady = commanders && !m_seats.isEmpty();
     for (const Seat& seat : m_seats) {
-        if (seat.controllerType == QLatin1String("placeholder")) continue;
+        if (seat.controllerType == QLatin1String("placeholder")) {
+            allReady = allReady && seat.deployed && seat.ready;
+            continue;
+        }
         allReady = allReady && seat.deployed && seat.ready;
     }
     return {{QStringLiteral("commandersPresent"), commanders},
+            {QStringLiteral("humanRedCommanderReady"),
+             humanRedCommander && redCommander.deployed && redCommander.ready},
             {QStringLiteral("allOccupiedDeployed"), allReady},
             {QStringLiteral("ready"), allReady}};
 }
@@ -820,7 +1103,8 @@ AuthoritativeRoom::Result AuthoritativeRoom::finish(const QString& winner) {
 
 void AuthoritativeRoom::clearDeployment() {
     for (auto it = m_seats.begin(); it != m_seats.end(); ++it) {
-        it->unitId = allocateUnitId(it->side, it->selectedTemplate);
+        const ScenarioUnit* source = sourceUnitForSeat(it.value());
+        it->unitId = source ? source->id : allocateUnitId(it->side, it->selectedTemplate);
         it->position = {};
         it->deployed = false;
         it->ready = false;
@@ -883,7 +1167,8 @@ AuthoritativeRoom::Result AuthoritativeRoom::redeploy(qint64 commanderUserId,
 
 void AuthoritativeRoom::clearReadiness() {
     for (auto it = m_seats.begin(); it != m_seats.end(); ++it) {
-        it->ready = false;
+        it->ready = m_vmfSingleSide
+            && it->controllerType == QLatin1String("placeholder");
         it->revision = m_revision + 1;
     }
     ++m_revision;
@@ -945,7 +1230,8 @@ QJsonArray AuthoritativeRoom::runtimeUnits() const {
     QJsonArray units;
     for (const Seat& seat : m_seats) {
         if (!seat.deployed || seat.unitId.isEmpty()) continue;
-        ScenarioUnit unit = m_templates.value(seat.selectedTemplate);
+        const ScenarioUnit* source = sourceUnitForSeat(seat);
+        ScenarioUnit unit = source ? *source : m_templates.value(seat.selectedTemplate);
         unit.id = seat.unitId;
         // Template DTOs can carry the same generated URN for every seat.  A
         // deployed runtime identity must be unique and stable with its seat.
@@ -977,10 +1263,15 @@ QJsonArray AuthoritativeRoom::seatProjection() const {
                                  {QStringLiteral("username"), seat.username},
                                  {QStringLiteral("controllerType"), seat.controllerType},
                                  {QStringLiteral("controllerId"), seat.controllerId},
+                                 {QStringLiteral("controlMode"), seat.controlMode},
+                                 {QStringLiteral("claimable"),
+                                  m_vmfSingleSide && seat.side == QLatin1String("red")
+                                      && seat.controllerType == QLatin1String("placeholder")},
                                  {QStringLiteral("occupied"), true},
                                  {QStringLiteral("connected"), seat.connected},
                                  {QStringLiteral("commander"), seat.seatType == QLatin1String("commander")},
                                  {QStringLiteral("selectedTemplate"), seat.selectedTemplate},
+                                 {QStringLiteral("sourceUnitId"), seat.sourceUnitId},
                                  {QStringLiteral("unitId"), seat.unitId},
                                  {QStringLiteral("unitName"), seat.unitName},
                                  {QStringLiteral("position"), QJsonObject{
@@ -1023,8 +1314,10 @@ QJsonObject AuthoritativeRoom::toJson() const {
                                      {QStringLiteral("revision"),
                                       static_cast<qint64>(transfer.revision)}});
     }
-    return {{QStringLiteral("schemaVersion"), 1},
+    return {{QStringLiteral("schemaVersion"), 2},
             {QStringLiteral("mode"), m_mode},
+            {QStringLiteral("operationMode"),
+             m_vmfSingleSide ? QStringLiteral("vmf-single-side") : QStringLiteral("standard")},
             {QStringLiteral("phase"), m_phase},
             {QStringLiteral("winner"), m_winner},
             {QStringLiteral("revision"), static_cast<qint64>(m_revision)},
@@ -1046,9 +1339,15 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
     const QString phase = object.value(QStringLiteral("phase")).toString();
     const QString mode = object.contains(QStringLiteral("mode"))
         ? object.value(QStringLiteral("mode")).toString() : QStringLiteral("pvp");
-    if (object.value(QStringLiteral("schemaVersion")).toInt() != 1 || revision <= 0
+    const int schemaVersion = object.value(QStringLiteral("schemaVersion")).toInt();
+    const QString operationMode = object.value(QStringLiteral("operationMode"))
+                                      .toString(QStringLiteral("standard"));
+    const bool vmfSingleSide = operationMode == QLatin1String("vmf-single-side");
+    if ((schemaVersion != 1 && schemaVersion != 2) || revision <= 0
         || nextUnit <= 0 || rng == 0
         || (mode != QLatin1String("pvp") && mode != QLatin1String("pve"))
+        || (operationMode != QLatin1String("standard")
+            && operationMode != QLatin1String("vmf-single-side"))
         || (phase != QLatin1String("preparing") && phase != QLatin1String("running")
             && phase != QLatin1String("paused") && phase != QLatin1String("finished"))) {
         if (error) *error = QStringLiteral("invalid authoritative room state");
@@ -1070,7 +1369,15 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
         seat.controllerId = item.contains(QStringLiteral("controllerId"))
             ? item.value(QStringLiteral("controllerId")).toString()
             : QString::number(seat.userId);
+        seat.controlMode = item.contains(QStringLiteral("controlMode"))
+            ? item.value(QStringLiteral("controlMode")).toString()
+            : seat.controllerType == QLatin1String("placeholder")
+                ? QStringLiteral("vmf-auto")
+                : seat.controllerType == QLatin1String("ai")
+                    ? QStringLiteral("ai") : QStringLiteral("human");
         seat.selectedTemplate = item.value(QStringLiteral("selectedTemplate")).toString();
+        seat.sourceUnitId = item.value(QStringLiteral("sourceUnitId")).toString();
+        if (seat.sourceUnitId.isEmpty()) seat.sourceUnitId = sourceUnitIdForSeat(seat.seatId);
         seat.unitId = item.value(QStringLiteral("unitId")).toString();
         seat.unitName = item.value(QStringLiteral("unitName")).toString();
         const QJsonObject position = item.value(QStringLiteral("position")).toObject();
@@ -1087,6 +1394,7 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
         QString type;
         const bool ai = seat.controllerType == QLatin1String("ai");
         const bool placeholder = seat.controllerType == QLatin1String("placeholder");
+        const ScenarioUnit source = m_sourceUnits.value(seat.sourceUnitId);
         if ((ai && (seat.userId != 0 || seat.humanUserId != 0
                     || seat.controllerId.trimmed().isEmpty()))
             || (!ai && !placeholder && (seat.userId <= 0 || seat.humanUserId != seat.userId
@@ -1096,17 +1404,36 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
             || (seat.controllerType != QLatin1String("human")
                 && seat.controllerType != QLatin1String("ai")
                 && seat.controllerType != QLatin1String("placeholder"))
+            || (seat.controlMode != QLatin1String("human")
+                && seat.controlMode != QLatin1String("ai")
+                && seat.controlMode != QLatin1String("vmf-auto")
+                && seat.controlMode != QLatin1String("fixed-target"))
+            || (vmfSingleSide && seat.side == QLatin1String("blue")
+                && seat.controlMode != QLatin1String("fixed-target"))
             || seats.contains(seat.seatId)
             || !validSeatTemplate(seat.seatId, seat.selectedTemplate, &side, &type)
+            || (!seat.sourceUnitId.isEmpty()
+                && (source.id.isEmpty() || source.side != seat.side
+                    || source.kind != seat.selectedTemplate))
             || side != seat.side || type != seat.seatType || (seat.ready && !seat.deployed)) {
             if (error) *error = QStringLiteral("invalid persisted seat state");
             return false;
+        }
+        if (vmfSingleSide && !source.id.isEmpty()) {
+            seat.unitId = source.id;
+            seat.position = source.pos;
+            seat.deployed = true;
+            if (placeholder) seat.ready = true;
         }
         seats.insert(seat.seatId, seat);
     }
     m_seats = seats;
     m_phase = phase;
-    m_mode = mode;
+    // Strict VMF and PVE are mutually exclusive. Old stopped checkpoints that
+    // predate this invariant are migrated to PVP instead of restoring blue AI.
+    m_mode = vmfSingleSide && mode == QLatin1String("pve")
+        ? QStringLiteral("pvp") : mode;
+    m_vmfSingleSide = vmfSingleSide;
     m_winner = object.value(QStringLiteral("winner")).toString();
     m_revision = static_cast<quint64>(revision);
     m_nextUnitSequence = static_cast<quint64>(nextUnit);

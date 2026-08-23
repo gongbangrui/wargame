@@ -1948,6 +1948,11 @@ void SimulationController::useLocalMode() {
     m_remoteVmfTasks = {};
     m_remoteVmfTrace = {};
     m_protocolProfile = QStringLiteral("native");
+    m_operationMode = QStringLiteral("standard");
+    m_participantSide.clear();
+    m_fixedTargetSide.clear();
+    m_serverScenarioEditable = false;
+    m_vmfAutomation = {};
     m_remoteProjectiles.clear();
     m_chatMessages.clear();
     m_remoteScenarioRevision = -1;
@@ -2293,6 +2298,11 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_roomDescription.clear();
     m_scenarioId = QStringLiteral("default");
     m_protocolProfile = QStringLiteral("native");
+    m_operationMode = QStringLiteral("standard");
+    m_participantSide.clear();
+    m_fixedTargetSide.clear();
+    m_serverScenarioEditable = false;
+    m_vmfAutomation = {};
     m_remoteVmfTasks = {};
     m_remoteVmfTrace = {};
     m_onlineSeatLimits = {};
@@ -2398,6 +2408,11 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     const QJsonObject previousVmfWorkflow = m_remoteVmfWorkflow;
     const QJsonObject previousVmfTasks = m_remoteVmfTasks;
     const QString previousProtocolProfile = m_protocolProfile;
+    const QString previousOperationMode = m_operationMode;
+    const QString previousParticipantSide = m_participantSide;
+    const QString previousFixedTargetSide = m_fixedTargetSide;
+    const bool previousScenarioEditable = m_serverScenarioEditable;
+    const QJsonObject previousVmfAutomation = m_vmfAutomation;
     const QVariantList previousMapMarks = m_onlineMapMarks;
     const QVariantList previousIntelRecords = m_onlineIntelRecords;
     const qint64 previousIntelRevision = m_onlineIntelRevision;
@@ -2439,6 +2454,11 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     m_roomDescription = room.roomDescription;
     m_scenarioId = room.scenarioId;
     m_protocolProfile = room.protocolProfile;
+    m_operationMode = room.operationMode;
+    m_participantSide = room.participantSide;
+    m_fixedTargetSide = room.fixedTargetSide;
+    m_serverScenarioEditable = room.scenarioEditable;
+    m_vmfAutomation = room.vmfAutomation;
     m_remoteVmfTasks = room.vmfTasks;
     m_onlineSeatLimits = room.seatLimits;
     m_onlineSeatParameters = room.seatParameters;
@@ -2618,7 +2638,12 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
         || m_onlineSeatLimits != previousSeatLimits
         || m_onlineSeatParameters != previousSeatParameters
         || m_communicationState != previousCommunicationState
-        || m_protocolProfile != previousProtocolProfile) {
+        || m_protocolProfile != previousProtocolProfile
+        || m_operationMode != previousOperationMode
+        || m_participantSide != previousParticipantSide
+        || m_fixedTargetSide != previousFixedTargetSide
+        || m_serverScenarioEditable != previousScenarioEditable
+        || m_vmfAutomation != previousVmfAutomation) {
         emit roomStateChanged();
     }
     if (m_isObserver != previousObserver || m_currentRoomId != previousRoomId

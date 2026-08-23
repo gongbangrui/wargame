@@ -12,8 +12,8 @@ LocalTransport::LocalTransport(QObject* parent)
             });
 }
 
-void LocalTransport::send(const Message& msg) {
-    m_bus->send(msg);
+bool LocalTransport::send(const Message& msg) {
+    return m_bus->send(msg);
 }
 
 void LocalTransport::subscribe(const QString& unitId, MessageBus::Handler h) {

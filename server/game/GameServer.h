@@ -283,6 +283,8 @@ private:
     bool clearDeploymentRuntime(QString* error = nullptr);
     bool applyDeployedScenario(QString* error = nullptr);
     void appendStrictProfileTargets(Scenario* scenario) const;
+    bool applyProtocolProfilePolicy(QString* error = nullptr);
+    void runStrictVmfAutomation();
     void completeStrictReturns();
     bool applyDeploymentIfPreparing(QString* error = nullptr);
     bool applyDepartureToRuntime(const QStringList& removedUnitIds,
@@ -389,6 +391,8 @@ private:
     QSet<QString> m_vmfMessageIds;
     QStringList m_vmfMessageIdOrder;
     StrictVmfTaskSet m_strictVmfTasks;
+    QHash<QString, double> m_vmfAutomationRetryAfter;
+    QHash<QString, int> m_vmfAutomationFailureCount;
     QString m_protocolProfile = QStringLiteral("native");
     // Bus-generated VMF observations are durable inputs during normal
     // operation, but replay must never append a second event while applying

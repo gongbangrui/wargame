@@ -440,8 +440,15 @@ QJsonObject observerRoomState(const QJsonObject& source, quint64 stateRevision) 
         QStringLiteral("configVersion"),
         QStringLiteral("running"), QStringLiteral("simTime"), QStringLiteral("speed"),
         QStringLiteral("scenarioRevision"), QStringLiteral("vmfWorkflows")};
+    static const QStringList operationFields{
+        QStringLiteral("protocolProfile"), QStringLiteral("operationMode"),
+        QStringLiteral("participantSide"), QStringLiteral("fixedTargetSide"),
+        QStringLiteral("scenarioEditable"), QStringLiteral("vmfAutomation")};
     QJsonObject projected;
     for (const QString& field : fields) {
+        if (source.contains(field)) projected.insert(field, source.value(field));
+    }
+    for (const QString& field : operationFields) {
         if (source.contains(field)) projected.insert(field, source.value(field));
     }
     projected[QStringLiteral("observer")] = true;
