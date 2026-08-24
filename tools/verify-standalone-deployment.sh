@@ -44,7 +44,11 @@ tar -C "$ROOT_DIR" \
     --exclude='*/build' --exclude='build' --exclude='*/cache' --exclude='cache' \
     --exclude='*/.omo' --exclude='.omo' \
     --exclude='.codegraph' --exclude='dist' \
-    -cf - CMakeLists.txt Main.qml main.cpp qml cmake src server map/metadata.json deploy .dockerignore README.md docs \
+    -cf - CMakeLists.txt Main.qml main.cpp qml cmake src server \
+    'design/vmf设计.docx' design/EncoderDecoder/README.txt \
+    design/EncoderDecoder/dic.xml design/EncoderDecoder/dic_content.xml \
+    design/EncoderDecoder/message_catalog.json design/EncoderDecoder/msgStruct \
+    map/metadata.json deploy .dockerignore README.md docs \
     | tar -C "$SOURCE_COPY" -xf -
 
 WARGAME_VERSION="standalone-$$" DIST_DIR="$DIST_DIR" \

@@ -780,6 +780,24 @@ TEST(RoomPersistenceTest, StrictSeatProjectionIsRedClaimableAndAdminEditable) {
     EXPECT_EQ(blueCommander.value(QStringLiteral("sourceUnitId")).toString(),
               QStringLiteral("blue_cp"));
 
+    Scenario withNewUnit = server.m_runInitialScenario;
+    const auto attack = std::find_if(withNewUnit.units.cbegin(), withNewUnit.units.cend(),
+                                     [](const ScenarioUnit& unit) {
+                                         return unit.side == QLatin1String("red")
+                                             && unit.kind == QLatin1String("attackuav");
+                                     });
+    ASSERT_NE(attack, withNewUnit.units.cend());
+    ScenarioUnit newUnit = *attack;
+    newUnit.id = QStringLiteral("red_attack_vmf_added");
+    newUnit.callsign = QStringLiteral("新增攻击机");
+    withNewUnit.units.push_back(newUnit);
+    ASSERT_TRUE(server.replaceInitialScenario(withNewUnit, &error)) << error.toStdString();
+
+    std::erase_if(withNewUnit.units, [](const ScenarioUnit& unit) {
+        return unit.id == QLatin1String("red_attack_vmf_added");
+    });
+    ASSERT_TRUE(server.replaceInitialScenario(withNewUnit, &error)) << error.toStdString();
+
     ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
         1, QStringLiteral("red commander"), QStringLiteral("red_commander"),
         QStringLiteral("commandpost")).ok);
@@ -814,6 +832,9 @@ TEST(RoomPersistenceTest, StrictSeatedSnapshotRetainsOwnedUnitWhenRuntimeRosterI
     ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
         11, QStringLiteral("red commander"), QStringLiteral("red_commander"),
         QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        12, QStringLiteral("red attack"), QStringLiteral("red_attack_1"),
+        QStringLiteral("attackuav")).ok);
     ASSERT_TRUE(server.applyDeployedScenario(&error)) << error.toStdString();
     server.syncAuthoritativeSeats();
 
@@ -822,8 +843,8 @@ TEST(RoomPersistenceTest, StrictSeatedSnapshotRetainsOwnedUnitWhenRuntimeRosterI
     session.authenticated = true;
     session.accountRole = QStringLiteral("player");
     session.roomId = server.m_roomId;
-    session.seatId = QStringLiteral("red_commander");
-    session.seatType = QStringLiteral("commander");
+    session.seatId = QStringLiteral("red_attack_1");
+    session.seatType = QStringLiteral("attack");
     session.side = QStringLiteral("red");
 
     // Simulate a recovery/deployment refresh that has not rebuilt the runtime

@@ -501,9 +501,7 @@ Dialog {
                 Rectangle { Layout.preferredWidth: 4; Layout.preferredHeight: 16; radius: 2; color: t.textMuted; Layout.alignment: Qt.AlignVCenter }
                 Text { text: "兵棋推演"; color: t.textStrong; font.pixelSize: 14; font.bold: true; renderType: Text.NativeRendering }
                 Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 14; color: t.borderSoft; Layout.alignment: Qt.AlignVCenter }
-                Text { text: "v0.2"; color: t.accent; font.pixelSize: 12; font.bold: true; renderType: Text.NativeRendering }
                 Item { Layout.fillWidth: true }
-                Text { text: "Qt 6 · Quick + QML"; color: t.textMuted; font.pixelSize: 11; renderType: Text.NativeRendering }
             }
 
             Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }

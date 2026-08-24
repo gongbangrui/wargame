@@ -241,3 +241,94 @@ TEST(StrictVmfRoomTest, SingleSideRosterRequiresHumanCommanderAndAutomatesDiscon
               QString());
     EXPECT_EQ(room.seat(QStringLiteral("red_attack_1")).unitId, placeholder.unitId);
 }
+
+TEST(StrictVmfRoomTest, ScenarioEditsPruneAutomationButProtectHumanBindings) {
+    AuthoritativeRoom room;
+    QHash<QString, int> limits;
+    for (const QString& side : {QStringLiteral("red"), QStringLiteral("blue")}) {
+        limits.insert(side + QStringLiteral("_commander"), 1);
+        for (const QString& type : {QStringLiteral("attack"), QStringLiteral("recon"),
+                                    QStringLiteral("ground"), QStringLiteral("jammer")}) {
+            limits.insert(QStringLiteral("%1_%2").arg(side, type), 1);
+        }
+    }
+    QString error;
+    ASSERT_TRUE(room.setSeatLimits(limits, &error)) << error.toStdString();
+    ASSERT_TRUE(room.setTemplateCatalog(AuthoritativeRoom::defaultTemplateCatalog(), &error));
+    const Scenario initial = ScenarioIo::defaultScenario();
+    ASSERT_TRUE(room.setScenarioUnits(initial.units, &error)) << error.toStdString();
+    ASSERT_TRUE(room.setVmfSingleSide(true).ok);
+
+    const QString automaticSource = room.seat(QStringLiteral("red_attack_1")).sourceUnitId;
+    ASSERT_FALSE(automaticSource.isEmpty());
+    Scenario withoutAutomaticSource = initial;
+    std::erase_if(withoutAutomaticSource.units, [&automaticSource](const ScenarioUnit& unit) {
+        return unit.id == automaticSource;
+    });
+    ASSERT_TRUE(room.setScenarioUnits(withoutAutomaticSource.units, &error)) << error.toStdString();
+    EXPECT_FALSE(room.hasSeat(QStringLiteral("red_attack_1")));
+    ASSERT_TRUE(room.setVmfSingleSide(true).ok);
+    EXPECT_EQ(room.seat(QStringLiteral("red_attack_1")).controllerType,
+              QStringLiteral("placeholder"));
+
+    ASSERT_TRUE(room.claimSeat(1, QStringLiteral("red commander"),
+                               QStringLiteral("red_commander"),
+                               QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(room.claimSeat(2, QStringLiteral("red recon"),
+                               QStringLiteral("red_recon_1"),
+                               QStringLiteral("reconuav")).ok);
+    const QString humanSource = room.seat(QStringLiteral("red_recon_1")).sourceUnitId;
+    ASSERT_FALSE(humanSource.isEmpty());
+    Scenario withoutHumanSource = withoutAutomaticSource;
+    std::erase_if(withoutHumanSource.units, [&humanSource](const ScenarioUnit& unit) {
+        return unit.id == humanSource;
+    });
+    EXPECT_FALSE(room.setScenarioUnits(withoutHumanSource.units, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("occupied seat source unit")));
+    EXPECT_EQ(room.seat(QStringLiteral("red_recon_1")).controllerType,
+              QStringLiteral("human"));
+}
+
+TEST(StrictVmfRoomTest, ResetRestoresAutomationAndFixedTargets) {
+    AuthoritativeRoom room;
+    QString error;
+    ASSERT_TRUE(room.setTemplateCatalog(AuthoritativeRoom::defaultTemplateCatalog(), &error));
+    ASSERT_TRUE(room.setScenarioUnits(ScenarioIo::defaultScenario().units, &error));
+    ASSERT_TRUE(room.setVmfSingleSide(true).ok);
+
+    ASSERT_TRUE(room.applyOperation(QStringLiteral("vmf-reset"), QStringLiteral("reset"),
+                                    room.revision()).ok);
+    EXPECT_EQ(room.seat(QStringLiteral("blue_commander")).controlMode,
+              QStringLiteral("fixed-target"));
+    EXPECT_EQ(room.seat(QStringLiteral("red_recon_1")).controlMode,
+              QStringLiteral("vmf-auto"));
+    EXPECT_TRUE(room.seat(QStringLiteral("red_recon_1")).deployed);
+}
+
+TEST(StrictVmfRoomTest, PreparingDeparturesRestoreAutomaticSeats) {
+    AuthoritativeRoom room;
+    QString error;
+    ASSERT_TRUE(room.setTemplateCatalog(AuthoritativeRoom::defaultTemplateCatalog(), &error));
+    ASSERT_TRUE(room.setScenarioUnits(ScenarioIo::defaultScenario().units, &error));
+    ASSERT_TRUE(room.setVmfSingleSide(true).ok);
+    ASSERT_TRUE(room.claimSeat(1, QStringLiteral("commander"),
+                               QStringLiteral("red_commander"),
+                               QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(room.claimSeat(2, QStringLiteral("attack"),
+                               QStringLiteral("red_attack_1"),
+                               QStringLiteral("attackuav")).ok);
+
+    ASSERT_TRUE(room.leave(2).ok);
+    EXPECT_EQ(room.seat(QStringLiteral("red_attack_1")).controllerType,
+              QStringLiteral("placeholder"));
+    EXPECT_EQ(room.seat(QStringLiteral("red_attack_1")).controlMode,
+              QStringLiteral("vmf-auto"));
+
+    ASSERT_TRUE(room.claimSeat(3, QStringLiteral("recon"),
+                               QStringLiteral("red_recon_1"),
+                               QStringLiteral("reconuav")).ok);
+    ASSERT_TRUE(room.leave(1, 3).ok);
+    EXPECT_EQ(room.seat(QStringLiteral("red_commander")).userId, 3);
+    EXPECT_EQ(room.seat(QStringLiteral("red_recon_1")).controllerType,
+              QStringLiteral("placeholder"));
+}

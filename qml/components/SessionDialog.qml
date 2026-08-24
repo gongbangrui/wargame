@@ -87,14 +87,12 @@ Dialog {
             ColumnLayout {
                 spacing: 1; Layout.fillWidth: true
                 Text { text: "兵棋推演"; color: t.text; font.bold: true; font.pixelSize: 18; renderType: Text.NativeRendering }
-                Text { text: root.selectedMode === "online" ? "联网" : "本地"; color: t.muted; font.pixelSize: 10; renderType: Text.NativeRendering }
             }
             Rectangle {
                 Layout.preferredWidth: 9; Layout.preferredHeight: 9; radius: 5
                 color: root.controller.networkState === "connected" ? t.accent
                       : root.controller.networkState === "error" ? t.red : t.warning
             }
-            Text { visible: !root.compactLayout; text: root.controller.networkState === "connected" ? "已连接" : "待接入"; color: t.muted; font.pixelSize: 10 }
             GhostButton { visible: root.controller.sessionMode !== "unselected"; text: "关闭"; iconName: "close"; onClicked: root.close() }
         }
     }
@@ -107,11 +105,10 @@ Dialog {
             Layout.preferredWidth: 208; Layout.fillHeight: true; color: t.panel
             ColumnLayout {
                 anchors.fill: parent; anchors.margins: 16; spacing: 10
-                Text { text: "接入方式"; color: t.muted; font.pixelSize: 10; font.bold: true; Layout.leftMargin: 8; Layout.bottomMargin: 2 }
                 Button {
                     id: onlineModeButton
                     Layout.fillWidth: true; Layout.preferredHeight: 58
-                    text: "联网模式"; onClicked: root.selectedMode = "online"
+                    text: "联网"; onClicked: root.selectedMode = "online"
                     contentItem: RowLayout { spacing: 10
                         Icon { name: "network"; iconColor: root.selectedMode === "online" ? t.accent : t.muted; iconSize: 17 }
                         Text { Layout.fillWidth: true; text: onlineModeButton.text; color: root.selectedMode === "online" ? t.text : t.dim; font.pixelSize: 12; font.bold: root.selectedMode === "online" }
@@ -121,7 +118,7 @@ Dialog {
                 Button {
                     id: localModeButton
                     Layout.fillWidth: true; Layout.preferredHeight: 58
-                    text: "本地模式"; onClicked: root.selectedMode = "local"
+                    text: "本地"; onClicked: root.selectedMode = "local"
                     contentItem: RowLayout { spacing: 10
                         Icon { name: "local"; iconColor: root.selectedMode === "local" ? t.info : t.muted; iconSize: 17 }
                         Text { Layout.fillWidth: true; text: localModeButton.text; color: root.selectedMode === "local" ? t.text : t.dim; font.pixelSize: 12; font.bold: root.selectedMode === "local" }
@@ -152,7 +149,7 @@ Dialog {
                 spacing: root.shortLayout ? 6 : 14
                 ColumnLayout {
                     visible: root.selectedMode === "online"; spacing: 12; Layout.fillWidth: true
-                    Text { text: "联网登录"; color: t.text; font.pixelSize: 19; font.bold: true }
+                    Text { text: "登录"; color: t.text; font.pixelSize: 19; font.bold: true }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: t.border }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 8
@@ -268,7 +265,7 @@ Dialog {
                                  && root.controller.networkState !== "loggingIn" && root.controller.networkState !== "connecting"
                                  && root.controller.networkState !== "authenticating"
                                  && root.controller.networkState !== "synchronizing"
-                        text: root.controller.networkState === "loggingIn" || root.controller.networkState === "connecting" || root.controller.networkState === "authenticating" || root.controller.networkState === "synchronizing" ? "正在连接..." : "登录并进入"
+                        text: root.controller.networkState === "loggingIn" || root.controller.networkState === "connecting" || root.controller.networkState === "authenticating" || root.controller.networkState === "synchronizing" ? "连接中..." : "登录"
                         onClicked: root.submitOnlineLogin()
                         contentItem: RowLayout { anchors.centerIn: parent; spacing: 8
                             Icon { name: "network"; iconColor: loginButton.enabled ? t.bg : t.muted; iconSize: 14 }
@@ -290,11 +287,11 @@ Dialog {
 
                 ColumnLayout {
                     visible: root.selectedMode === "local"; spacing: 16; Layout.fillWidth: true
-                    Text { text: "本地推演"; color: t.text; font.pixelSize: 20; font.bold: true }
+                    Text { text: "本地"; color: t.text; font.pixelSize: 20; font.bold: true }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: t.border }
                     Button {
                         id: localEnterButton
-                        Layout.fillWidth: true; Layout.preferredHeight: 44; text: "进入本地推演"
+                        Layout.fillWidth: true; Layout.preferredHeight: 44; text: "进入"
                         onClicked: { root.controller.useLocalMode(); root.close() }
                         contentItem: Text { anchors.fill: parent; text: localEnterButton.text; color: t.bg; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.bold: true }
                         background: Rectangle {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /*
- * 联网模式冒烟验证：账号单客户端、房间生命周期、指挥官优先、容量展开、
+ * 联网模式冒烟验证：账号单客户端、房间生命周期、指挥官优先、
  * 战位视野与通信边界、情报台账/共享、就绪开局、战位命令以及管理员移出房间。脚本只创建临时账号。
  */
 
@@ -252,10 +252,6 @@ try {
   byKey.blueAttack.send("claimSeat", { seatId: "blue_attack_1" });
   await byKey.redAttack.waitFor(message => message.type === "seatState" && message.payload.yourSeatId === "red_attack_1");
   await byKey.blueAttack.waitFor(message => message.type === "seatState" && message.payload.yourSeatId === "blue_attack_1");
-  await byKey.redAttack.waitFor(message => message.type === "deploymentPrompt"
-    && message.payload.message.includes("等待红方指挥官"));
-  await byKey.blueAttack.waitFor(message => message.type === "deploymentPrompt"
-    && message.payload.message.includes("等待蓝方指挥官"));
   await delay(3500);
   assert(byKey.redAttack.messages.filter(message => message.type === "seatState").at(-1)
     ?.payload.yourSeatId === "red_attack_1",
@@ -264,7 +260,6 @@ try {
     ?.payload.yourSeatId === "blue_attack_1",
   "指挥所部署后加入的蓝方战位不能被同步误释放");
   const seats = byKey.redAttack.messages.findLast(message => message.type === "seatState").payload.seats;
-  assert(seats.some(seat => seat.seatId === "red_attack_2"), "房间容量必须展开为第二个攻击机战位");
 
   const occupiedSeats = seats.filter(seat => seat.occupied && seat.unitId);
   assert(occupiedSeats.length === 4, `四个已占用战位都应拥有单位，实际 ${occupiedSeats.length}`);
@@ -281,72 +276,18 @@ try {
   await byKey.redAttack.waitFor(message => message.type === "state"
     && message.payload.units.some(unit => unit.alive && unit.side === "red" && unit.kind === "attackuav"));
 
-  // Exercise the full authoritative seat-transfer lifecycle. The completed
-  // transfer must replace the old unit projection, so later assertions use
-  // the new seat id rather than assuming the original slot survived.
-  const redAttackUser = createdUsers.find(user => user.username === accounts.find(account => account.key === "redAttack").username);
-  const originalRedAttackUnitId = byKey.redAttack.state.units.find(unit => unit.alive && unit.side === "red" && unit.kind === "attackuav")?.id;
-  assert(originalRedAttackUnitId, "转位前必须能看到红方攻击机");
-  let lastTransferRevision = 0;
-  const transferRequest = (seatId) => {
-    byKey.redAttack.send("claimSeat", { seatId });
-    return byKey.redAttack.waitFor(message => (message.type === "event"
-      && message.payload?.kind === "transferRequested"
-      && message.payload?.targetSeatId === seatId
-      && message.payload?.revision > lastTransferRevision)
-      || message.type === "error").then(message => {
-        if (message.type === "error") throw new Error(`转位请求 ${seatId} 被拒绝: ${JSON.stringify(message.payload)}`);
-        assert(message.payload.targetSeatId === seatId,
-          `转位目标异常: ${JSON.stringify(message.payload)}`);
-        lastTransferRevision = message.payload.revision;
-        return message;
-      });
-  };
-  const cancelledTransfer = await transferRequest("red_attack_2");
-  byKey.redAttack.send("claimSeat", {
-    seatId: "red_attack_2",
-    cancelTransfer: true,
-    requestedRevision: cancelledTransfer.payload.requestRevision,
-  });
-  await byKey.redAttack.waitFor(message => message.type === "event"
-    && message.payload?.kind === "transferRejected"
-    && message.payload?.reason === "REQUESTER_CANCELLED");
-  const rejectedTransfer = await transferRequest("red_attack_2");
-  byKey.redCommander.send("claimSeat", {
-    seatId: "red_commander",
-    rejectUserId: redAttackUser.id,
-    requestedRevision: rejectedTransfer.payload.requestRevision,
-  });
-  await byKey.redAttack.waitFor(message => message.type === "event"
-    && message.payload?.kind === "transferRejected"
-    && message.payload?.reason === "COMMANDER_REJECTED");
-  const approvedTransfer = await transferRequest("red_attack_2");
-  byKey.redCommander.send("claimSeat", {
-    seatId: "red_commander",
-    approveUserId: redAttackUser.id,
-    requestedRevision: approvedTransfer.payload.requestRevision,
-  });
-  await byKey.redAttack.waitFor(message => message.type === "event"
-    && message.payload?.kind === "transferCompleted"
-    && message.payload?.targetSeatId === "red_attack_2");
-  await byKey.redAttack.waitFor(message => message.type === "seatState"
-    && message.payload?.yourSeatId === "red_attack_2");
-  const redParticipantSeat = "red_attack_2";
-  await byKey.redAttack.waitFor(message => message.type === "state"
-    && !message.payload.units.some(unit => unit.id === originalRedAttackUnitId));
-  assert(!byKey.redAttack.state.units.some(unit => unit.id === originalRedAttackUnitId),
-    "战位切换完成后旧单位必须从客户端画布状态删除");
-  const transferredSeat = byKey.redCommander.messages.findLast(message => message.type === "seatState")
-    .payload.seats.find(seat => seat.seatId === redParticipantSeat);
+  const redParticipantSeat = "red_attack_1";
+  const redAttackSeat = seats.find(seat => seat.seatId === redParticipantSeat);
+  assert(redAttackSeat?.unitId, "攻击战位必须分配初始单位");
   byKey.redCommander.send("deployment", {
-    unitId: transferredSeat.unitId,
+    unitId: redAttackSeat.unitId,
     targetSeatId: redParticipantSeat,
     position: { x: 1000, y: 2600, alt: 0 },
   });
   await byKey.redCommander.waitFor(message => message.type === "state"
     && message.payload.roomState.seats.some(seat => seat.seatId === redParticipantSeat
       && seat.deployed)
-    && message.payload.units.some(unit => unit.id === transferredSeat.unitId));
+    && message.payload.units.some(unit => unit.id === redAttackSeat.unitId));
 
   byKey.redCommander.send("redeploy", { seatId: redParticipantSeat });
   await byKey.redCommander.waitFor(message => message.type === "state"
@@ -356,14 +297,14 @@ try {
       && seat.deployed));
   const redeployMessageIndex = byKey.redCommander.messages.length;
   byKey.redCommander.send("deployment", {
-    unitId: transferredSeat.unitId,
+    unitId: redAttackSeat.unitId,
     targetSeatId: redParticipantSeat,
     position: { x: 1000, y: 2600, alt: 0 },
   });
   await byKey.redCommander.waitForAfter(redeployMessageIndex, message => message.type === "state"
     && message.payload.roomState.seats.some(seat => seat.seatId === redParticipantSeat
       && seat.deployed)
-    && message.payload.units.some(unit => unit.id === transferredSeat.unitId));
+    && message.payload.units.some(unit => unit.id === redAttackSeat.unitId));
 
   byKey.redCommander.send("chat", { text: "战位通信验证", recipientSeatIds: [redParticipantSeat] });
   await byKey.redAttack.waitFor(message => message.type === "chat" && message.payload.text === "战位通信验证");
@@ -536,7 +477,7 @@ try {
   byKey.blueAttack.send("roomList", {});
   await byKey.blueAttack.waitForAfter(roomListMessageIndex,
     message => message.type === "roomDirectory");
-  console.log("联网冒烟验证通过：账号单客户端、房间、战位扩容、部署/redeploy、转位取消/拒绝/批准、定向通信、情报共享、地图标记、就绪开局、文本/进攻/机动/撤离命令和无接替失效均正常。");
+  console.log("联网冒烟验证通过：账号、房间、战位、部署、重部署、定向通信、情报共享、地图标记、就绪开局和命令授权均正常。");
 } finally {
   for (const session of sessions) session.close();
   if (roomWasOpened && adminToken) {

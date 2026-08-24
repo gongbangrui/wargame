@@ -117,26 +117,31 @@ TEST(ProtocolTest, ClientEnvelopeRequiresBothVersionsAndMessageId) {
               QStringLiteral("INVALID_ENVELOPE"));
 }
 
-TEST(ProtocolTest, AcceptsLegacyWireVersionOnlyThroughCompatibleValidation) {
-    const QJsonObject legacyClient = Protocol::makeClientEnvelopeForVersion(
-        QStringLiteral("ping"), QStringLiteral("legacy-ping"), QJsonObject{},
-        Protocol::LegacyVersion, Protocol::LegacySchemaVersion);
-    EXPECT_TRUE(Protocol::validateClientEnvelopeForVersion(legacyClient).valid);
-    EXPECT_FALSE(Protocol::validateClientEnvelope(legacyClient).valid);
+TEST(ProtocolTest, AcceptsCompatibleWireVersionsOnlyThroughCompatibleValidation) {
+    const QList<QPair<int, int>> compatibleVersions{
+        {Protocol::PreviousVersion, Protocol::PreviousSchemaVersion},
+        {Protocol::OlderVersion, Protocol::OlderSchemaVersion},
+        {Protocol::LegacyVersion, Protocol::LegacySchemaVersion}};
+    for (const auto& [protocolVersion, schemaVersion] : compatibleVersions) {
+        const QJsonObject client = Protocol::makeClientEnvelopeForVersion(
+            QStringLiteral("ping"), QStringLiteral("compatible-ping-%1").arg(protocolVersion),
+            QJsonObject{}, protocolVersion, schemaVersion);
+        EXPECT_TRUE(Protocol::validateClientEnvelopeForVersion(client).valid);
+        EXPECT_FALSE(Protocol::validateClientEnvelope(client).valid);
 
-    const QJsonObject legacySnapshot{
-        {QStringLiteral("schemaVersion"), Protocol::LegacySchemaVersion},
-        {QStringLiteral("stateRevision"), 1},
-        {QStringLiteral("scenario"), QJsonObject{}},
-        {QStringLiteral("units"), QJsonArray{}},
-        {QStringLiteral("projectiles"), QJsonArray{}},
-        {QStringLiteral("roomState"),
-         QJsonObject{{QStringLiteral("scenarioRevision"), 1}}}};
-    const QJsonObject legacyServer = Protocol::makeServerEnvelopeForVersion(
-        QStringLiteral("snapshot"), 1, legacySnapshot,
-        Protocol::LegacyVersion, Protocol::LegacySchemaVersion);
-    EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(legacyServer).valid);
-    EXPECT_FALSE(Protocol::validateServerEnvelope(legacyServer).valid);
+        const QJsonObject snapshot{
+            {QStringLiteral("schemaVersion"), schemaVersion},
+            {QStringLiteral("stateRevision"), 1},
+            {QStringLiteral("scenario"), QJsonObject{}},
+            {QStringLiteral("units"), QJsonArray{}},
+            {QStringLiteral("projectiles"), QJsonArray{}},
+            {QStringLiteral("roomState"),
+             QJsonObject{{QStringLiteral("scenarioRevision"), 1}}}};
+        const QJsonObject server = Protocol::makeServerEnvelopeForVersion(
+            QStringLiteral("snapshot"), 1, snapshot, protocolVersion, schemaVersion);
+        EXPECT_TRUE(Protocol::validateServerEnvelopeForVersion(server).valid);
+        EXPECT_FALSE(Protocol::validateServerEnvelope(server).valid);
+    }
 
     const QJsonObject mixed = Protocol::makeServerEnvelopeForVersion(
         QStringLiteral("pong"), 1, QJsonObject{},

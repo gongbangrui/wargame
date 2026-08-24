@@ -42,17 +42,20 @@ constexpr int kAiProviderPlanGraceMs = 1000;
 
 QJsonObject payloadForWireVersion(const QString& type, const QJsonObject& payload,
                                   int schemaVersion) {
-    if (schemaVersion != Protocol::LegacySchemaVersion) return payload;
     QJsonObject compatible = payload;
     if (type == QLatin1String("snapshot") || type == QLatin1String("delta")) {
-        compatible[QStringLiteral("schemaVersion")] = Protocol::LegacySchemaVersion;
-        compatible.remove(QStringLiteral("intelState"));
-        compatible.remove(QStringLiteral("intelDelta"));
-    } else if (type == QLatin1String("intelShare")) {
+        compatible[QStringLiteral("schemaVersion")] = schemaVersion;
+        if (schemaVersion == Protocol::LegacySchemaVersion) {
+            compatible.remove(QStringLiteral("intelState"));
+            compatible.remove(QStringLiteral("intelDelta"));
+        }
+    } else if (schemaVersion == Protocol::LegacySchemaVersion
+               && type == QLatin1String("intelShare")) {
         // v4 identifies shared contacts by targetId. Newer projections keep
         // intelId as an internal ledger identifier and may also carry it.
         compatible.remove(QStringLiteral("intelId"));
-    } else if (type == QLatin1String("intelHistoryPage")) {
+    } else if (schemaVersion == Protocol::LegacySchemaVersion
+               && type == QLatin1String("intelHistoryPage")) {
         compatible = {};
     }
     return compatible;

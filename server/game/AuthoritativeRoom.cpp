@@ -175,11 +175,19 @@ bool AuthoritativeRoom::setScenarioUnits(const std::vector<ScenarioUnit>& units,
 
     QHash<QString, QString> bindings;
     QSet<QString> assigned;
+    QStringList staleVmfSeats;
     for (const Seat& seat : m_seats) {
         if (seat.sourceUnitId.isEmpty()) continue;
         const ScenarioUnit source = sources.value(seat.sourceUnitId);
         if (source.id.isEmpty() || source.side != seat.side
             || typeForTemplate(source.kind) != seat.seatType) {
+            // VMF fixed targets and automated red seats are derived from the
+            // configured roster. They do not block deletion of an unstaffed
+            // source; syncVmfRoster() restores the required automation.
+            if (m_vmfSingleSide && seat.controllerType == QLatin1String("placeholder")) {
+                staleVmfSeats.append(seat.seatId);
+                continue;
+            }
             if (error) {
                 *error = QStringLiteral("occupied seat source unit was removed or changed: %1")
                              .arg(seat.sourceUnitId);
@@ -204,6 +212,7 @@ bool AuthoritativeRoom::setScenarioUnits(const std::vector<ScenarioUnit>& units,
 
     m_sourceUnits = std::move(sources);
     m_seatSources = std::move(bindings);
+    for (const QString& seatId : staleVmfSeats) m_seats.remove(seatId);
     for (auto it = m_seats.begin(); it != m_seats.end(); ++it) {
         QString sourceId = it->sourceUnitId;
         if (sourceId.isEmpty()) sourceId = m_seatSources.value(it.key());
@@ -884,8 +893,9 @@ AuthoritativeRoom::Result AuthoritativeRoom::promote(qint64 commanderUserId,
     m_departedUsers.insert(commanderUserId);
     Result result = success();
     result.successorUserId = successorUserId;
-    if (m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")) {
-        const Result roster = syncAiRoster();
+    if (m_phase == QLatin1String("preparing")
+        && (m_vmfSingleSide || m_mode == QLatin1String("pve"))) {
+        const Result roster = m_vmfSingleSide ? syncVmfRoster() : syncAiRoster();
         if (!roster.ok) return roster;
         result.revision = roster.revision;
     }
@@ -906,8 +916,11 @@ AuthoritativeRoom::Result AuthoritativeRoom::leave(qint64 userId, qint64 success
     m_transfers.remove(userId);
     m_departedUsers.insert(userId);
     const Result result = success();
-    return m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")
-        ? syncAiRoster() : result;
+    if (m_phase == QLatin1String("preparing")
+        && (m_vmfSingleSide || m_mode == QLatin1String("pve"))) {
+        return m_vmfSingleSide ? syncVmfRoster() : syncAiRoster();
+    }
+    return result;
 }
 
 AuthoritativeRoom::Result AuthoritativeRoom::leaveRoom(qint64 userId) {
@@ -924,8 +937,11 @@ AuthoritativeRoom::Result AuthoritativeRoom::leaveRoom(qint64 userId) {
     m_seats.remove(current);
     m_departedUsers.insert(userId);
     const Result result = success();
-    return m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")
-        ? syncAiRoster() : result;
+    if (m_phase == QLatin1String("preparing")
+        && (m_vmfSingleSide || m_mode == QLatin1String("pve"))) {
+        return m_vmfSingleSide ? syncVmfRoster() : syncAiRoster();
+    }
+    return result;
 }
 
 qint64 AuthoritativeRoom::chooseSuccessor(const QString& side) {
@@ -961,8 +977,10 @@ AuthoritativeRoom::Result AuthoritativeRoom::disconnect(qint64 userId) {
         m_seats.remove(current);
         m_departedUsers.insert(userId);
         const Result result = success();
-        return m_mode == QLatin1String("pve")
-            ? syncAiRoster() : result;
+        if (m_vmfSingleSide || m_mode == QLatin1String("pve")) {
+            return m_vmfSingleSide ? syncVmfRoster() : syncAiRoster();
+        }
+        return result;
     }
     if (m_phase == QLatin1String("finished")) return Result{true, {}, m_revision, true};
     m_seats.remove(current);
@@ -1192,7 +1210,10 @@ AuthoritativeRoom::Result AuthoritativeRoom::applyOperation(const QString& opera
     m_transfers.clear();
     if (action == QLatin1String("reset")) {
         m_seats.clear();
-        if (m_mode == QLatin1String("pve")) {
+        if (m_vmfSingleSide) {
+            const Result roster = syncVmfRoster();
+            if (!roster.ok) return roster;
+        } else if (m_mode == QLatin1String("pve")) {
             const Result roster = syncAiRoster();
             if (!roster.ok) return roster;
         }
@@ -1214,7 +1235,9 @@ bool AuthoritativeRoom::removeUser(qint64 userId) {
     m_seats.remove(current);
     m_transfers.remove(userId);
     ++m_revision;
-    if (m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")) {
+    if (m_vmfSingleSide && m_phase == QLatin1String("preparing")) {
+        syncVmfRoster();
+    } else if (m_mode == QLatin1String("pve") && m_phase == QLatin1String("preparing")) {
         syncAiRoster();
     }
     return true;

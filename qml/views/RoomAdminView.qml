@@ -247,7 +247,7 @@ Item {
                 root.configSaving = false
                 root.dirty = false
                 root.statusKind = "success"
-                root.statusText = "配置已保存 · v" + root.controller.configVersion
+                root.statusText = "配置已保存"
                 root.loadDraft()
                 configDialog.close()
             } else if (root.controller.lastCommandStatus === "rejected") {
@@ -302,7 +302,6 @@ Item {
                     border.color: root.phaseColor(); radius: 14
                     Text { id: phaseText; anchors.centerIn: parent; text: root.phaseLabel(); color: root.phaseColor(); font.pixelSize: 10; font.bold: true }
                 }
-                Text { visible: !root.tinyLayout; text: "v" + root.controller.configVersion; color: root.cyan; font.family: "Consolas"; font.pixelSize: 10 }
                 GhostButton { text: "退出"; iconName: "close"; enabled: !root.controller.leaveRoomPending; onClicked: root.requestLeaveRoom() }
             }
 
@@ -312,10 +311,10 @@ Item {
                 columnSpacing: 8; rowSpacing: 8
                 Repeater {
                     model: [
-                        { title: "战位占用", value: root.occupiedSeatCount() + " / " + root.totalCapacity(), detail: root.strictVmf ? ("红方参演 " + root.sideOccupied("red") + " · 蓝方固定靶 " + root.sideOccupied("blue")) : ("红 " + root.sideOccupied("red") + " · 蓝 " + root.sideOccupied("blue")), color: root.cyan },
-                        { title: "初始场景", value: root.scenarioCount() + " 个单位", detail: root.controller.canEditScenario ? "双方位置与参数可编辑" : "推演阶段已锁定", color: root.controller.canEditScenario ? root.success : root.orange },
-                        { title: "覆盖参数", value: root.parameterCount() + " 个战位", detail: "空白使用默认值", color: root.cyan },
-                        { title: "准备状态", value: root.strictVmf ? (root.controller.redReady ? "红方已就绪" : "等待红方指挥官") : root.controller.redReady && root.controller.blueReady ? "双方已就绪" : "等待就绪", detail: root.strictVmf ? (root.controller.readyForSim ? "蓝方固定靶已托管，可以开始" : "需红方指挥官和完整固定靶场景") : root.controller.readyForSim ? "可以开始" : "尚未满足开局条件", color: root.controller.readyForSim ? root.success : root.orange }
+                        { title: "战位", value: root.occupiedSeatCount() + " / " + root.totalCapacity(), detail: root.strictVmf ? ("红 " + root.sideOccupied("red") + " · 蓝 " + root.sideOccupied("blue")) : ("红 " + root.sideOccupied("red") + " · 蓝 " + root.sideOccupied("blue")), color: root.cyan },
+                        { title: "场景", value: root.scenarioCount() + " 个单位", detail: root.controller.canEditScenario ? "可编辑" : "已锁定", color: root.controller.canEditScenario ? root.success : root.orange },
+                        { title: "参数", value: root.parameterCount() + " 个战位", detail: "空白为默认", color: root.cyan },
+                        { title: "就绪", value: root.strictVmf ? (root.controller.redReady ? "红方已就绪" : "等待红方") : root.controller.redReady && root.controller.blueReady ? "双方已就绪" : "等待就绪", detail: root.controller.readyForSim ? "可开始" : "未满足条件", color: root.controller.readyForSim ? root.success : root.orange }
                     ]
                     delegate: Rectangle {
                         id: metricCard
@@ -366,11 +365,11 @@ Item {
                         RowLayout { Layout.fillWidth: true; spacing: 8
                             Icon { name: "settings"; iconColor: root.cyan; iconSize: 16 }
                             ColumnLayout { Layout.fillWidth: true; spacing: 1
-                                Text { text: "初始场景与配置"; color: root.ink; font.pixelSize: 14; font.bold: true }
-                                Text { text: root.strictVmf ? "VMF 单方作战" : root.controller.roomMode === "pve" ? "PVE 对抗" : "PVP 对抗"; color: root.dim; font.pixelSize: 9 }
+                                Text { text: "场景"; color: root.ink; font.pixelSize: 14; font.bold: true }
+                                Text { text: root.strictVmf ? "VMF" : root.controller.roomMode === "pve" ? "PVE" : "PVP"; color: root.dim; font.pixelSize: 9 }
                             }
                         }
-                        Text { Layout.fillWidth: true; text: root.controller.roomDescription || "暂无房间说明"; color: root.dim; font.pixelSize: 10; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
+                        Text { visible: root.controller.roomDescription.length > 0; Layout.fillWidth: true; text: root.controller.roomDescription; color: root.dim; font.pixelSize: 10; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
                         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
                         SectionTitle { text: root.strictVmf ? "红方参演与蓝方固定靶" : "双方战位" }
                         Repeater {
@@ -439,13 +438,13 @@ Item {
                             onTextChanged: if (!root.loadingDraft) { root.dirty = true; root.statusKind = "dirty" }
                         }
                     }
-                    ColumnLayout { Layout.fillWidth: true; Text { text: "联网协议方案"; color: root.dim; font.pixelSize: 9 }
+                    ColumnLayout { Layout.fillWidth: true; Text { text: "协议"; color: root.dim; font.pixelSize: 9 }
                         ComboBox {
                             id: protocolProfileCombo
                             Layout.fillWidth: true; implicitHeight: 32
                             model: [
-                                { text: "标准联网", value: "native" },
-                                { text: "VMF 严格引导打击 v1", value: "vmf-guided-strike-v1" }
+                                { text: "标准", value: "native" },
+                                { text: "VMF", value: "vmf-guided-strike-v1" }
                             ]
                             textRole: "text"; valueRole: "value"
                             contentItem: Text { text: protocolProfileCombo.currentText; color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; elide: Text.ElideRight; font.pixelSize: 9 }
@@ -453,11 +452,11 @@ Item {
                             onActivated: if (!root.loadingDraft) { root.dirty = true; root.statusKind = "dirty" }
                         }
                     }
-                    ColumnLayout { Layout.fillWidth: true; Layout.columnSpan: root.narrowLayout ? 1 : 2; Text { text: "房间说明"; color: root.dim; font.pixelSize: 9 }
+                    ColumnLayout { Layout.fillWidth: true; Layout.columnSpan: root.narrowLayout ? 1 : 2; Text { text: "说明"; color: root.dim; font.pixelSize: 9 }
                         TextArea {
                             id: roomDescriptionField
                             Layout.fillWidth: true; Layout.preferredHeight: 66
-                            placeholderText: "补充参演规则或任务说明"; wrapMode: TextArea.Wrap; selectByMouse: true
+                            placeholderText: ""; wrapMode: TextArea.Wrap; selectByMouse: true
                             color: root.ink; placeholderTextColor: root.dim
                             background: Rectangle { color: root.panelAlt; border.color: roomDescriptionField.activeFocus ? root.cyan : root.line; radius: 4 }
                             onTextChanged: {
@@ -467,8 +466,7 @@ Item {
                         }
                     }
                 }
-                SectionTitle { text: "初始单位与战位" }
-                Text { Layout.fillWidth: true; text: "每个 GIS 初始单位对应一个可用战位"; color: root.dim; font.pixelSize: 9 }
+                SectionTitle { text: "单位与战位" }
                 GridLayout {
                     Layout.fillWidth: true; columns: root.narrowLayout ? 1 : 2; columnSpacing: 8; rowSpacing: 7
                     Repeater {
@@ -494,7 +492,7 @@ Item {
                     }
                 }
                 SectionTitle { text: "通信与侦察覆盖" }
-                Text { Layout.fillWidth: true; text: "单位：米。留空表示沿用场景默认值。"; color: root.dim; font.pixelSize: 9 }
+                Text { Layout.fillWidth: true; text: "单位：米"; color: root.dim; font.pixelSize: 9 }
                 GridLayout {
                     Layout.fillWidth: true; columns: root.narrowLayout ? 1 : 2; columnSpacing: 8; rowSpacing: 7
                     Repeater {
@@ -548,7 +546,7 @@ Item {
         width: Math.min(420, Math.max(290, root.width - 20))
         standardButtons: Dialog.NoButton
         background: Rectangle { color: root.panel; border.color: root.orange; radius: 7 }
-        contentItem: ColumnLayout { spacing: 8; Text { Layout.fillWidth: true; text: "房间配置中有未保存的修改，退出后会丢失。"; color: root.ink; font.pixelSize: 11; wrapMode: Text.WordWrap } }
+        contentItem: ColumnLayout { spacing: 8; Text { Layout.fillWidth: true; text: "未保存修改将丢失。"; color: root.ink; font.pixelSize: 11; wrapMode: Text.WordWrap } }
         footer: DialogButtonBox {
             spacing: 7; padding: 9; background: Rectangle { color: root.panelAlt; radius: 6 }
             GhostButton { text: "留在房间"; onClicked: leaveRoomDialog.close() }

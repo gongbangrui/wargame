@@ -481,10 +481,21 @@ Item {
     // 所有视角共用此入口，确保拖拽后重新点击同一单元也能恢复居中。
     function focusOnUnit(unitId) {
         root.followSuspended = false
-        if (!unitId || !root.controller) return false
-        var unit = root.controller.unitAt(unitId)
-        if (!unit || !unit.position || unit.position.length < 2) return false
-        centerOn(unit.position[0], unit.position[1])
+        if (!unitId) return false
+        var unit = null
+        var source = root.unitListSource()
+        if (source && typeof source.length === "number") {
+            for (var i = 0; i < source.length; ++i) {
+                if (source[i] && source[i].id === unitId) {
+                    unit = source[i]
+                    break
+                }
+            }
+        }
+        if (!unit && root.controller) unit = root.controller.unitAt(unitId)
+        var position = unit ? root.unitPosition(unit) : null
+        if (!position) return false
+        centerOn(position[0], position[1])
         return true
     }
     function focusAt(lx, ly) {

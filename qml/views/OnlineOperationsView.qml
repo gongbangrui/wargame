@@ -14,6 +14,7 @@ Item {
     property string deploymentTargetSeatId: ""
     property string deploymentState: "idle"
     property string selectedUnitId: ""
+    property string lastCenteredUnitId: ""
     property string attackTargetId: ""
     property bool commanderPointSelectionActive: false
     property bool showCommunicationRange: false
@@ -67,6 +68,8 @@ Item {
         && root.controller.protocolProfile === "vmf-guided-strike-v1"
 
     onAttackTargetIdChanged: root.syncAttackTargetBox()
+    onSelectedUnitIdChanged: root.queueSelectedUnitCenter()
+    onDeployUnitIdChanged: root.queueSelectedUnitCenter()
 
     signal openChatRequested()
 
@@ -161,6 +164,8 @@ Item {
     function onlineMapVisibleUnitIds() {
         if (!root.controller || root.controller.isObserver) return null
         var ids = root.deployedUnitIds()
+        var selectedId = root.selectedUnitId || root.deployUnitId
+        if (selectedId && ids.indexOf(selectedId) < 0) ids.push(selectedId)
         var projectedUnits = root.controller.units || []
         for (var i = 0; i < projectedUnits.length; ++i) {
             var unit = projectedUnits[i] || ({})
@@ -179,8 +184,17 @@ Item {
         return root.controller.unitAt(seat.unitId) || ({})
     }
 
+    function queueSelectedUnitCenter() {
+        Qt.callLater(function() {
+            var unitId = root.selectedUnitId || root.deployUnitId
+            if (!unitId || unitId === root.lastCenteredUnitId || !onlineCanvas) return
+            if (onlineCanvas.focusOnUnit(unitId)) root.lastCenteredUnitId = unitId
+        })
+    }
+
     function resetRoundViewState() {
         root.selectedUnitId = ""
+        root.lastCenteredUnitId = ""
         root.attackTargetId = ""
         root.deployUnitId = ""
         root.deploymentTargetSeatId = ""
@@ -338,7 +352,7 @@ Item {
     }
     function roomModeLabel(room) {
         if (room && room.protocolProfile === "vmf-guided-strike-v1")
-            return "VMF 单方作战"
+            return "VMF"
         if (room && room.mode === "pve") {
             var labels = { easy: "简单", normal: "普通", hard: "困难" }
             return "人机对抗 · " + (labels[room.aiDifficulty] || "普通")
@@ -347,13 +361,12 @@ Item {
     }
     function roomConfigurationLabel() {
         if (root.strictVmf)
-            return "VMF 单方作战 · 红方参演 · 配置 v" + root.controller.configVersion
+            return "VMF · 红方"
         if (root.controller.roomMode === "pve") {
             var labels = { easy: "简单", normal: "普通", hard: "困难" }
             return "人机对抗 · " + (labels[root.controller.aiDifficulty] || "普通")
-                    + " · 配置 v" + root.controller.configVersion
         }
-        return "人人对抗 · 配置 v" + root.controller.configVersion
+        return "人人对抗"
     }
     function orderedRooms() {
         var rooms = (root.controller.onlineRooms || []).filter(function(room) {
@@ -594,7 +607,7 @@ Item {
                 root.selectedUnitId = ownSeat.unitId || root.selectedUnitId
             } else if (ownSeat && ownSeat.occupied) {
                 root.deploymentState = "waiting"
-                root.selectedUnitId = ""
+                root.selectedUnitId = root.strictVmf ? (ownSeat.unitId || "") : ""
             }
             return
         }
@@ -931,6 +944,7 @@ Item {
         }
         function onOnlineSeatsChanged() {
             root.reconcileDeploymentState()
+            root.queueSelectedUnitCenter()
             root.refreshUnitNameDraft()
             root.refreshUnitSpeedDraft()
             if (root.commanderPointSelectionActive && !root.seatForUnit(root.selectedUnitId)) {
@@ -939,6 +953,8 @@ Item {
             }
         }
         function onOnlineStateChanged() {
+            root.reconcileDeploymentState()
+            root.queueSelectedUnitCenter()
             if (root.currentIntelNotificationScope() !== root.intelNotificationScope)
                 root.resetIntelNotificationBaseline()
             if (root.controller.onlineStage === "login") root.controller.requestOnlineRooms()
@@ -967,6 +983,7 @@ Item {
             }
             root.refreshUnitNameDraft()
             root.refreshUnitSpeedDraft()
+            root.queueSelectedUnitCenter()
         }
         function onRoomStateChanged() {
             var phase = root.controller.matchPhase
@@ -1041,6 +1058,7 @@ Item {
         root.syncIntelNotifications()
         root.observedMatchPhase = root.controller.matchPhase
         if (root.controller.onlineStage === "login") root.controller.requestOnlineRooms()
+        root.queueSelectedUnitCenter()
         root.refreshUnitNameDraft()
         root.refreshUnitSpeedDraft()
     }
@@ -1288,7 +1306,7 @@ Item {
                             background: Rectangle { color: "transparent"; border.color: root.line; radius: 4 }
                         }
                     }
-                    Text { text: root.switchSeatSelection ? (root.switchRequestPending ? "请求已提交，当前战位仍有效，等待本方指挥官确认。" : "当前战位保持不变。仅可申请本方非指挥官战位。") : root.strictVmf ? "单方作战：登录用户仅选择红方；缺失任务环节由服务器自动控制，蓝方为固定靶。" : root.isRoomEmpty() ? "空房间：请先选择红方指挥官。" : "红方指挥官优先，随后选择蓝方指挥官。"; color: root.strictVmf || root.isRoomEmpty() || root.switchSeatSelection ? root.orange : root.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                    Text { text: root.switchSeatSelection ? (root.switchRequestPending ? "等待指挥官确认" : "选择本方非指挥官战位") : root.strictVmf ? "VMF：红方参演" : root.isRoomEmpty() ? "先选择红方指挥官" : "红方指挥官优先"; color: root.strictVmf || root.isRoomEmpty() || root.switchSeatSelection ? root.orange : root.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                     GridLayout { Layout.fillWidth: true; Layout.fillHeight: true; columns: root.strictVmf ? 1 : width > 900 ? 2 : 1; columnSpacing: 14; rowSpacing: 14
                         Repeater { model: root.strictVmf ? ["red"] : ["red", "blue"]
                             delegate: Rectangle { id: sidePanel; required property string modelData; Layout.fillWidth: true; Layout.fillHeight: true; color: root.panel; border.color: sidePanel.modelData === "red" ? root.danger : root.info; radius: 6

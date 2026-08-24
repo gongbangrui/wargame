@@ -1203,6 +1203,16 @@ bool SimulationController::applyScenarioReplacement(const Scenario& replacement)
 bool SimulationController::removeUnits(const QStringList& ids) {
     if (ids.isEmpty()) return false;
     if (isNetworked() && !canEditScenario()) return false;
+    if (isNetworked()) {
+        QSet<QString> selected;
+        for (const QString& id : ids) {
+            const QString normalized = id.trimmed();
+            if (!normalized.isEmpty()) selected.insert(normalized);
+        }
+        if (selected.isEmpty()) return false;
+        for (const QString& id : selected) m_networkClient.sendScenarioRemove(id);
+        return true;
+    }
     const QSet<QString> selected(ids.cbegin(), ids.cend());
     Scenario replacement = m_engine.scenario();
     std::erase_if(replacement.units, [&selected](const ScenarioUnit& unit) {

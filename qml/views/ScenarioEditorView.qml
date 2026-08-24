@@ -317,11 +317,11 @@ Item {
                     spacing: 4
                     Text { text: root.rosterMode ? (root.restrictedSide === "red" ? "红方初始阵容" : "蓝方初始阵容") : "GIS 场景编辑器"; color: t.text; font.pixelSize: 18; font.bold: true; renderType: Text.NativeRendering }
                     Text {
-                        text: root.editable ? "GIS 地图支持拖拽缩放；双击空白处新增单位，选中单位后可用地图选点修改初始位置"
+                        text: root.editable ? "编辑"
                             : root.controller.networked && root.controller.isRoomAdmin
                                 && root.controller.matchPhase === "preparing"
-                                ? "服务器当前未开放初始阵容编辑权限"
-                                : "推演已经开始，初始场景现为只读状态"
+                                ? "未开放编辑"
+                                : "只读"
                         color: root.editable ? t.muted : t.danger; font.pixelSize: 11
                         wrapMode: Text.WordWrap; Layout.fillWidth: true; renderType: Text.NativeRendering
                     }
@@ -387,7 +387,7 @@ Item {
                         onClicked: root.planRouteSelected()
                     }
                     TonalButton { text: "删除"; base: t.danger; enabled: root.editable && root.selectedOrCurrent().length > 0; onClicked: root.removeSelected() }
-                    TonalButton { text: root.positionPickMode ? "取消选点" : "地图选点"; iconName: root.positionPickMode ? "close" : "locate"; base: root.positionPickMode ? t.danger : t.success; enabled: root.editable && !root.positionCommitPending && (!!root.currentPositionUnit() || root.positionPickMode); onClicked: root.togglePositionPickMode() }
+                    TonalButton { text: root.positionPickMode ? "取消" : "选点"; iconName: root.positionPickMode ? "close" : "locate"; base: root.positionPickMode ? t.danger : t.success; enabled: root.editable && !root.positionCommitPending && (!!root.currentPositionUnit() || root.positionPickMode); onClicked: root.togglePositionPickMode() }
                     GhostButton { visible: !root.rosterMode; text: "↶ 撤销"; enabled: root.editable && root.undoStack.length > 0; onClicked: root.undo() }
                     GhostButton { visible: !root.rosterMode; text: "↷ 重做"; enabled: root.editable && root.redoStack.length > 0; onClicked: root.redo() }
                     GhostButton { visible: !root.rosterMode; text: "保存"; onClicked: root.saveToFile() }
@@ -551,12 +551,12 @@ Item {
                 Text {
                     id: hintText
                     anchors.fill: parent; anchors.margins: 8
-                    text: root.positionPickMode ? "选点模式 · 点击 GIS 地图提交选中单位的初始位置"
+                    text: root.positionPickMode ? "选点"
                         : root.positionStatus.length > 0 ? root.positionStatus
-                        : root.editable ? "双击地图新增 · 选中单位后使用地图选点 · 右键单元删除"
+                        : root.editable ? ""
                         : root.controller.networked && root.controller.isRoomAdmin
                             && root.controller.matchPhase === "preparing"
-                            ? "服务器当前未开放初始阵容编辑权限"
+                            ? "服务器未开放编辑权限"
                             : "推演进行中，初始阵容已锁定"
                     color: "#c2cad8"; font.pixelSize: 11
                     horizontalAlignment: Text.AlignHCenter
