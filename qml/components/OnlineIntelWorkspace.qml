@@ -30,13 +30,18 @@ Item {
     property string historyRequestId: ""
     property bool historyDirty: true
     property string historySubmittedKey: ""
+    property bool showFilters: false
+    property bool showIntelDetails: false
+    property bool showShare: false
+    property bool showReport: false
+    property bool expandedRecords: false
     signal reportPickRequested()
     signal reportPickCancelled()
 
     implicitHeight: body.implicitHeight
     Layout.fillWidth: true
 
-    function filteredRecords() {
+    function filteredRecords(includeAll) {
         var source = root.controller ? root.controller.onlineIntelRecords : []
         var result = []
         var needle = root.filterText.trim().toLowerCase()
@@ -56,7 +61,22 @@ Item {
             if (needle.length > 0 && haystack.toLowerCase().indexOf(needle) < 0) continue
             result.push(item)
         }
-        return result
+        return includeAll || root.expandedRecords ? result : result.slice(0, 4)
+    }
+
+    function freshnessCount(name) {
+        var records = root.controller ? root.controller.onlineIntelRecords || [] : []
+        var count = 0
+        for (var i = 0; i < records.length; ++i)
+            if (String((records[i] || {}).freshness || "") === name) ++count
+        return count
+    }
+
+    function freshnessLabel(name) {
+        if (name === "live") return "实时"
+        if (name === "stale") return "失联"
+        if (name === "archived") return "归档"
+        return "未知"
     }
 
     function seatLabel(seatId) {
@@ -231,11 +251,18 @@ Item {
             spacing: 5
             Text { text: "情报"; color: root.text; font.bold: true; font.pixelSize: 12 }
             Text {
-                text: root.controller ? (root.controller.onlineIntelRevision + " rev") : ""
+                text: root.controller ? (root.controller.onlineIntelRecords.length + " 条") : ""
                 color: root.muted
                 font.pixelSize: 9
             }
             Item { Layout.fillWidth: true }
+            Text {
+                visible: viewMode.currentIndex === 0
+                text: "实时 " + root.freshnessCount("live")
+                    + " · 失联 " + root.freshnessCount("stale")
+                color: root.muted
+                font.pixelSize: 9
+            }
             ComboBox {
                 id: viewMode
                 model: ["当前", "历史"]
@@ -261,7 +288,7 @@ Item {
         }
 
         RowLayout {
-            visible: viewMode.currentIndex === 0
+            visible: viewMode.currentIndex === 0 && root.showFilters
             Layout.fillWidth: true
             spacing: 4
             IntelTextField {
@@ -291,7 +318,7 @@ Item {
             }
         }
         IntelTextField {
-            visible: viewMode.currentIndex === 0
+            visible: viewMode.currentIndex === 0 && root.showFilters
             Layout.fillWidth: true
             placeholderText: "来源战位"
             maximumLength: 128
@@ -305,7 +332,7 @@ Item {
             Layout.preferredHeight: Math.min(190, Math.max(42, contentHeight))
             clip: true
             spacing: 3
-            model: root.filteredRecords()
+            model: root.filteredRecords(false)
             delegate: Rectangle {
                 id: recordDelegate
                 required property var modelData
@@ -348,7 +375,7 @@ Item {
                             Layout.fillWidth: true
                         }
                         Text {
-                            text: String(recordDelegate.modelData.freshness || "") + " · "
+                            text: root.freshnessLabel(recordDelegate.modelData.freshness) + " · "
                                 + Number(recordDelegate.modelData.confidence || 0).toFixed(0)
                                 + "% · " + root.seatLabel(recordDelegate.modelData.sourceSeatId)
                             color: root.muted
@@ -359,14 +386,12 @@ Item {
                     }
                     Button {
                         z: 1
-                        text: "定位"
+                        text: ""
                         onClicked: root.locate(recordDelegate.modelData)
-                        contentItem: Text {
-                            text: "定位"
-                            color: root.accent
-                            font.pixelSize: 9
-                            horizontalAlignment: Text.AlignHCenter
-                        }
+                        Accessible.name: "定位情报"
+                        ToolTip.visible: hovered
+                        ToolTip.text: "地图定位"
+                        contentItem: Icon { name: "locate"; iconColor: root.accent; iconSize: 14 }
                         background: Rectangle { color: "transparent" }
                     }
                 }
@@ -375,6 +400,7 @@ Item {
 
         Rectangle {
             visible: viewMode.currentIndex === 0 && root.selectedRecord !== null
+                && root.showIntelDetails
             Layout.fillWidth: true
             Layout.preferredHeight: visible ? detailColumn.implicitHeight + 12 : 0
             color: root.page
@@ -431,6 +457,39 @@ Item {
         Flow {
             visible: viewMode.currentIndex === 0
             Layout.fillWidth: true
+            spacing: 5
+            GhostButton {
+                text: root.showFilters ? "收起筛选" : "筛选"
+                iconName: "scan"
+                onClicked: root.showFilters = !root.showFilters
+            }
+            GhostButton {
+                text: root.showIntelDetails ? "收起详情" : "详情"
+                iconName: "info"
+                enabled: root.selectedRecord !== null
+                onClicked: root.showIntelDetails = !root.showIntelDetails
+            }
+            GhostButton {
+                text: root.showShare ? "收起共享" : "共享"
+                iconName: "send"
+                enabled: root.selectedRecord !== null
+                onClicked: root.showShare = !root.showShare
+            }
+            GhostButton {
+                text: root.showReport ? "取消报告" : "新报告"
+                iconName: "plus"
+                onClicked: root.showReport = !root.showReport
+            }
+            GhostButton {
+                text: root.expandedRecords ? "精简" : "全部 " + root.filteredRecords(true).length
+                iconName: root.expandedRecords ? "chevron-down" : "history"
+                onClicked: root.expandedRecords = !root.expandedRecords
+            }
+        }
+
+        Flow {
+            visible: viewMode.currentIndex === 0 && root.showShare
+            Layout.fillWidth: true
             spacing: 4
             Repeater {
                 model: root.controller ? root.controller.onlineIntelShareTargets : []
@@ -451,7 +510,7 @@ Item {
         }
 
         RowLayout {
-            visible: viewMode.currentIndex === 0
+            visible: viewMode.currentIndex === 0 && root.showShare
             Layout.fillWidth: true
             spacing: 5
             IntelTextField {
@@ -483,7 +542,8 @@ Item {
             }
         }
         Text {
-            visible: viewMode.currentIndex === 0 && root.shareState.length > 0
+            visible: viewMode.currentIndex === 0 && root.showShare
+                && root.shareState.length > 0
             text: "共享 · " + root.shareState
             color: root.shareState.indexOf("失败") === 0 ? AppContext.danger : root.muted
             font.pixelSize: 9
@@ -492,7 +552,7 @@ Item {
         }
 
         ColumnLayout {
-            visible: viewMode.currentIndex === 0
+            visible: viewMode.currentIndex === 0 && root.showReport
             Layout.fillWidth: true
             spacing: 4
             RowLayout {

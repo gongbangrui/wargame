@@ -489,8 +489,8 @@ Item {
                         }
                     }
                 }
-                SectionTitle { text: "通信与侦察覆盖" }
-                Text { Layout.fillWidth: true; text: "单位：米"; color: root.dim; font.pixelSize: 9 }
+                SectionTitle { text: root.strictVmf ? "侦察覆盖" : "通信与侦察覆盖" }
+                Text { Layout.fillWidth: true; text: root.strictVmf ? "VMF 通信范围：无限" : "单位：米"; color: root.strictVmf ? root.cyan : root.dim; font.pixelSize: 9 }
                 GridLayout {
                     Layout.fillWidth: true; columns: root.narrowLayout ? 1 : 2; columnSpacing: 8; rowSpacing: 7
                     Repeater {
@@ -502,7 +502,7 @@ Item {
                             ColumnLayout { anchors.fill: parent; anchors.margins: 8; spacing: 5
                                 Text { text: root.seatTitle(parameterCard.modelData); color: root.ink; font.pixelSize: 10; font.bold: true }
                                 GridLayout { Layout.fillWidth: true; columns: root.tinyLayout ? 1 : 2; columnSpacing: 7; rowSpacing: 4
-                                    ColumnLayout { Layout.fillWidth: true; spacing: 2; Text { text: "通信范围"; color: root.dim; font.pixelSize: 8 }
+                                    ColumnLayout { visible: !root.strictVmf; Layout.fillWidth: true; spacing: 2; Text { text: "通信范围"; color: root.dim; font.pixelSize: 8 }
                                         TextField {
                                             id: communicationField
                                             Layout.fillWidth: true; implicitHeight: 28; placeholderText: "默认"

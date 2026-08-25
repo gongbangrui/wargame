@@ -26,6 +26,9 @@ Item {
     property int chatLastSeenCount: 0
     readonly property int chatUnreadCount: root.controller.networked
         ? Math.max(0, root.controller.chatMessages.length - root.chatLastSeenCount) : 0
+    readonly property bool showSimulationClock: !root.controller.networked
+        || (root.controller.onlineStage !== "roomSelect"
+            && root.controller.onlineStage !== "seatSelect")
 
     function switchActiveUnit(direction) {
         if (root.activePage && root.activePage.switchUnit)
@@ -122,7 +125,7 @@ Item {
         }
         if (popupOpen(cpIssueDialog) || popupOpen(errorDialog)
                 || popupOpen(shortcutHelpDialog) || popupOpen(simEndDialog)
-                || popupOpen(settingsPanel) || popupOpen(sessionDialog)
+                || popupOpen(settingsPanel) || popupOpen(helpDialog) || popupOpen(sessionDialog)
                 || popupOpen(chatPanel)) return true
         if (root.activePage && root.activePage.shortcutsBlocked
                 && root.activePage.shortcutsBlocked()) return true
@@ -424,10 +427,11 @@ Item {
                 Text { id: statusText; anchors.centerIn: parent; text: root.controller.networkState === "connected" ? (root.controller.matchPhase === "running" ? "在线 · 推演中" : "在线 · " + (root.controller.matchPhase === "preparing" ? "准备阶段" : "已结束")) : root.controller.networkStatus; color: theme.textDim; font.pixelSize: 10; elide: Text.ElideRight; maximumLineCount: 1 }
             }
 
-            Rectangle { visible: !root.compactTopBar; Layout.preferredWidth: 1; Layout.preferredHeight: 24; color: theme.border; Layout.alignment: Qt.AlignVCenter }
+            Rectangle { visible: root.showSimulationClock && !root.compactTopBar; Layout.preferredWidth: 1; Layout.preferredHeight: 24; color: theme.border; Layout.alignment: Qt.AlignVCenter }
 
-            Text { visible: !root.compactTopBar; text: "时间"; color: theme.textDim; font.pixelSize: 12 }
+            Text { visible: root.showSimulationClock && !root.compactTopBar; text: "时间"; color: theme.textDim; font.pixelSize: 12 }
             Text {
+                visible: root.showSimulationClock
                 text: root.controller.simTime.toFixed(1) + " s"
                 color: theme.textStrong
                 font.family: "Consolas"; font.pixelSize: 14
@@ -435,7 +439,7 @@ Item {
                 renderType: Text.NativeRendering
             }
 
-            Rectangle { visible: !root.compactTopBar; Layout.preferredWidth: 1; Layout.preferredHeight: 24; color: theme.border; Layout.alignment: Qt.AlignVCenter }
+            Rectangle { visible: root.showSimulationClock && !root.compactTopBar; Layout.preferredWidth: 1; Layout.preferredHeight: 24; color: theme.border; Layout.alignment: Qt.AlignVCenter }
 
             Row {
                 visible: root.simulationControlAllowed
@@ -759,16 +763,19 @@ Item {
             controller: root.controller; editor: root.editor; appWindow: root.appWindow
             onClosed: root.applySettings()
             onSessionChangeRequested: sessionDialog.open()
+            onHelpRequested: helpDialog.open()
         }
     }
     Component { id: onlineSettingsComponent
         OnlineSettingsPanel {
             controller: root.controller; editor: root.editor; appWindow: root.appWindow
             onSessionChangeRequested: sessionDialog.open()
+            onHelpRequested: helpDialog.open()
         }
     }
     property var settingsPanel: settingsLoader.item
 
+    HelpDialog { id: helpDialog; controller: root.controller }
     SessionDialog { id: sessionDialog; controller: root.controller; editor: root.editor }
     ChatPanel { id: chatPanel; controller: root.controller; editor: root.editor }
 

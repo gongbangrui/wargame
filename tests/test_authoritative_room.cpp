@@ -4010,6 +4010,168 @@ TEST(AuthoritativeRoomPveTest, RejectsRedSeatWithoutMatchingBlueInitialUnitAtomi
     EXPECT_FALSE(room.hasSeat(QStringLiteral("blue_attack_2")));
 }
 
+TEST(GameServerStrictVmfTest, PlayerTakesAutomatedSeatDuringPreparation) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    ASSERT_TRUE(server.applyProtocolProfilePolicy());
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    server.syncAuthoritativeSeats();
+
+    const auto automated = server.m_authoritativeRoom.seat(QStringLiteral("red_attack_1"));
+    ASSERT_EQ(automated.controllerType, QStringLiteral("placeholder"));
+    ASSERT_TRUE(server.m_seats.contains(QStringLiteral("red_attack_1")));
+
+    QWebSocket socket;
+    auto& session = server.m_clients[&socket];
+    session.authenticated = true;
+    session.accountRole = QStringLiteral("player");
+    session.userId = 2;
+    session.username = QStringLiteral("pilot");
+    session.roomId = server.m_roomId;
+
+    server.handleClaimSeat(
+        &socket, QJsonObject{{QStringLiteral("seatId"), QStringLiteral("red_attack_1")}});
+
+    EXPECT_EQ(session.seatId, QStringLiteral("red_attack_1"));
+    const auto claimed = server.m_authoritativeRoom.seat(QStringLiteral("red_attack_1"));
+    EXPECT_EQ(claimed.controllerType, QStringLiteral("human"));
+    EXPECT_EQ(claimed.userId, 2);
+    EXPECT_EQ(claimed.unitId, automated.unitId);
+}
+
+TEST(GameServerStrictVmfTest, PlayerTakesAutomatedSeatWithoutResetDuringMatch) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    ASSERT_TRUE(server.applyProtocolProfilePolicy());
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.setReady(1, true).ok);
+    ASSERT_TRUE(server.applyDeployedScenario());
+    server.syncAuthoritativeSeats();
+    ASSERT_TRUE(server.m_authoritativeRoom.start().ok);
+    server.m_phase = QStringLiteral("running");
+    server.m_roomStatus = QStringLiteral("running");
+    server.m_engine.setRunning(true);
+    server.m_engine.stepOnce(0.25);
+
+    const auto automated = server.m_authoritativeRoom.seat(QStringLiteral("red_attack_1"));
+    ASSERT_EQ(automated.controllerType, QStringLiteral("placeholder"));
+    ASSERT_FALSE(automated.unitId.isEmpty());
+    ASSERT_NE(server.m_engine.unit(automated.unitId), nullptr);
+    const quint64 scenarioRevision = server.m_scenarioRevision;
+    const double simulationTime = server.m_engine.simTime();
+
+    const QJsonArray seats = server.roomState().value(QStringLiteral("seats")).toArray();
+    const auto projected = std::find_if(seats.cbegin(), seats.cend(), [](const QJsonValue& value) {
+        return value.toObject().value(QStringLiteral("seatId"))
+            == QLatin1String("red_attack_1");
+    });
+    ASSERT_NE(projected, seats.cend());
+    EXPECT_TRUE(projected->toObject().value(QStringLiteral("claimable")).toBool());
+
+    QWebSocket socket;
+    auto& session = server.m_clients[&socket];
+    session.authenticated = true;
+    session.accountRole = QStringLiteral("player");
+    session.userId = 2;
+    session.username = QStringLiteral("pilot");
+    session.roomId = server.m_roomId;
+
+    server.handleClaimSeat(
+        &socket, QJsonObject{{QStringLiteral("seatId"), QStringLiteral("red_attack_1")}});
+
+    EXPECT_EQ(session.seatId, QStringLiteral("red_attack_1"));
+    const auto claimed = server.m_authoritativeRoom.seat(QStringLiteral("red_attack_1"));
+    EXPECT_EQ(claimed.controllerType, QStringLiteral("human"));
+    EXPECT_EQ(claimed.userId, 2);
+    EXPECT_EQ(claimed.unitId, automated.unitId);
+    EXPECT_EQ(server.m_scenarioRevision, scenarioRevision);
+    EXPECT_DOUBLE_EQ(server.m_engine.simTime(), simulationTime);
+    EXPECT_NE(server.m_engine.unit(automated.unitId), nullptr);
+}
+
+TEST(GameServerStrictVmfTest, CommunicationRangeIsUnlimitedAndIgnoresSeatOverride) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_seatParameters.insert(
+        QStringLiteral("red_attack"),
+        QJsonObject{{QStringLiteral("communicationRange"), 1.0}});
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    ASSERT_TRUE(server.applyProtocolProfilePolicy());
+    ASSERT_TRUE(server.applyDeployedScenario());
+
+    const Scenario& scenario = server.m_engine.scenario();
+    ASSERT_FALSE(scenario.units.empty());
+    EXPECT_TRUE(std::all_of(scenario.units.cbegin(), scenario.units.cend(),
+                            [](const ScenarioUnit& unit) {
+                                return unit.commRange == 2'000'000.0;
+                            }));
+
+    server.reconcileSeatConfiguration(false);
+    for (const QString& unitId : server.m_engine.unitIds()) {
+        const UnitBase* unit = server.m_engine.unit(unitId);
+        ASSERT_NE(unit, nullptr);
+        EXPECT_DOUBLE_EQ(unit->commRange(), 2'000'000.0);
+    }
+}
+
+TEST(GameServerStrictVmfTest, RestoredLegacyRangesAreUpgradedToUnlimited) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    {
+        GameServer server;
+        ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+        server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+        ASSERT_TRUE(server.applyProtocolProfilePolicy());
+        ASSERT_TRUE(server.persistRoomState());
+
+        RoomCheckpoint checkpoint;
+        QString error;
+        ASSERT_TRUE(server.m_persistence.loadCheckpoint(&checkpoint, &error))
+            << error.toStdString();
+        ASSERT_FALSE(checkpoint.scenario.units.empty());
+        ASSERT_FALSE(checkpoint.runInitialScenario.units.empty());
+        for (ScenarioUnit& unit : checkpoint.scenario.units) unit.commRange = 25.0;
+        for (ScenarioUnit& unit : checkpoint.runInitialScenario.units) unit.commRange = 50.0;
+        ASSERT_TRUE(server.m_persistence.saveCheckpoint(checkpoint, &error))
+            << error.toStdString();
+    }
+
+    GameServer restored;
+    ASSERT_TRUE(restored.m_recoveryError.isEmpty())
+        << restored.m_recoveryError.toStdString();
+    ASSERT_EQ(restored.m_protocolProfile, QStringLiteral("vmf-guided-strike-v1"));
+    for (const QString& unitId : restored.m_engine.unitIds()) {
+        const UnitBase* unit = restored.m_engine.unit(unitId);
+        ASSERT_NE(unit, nullptr);
+        EXPECT_DOUBLE_EQ(unit->commRange(), 2'000'000.0);
+    }
+    EXPECT_TRUE(std::all_of(restored.m_runInitialScenario.units.cbegin(),
+                            restored.m_runInitialScenario.units.cend(),
+                            [](const ScenarioUnit& unit) {
+                                return unit.commRange == 2'000'000.0;
+                            }));
+}
+
 TEST(GameServerPveLifecycleTest, DeploysAiBeforeRedCommanderReadiness) {
     int argc = 1;
     char applicationName[] = "game_server_pve_readiness_tests";

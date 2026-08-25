@@ -9,6 +9,7 @@ Dialog {
     property var editor: null
     property var appWindow: null
     signal sessionChangeRequested()
+    signal helpRequested()
     modal: true
     anchors.centerIn: Overlay.overlay
     title: "联网设置"
@@ -141,6 +142,11 @@ Dialog {
             }
             SettingsSection { title: "联网快捷键"; iconName: "shortcut"
                 ShortcutEditor { id: shortcutEditor; controller: root.controller; definitions: root.onlineDefs; storagePrefix: "shortcuts/online/"; onShortcutChanged: root.load() }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                GhostButton { text: "帮助"; iconName: "help"; onClicked: root.helpRequested() }
+                Item { Layout.fillWidth: true }
             }
         }
     }

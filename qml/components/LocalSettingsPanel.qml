@@ -9,6 +9,7 @@ Dialog {
     property var editor: null
     property var appWindow: null
     signal sessionChangeRequested()
+    signal helpRequested()
     modal: true
     title: "本地设置"
     standardButtons: Dialog.NoButton
@@ -79,6 +80,7 @@ Dialog {
                 ShortcutEditor { id: shortcutEditor; controller: root.controller; definitions: root.localDefs; storagePrefix: "shortcuts/local/"; migrateLegacy: true; onShortcutChanged: root.load() }
             }
             RowLayout { Layout.fillWidth: true; spacing: 8
+                GhostButton { text: "帮助"; iconName: "help"; onClicked: root.helpRequested() }
                 Item { Layout.fillWidth: true }
                 GhostButton { text: "关闭"; iconName: "close"; onClicked: { root.commit(); root.close() } }
             }

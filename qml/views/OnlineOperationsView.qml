@@ -343,8 +343,11 @@ Item {
              : root.dim
     }
     function roomCanJoin(room) {
-        return room && room.enabled !== false && room.hostedByGameServer === true
-                && room.status === "preparing"
+        if (!room || room.enabled === false || room.hostedByGameServer !== true)
+            return false
+        return room.status === "preparing"
+                || (room.protocolProfile === "vmf-guided-strike-v1"
+                    && ["running", "paused"].indexOf(room.status) >= 0)
     }
     function roomCanObserve(room) {
         return room && room.enabled !== false && room.hostedByGameServer === true
@@ -453,7 +456,8 @@ Item {
     }
     function seatStatusLabel(seat) {
         if (seat.controlMode === "fixed-target") return "固定靶"
-        if (seat.controlMode === "vmf-auto") return "服务器自动控制"
+        if (seat.controlMode === "vmf-auto")
+            return root.canClaimSeat(seat) ? "可接管" : "自动控制"
         if (seat.controllerType === "placeholder") return "服务器控制"
         if (!seat.occupied) return "空缺"
         if (seat.controllerType === "ai") return seat.deployed ? "AI 执行中" : "AI 已就位"
@@ -1828,7 +1832,8 @@ Item {
                             GuidedStrikeWorkflowPanel {
                                 id: onlineGuidedStrikePanel
                                 visible: !root.controller.isObserver && root.tacticalViewIndex === 1
-                                         && onlineGuidedStrikePanel.vmfAvailable
+                                         && (onlineGuidedStrikePanel.strictProfile
+                                             || onlineGuidedStrikePanel.vmfAvailable)
                                 controller: root.controller
                                 side: root.controller.currentSeatSide
                                 Layout.fillWidth: true

@@ -39,6 +39,7 @@ constexpr int kMaxMapMarksPerSecond = 8;
 constexpr qint64 kMaxPendingBytes = 1024 * 1024;
 constexpr qint64 kDdsTicketLifetimeMs = 120000;
 constexpr int kAiProviderPlanGraceMs = 1000;
+constexpr double kVmfUnlimitedCommunicationRangeM = 2'000'000.0;
 
 QJsonObject payloadForWireVersion(const QString& type, const QJsonObject& payload,
                                   int schemaVersion) {
@@ -1162,9 +1163,13 @@ void GameServer::reconcileSeatConfiguration(bool resetReadinessForParameterChang
                 ? unit->commRange() : baseline->commRange;
             const double defaultDetectRange = baseline == currentScenario.units.cend()
                 ? unit->detectRange() : baseline->detectRange;
-            const double communicationRange = parameters.contains(QStringLiteral("communicationRange"))
-                ? parameters.value(QStringLiteral("communicationRange")).toDouble(defaultCommunicationRange)
-                : defaultCommunicationRange;
+            const double communicationRange =
+                m_protocolProfile == QLatin1String("vmf-guided-strike-v1")
+                ? kVmfUnlimitedCommunicationRangeM
+                : parameters.contains(QStringLiteral("communicationRange"))
+                    ? parameters.value(QStringLiteral("communicationRange"))
+                          .toDouble(defaultCommunicationRange)
+                    : defaultCommunicationRange;
             const double detectRange = parameters.contains(QStringLiteral("detectRange"))
                 ? parameters.value(QStringLiteral("detectRange")).toDouble(defaultDetectRange)
                 : defaultDetectRange;
@@ -2857,12 +2862,13 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
     const QString requestedTakeoverSeatId = payload.value(QStringLiteral("seatId")).toString();
     const AuthoritativeRoom::Seat requestedTakeoverSeat =
         m_authoritativeRoom.seat(requestedTakeoverSeatId);
-    const bool livePlaceholderTakeover =
+    const bool placeholderTakeover =
         m_protocolProfile == QLatin1String("vmf-guided-strike-v1")
-        && (m_phase == QLatin1String("running") || m_phase == QLatin1String("paused"))
         && session.seatId.isEmpty()
         && requestedTakeoverSeat.controllerType == QLatin1String("placeholder")
         && requestedTakeoverSeat.side == QLatin1String("red");
+    const bool livePlaceholderTakeover = placeholderTakeover
+        && (m_phase == QLatin1String("running") || m_phase == QLatin1String("paused"));
     if (m_phase != QLatin1String("preparing") && !livePlaceholderTakeover) {
         sendError(socket, QStringLiteral("SEAT_LOCKED"), QStringLiteral("仅准备阶段可以更换战位"));
         return;
@@ -3020,7 +3026,7 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
         return;
     }
     if (m_seats.contains(seatId) && m_seats.value(seatId).userId != session.userId
-        && !livePlaceholderTakeover) {
+        && !placeholderTakeover) {
         sendError(socket, QStringLiteral("SEAT_OCCUPIED"), QStringLiteral("该战位已被占用"));
         return;
     }
@@ -5855,6 +5861,14 @@ bool GameServer::restoreRoomState(QString* error) {
     }
     RoomCheckpoint checkpoint;
     if (!m_persistence.loadCheckpoint(&checkpoint, error)) return false;
+    if (checkpoint.protocolProfile == QLatin1String("vmf-guided-strike-v1")) {
+        for (ScenarioUnit& unit : checkpoint.scenario.units) {
+            unit.commRange = kVmfUnlimitedCommunicationRangeM;
+        }
+        for (ScenarioUnit& unit : checkpoint.runInitialScenario.units) {
+            unit.commRange = kVmfUnlimitedCommunicationRangeM;
+        }
+    }
     if (checkpoint.sourceSchemaVersion == 2) {
         QString eventError;
         const QJsonArray tailEvents = m_persistence.eventsAfter(checkpoint.eventSequence,
@@ -6514,6 +6528,11 @@ bool GameServer::applyDeployedScenario(QString* error) {
             || !applyRangeParameter(parameters, QStringLiteral("detectRange"),
                                     &unit->detectRange)) {
             return false;
+        }
+    }
+    if (m_protocolProfile == QLatin1String("vmf-guided-strike-v1")) {
+        for (ScenarioUnit& unit : scenario.units) {
+            unit.commRange = kVmfUnlimitedCommunicationRangeM;
         }
     }
     const QString validationError = validateNetworkScenario(scenario, false);

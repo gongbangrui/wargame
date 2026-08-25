@@ -198,6 +198,7 @@ qt_add_qml_module(appindex
         qml/components/ShortcutEditor.qml
         qml/components/LocalSettingsPanel.qml
         qml/components/OnlineSettingsPanel.qml
+        qml/components/HelpDialog.qml
         qml/components/OnlineIntelWorkspace.qml
         qml/components/IntelTextField.qml
         qml/components/IntelComboBox.qml
@@ -206,6 +207,8 @@ qt_add_qml_module(appindex
         qml/components/BattleReportDialog.qml
         qml/components/CommandPanel.qml
         qml/components/GuidedStrikeWorkflowPanel.qml
+    RESOURCES
+        map/12/3406/1747.png
 )
 
 set_target_properties(appindex PROPERTIES
