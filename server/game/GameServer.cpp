@@ -2330,7 +2330,7 @@ void GameServer::finishAuthentication(QWebSocket* socket, const QJsonObject& ide
     sendFullSnapshot(socket);
     sendSeatDirectory(socket);
     broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("presence")},
-                               {QStringLiteral("message"), QStringLiteral("%1 已进入推演室").arg(session.displayName)}});
+                               {QStringLiteral("message"), QStringLiteral("%1 已进入推演室").arg(session.username)}});
 }
 
 void GameServer::removeClient(QWebSocket* socket) {
@@ -2421,7 +2421,7 @@ void GameServer::removeClient(QWebSocket* socket) {
     if (owned) socket->deleteLater();
     if (session.authenticated) {
         broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("presence")},
-                                   {QStringLiteral("message"), QStringLiteral("%1 已离开推演室").arg(session.displayName)}});
+                                   {QStringLiteral("message"), QStringLiteral("%1 已离开推演室").arg(session.username)}});
     }
 }
 
@@ -2693,8 +2693,9 @@ void GameServer::completeJoinRoom(QWebSocket* socket, const QJsonObject& payload
     }
     sendSeatDirectory(socket);
     sendFullSnapshot(socket);
+    // Presence messages must use the authenticated account identifier, never mutable profile text.
     broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("roomPresence")},
-                               {QStringLiteral("message"), QStringLiteral("%1 已进入房间大厅").arg(session.displayName)}});
+                               {QStringLiteral("message"), QStringLiteral("%1 已进入房间大厅").arg(session.username)}});
 }
 
 void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload) {

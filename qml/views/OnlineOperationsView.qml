@@ -438,21 +438,18 @@ Item {
         return true
     }
     function seatHint(seat) {
-        if (seat.controlMode === "fixed-target") return "保留场景参数，不执行任何操作"
-        if (seat.controlMode === "vmf-auto") return "缺失环节由服务器自动分发传递"
-        if (seat.controllerType === "ai") return "AI 控制"
-        if (seat.controllerType === "placeholder") return "服务器控制"
+        if (seat.controlMode === "fixed-target" || seat.controlMode === "vmf-auto"
+                || seat.controllerType === "ai" || seat.controllerType === "placeholder") return ""
         if (seat.occupied) return seat.displayName || "已占用"
         if (root.switchSeatSelection && seat.side !== root.controller.currentSeatSide)
-            return "只能申请本方战位"
+            return "仅限本方"
         if (root.switchSeatSelection && seat.seatType === "commander")
-            return "指挥官战位不可在此切换"
+            return "不可切换"
         if (root.switchRequestPending && seat.seatId === root.switchTargetSeatId)
-            return "等待本方指挥官确认"
-        if (root.canClaimSeat(seat)) return "可选择"
-        if (root.strictVmf) return "请先选择红方指挥官"
-        if (root.isRoomEmpty()) return "请先选择红方指挥官"
-        return "等待双方指挥官就位"
+            return "等待确认"
+        if (root.canClaimSeat(seat)) return ""
+        if (root.strictVmf || root.isRoomEmpty()) return "先选红方指挥官"
+        return "等待指挥官"
     }
     function seatStatusLabel(seat) {
         if (seat.controlMode === "fixed-target") return "固定靶"
@@ -1315,6 +1312,7 @@ Item {
                                 ListView { id: seatList; Layout.fillWidth: true; Layout.fillHeight: true; spacing: 6; clip: true; model: root.seatsForSide(sidePanel.modelData)
                                     delegate: Rectangle { id: seatDelegate
                                         required property var modelData
+                                        property string hint: root.seatHint(seatDelegate.modelData)
                                         width: seatList.width; height: 58
                                         color: seatDelegate.modelData.occupied ? root.panelAlt : root.page
                                         border.color: seatDelegate.modelData.occupied ? root.line : root.canClaimSeat(seatDelegate.modelData) ? root.cyan : root.line
@@ -1323,7 +1321,13 @@ Item {
                                             Rectangle { Layout.preferredWidth: 3; Layout.preferredHeight: 28; radius: 2; color: root.seatStatusColor(seatDelegate.modelData) }
                                             ColumnLayout { Layout.fillWidth: true; spacing: 2
                                                 Text { Layout.fillWidth: true; text: root.seatLabel(seatDelegate.modelData); color: root.ink; font.pixelSize: 11; font.bold: true; elide: Text.ElideRight }
-                                                Text { Layout.fillWidth: true; text: seatDelegate.modelData.occupied && seatDelegate.modelData.selectedTemplate ? (root.seatHint(seatDelegate.modelData) + " · " + seatDelegate.modelData.selectedTemplate) : root.seatHint(seatDelegate.modelData); color: root.dim; font.pixelSize: 9; elide: Text.ElideRight }
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: seatDelegate.modelData.occupied && seatDelegate.modelData.selectedTemplate
+                                                        ? (seatDelegate.hint ? seatDelegate.hint + " · " : "") + seatDelegate.modelData.selectedTemplate
+                                                        : seatDelegate.hint
+                                                    color: root.dim; font.pixelSize: 9; elide: Text.ElideRight
+                                                }
                                             }
                                             Text { text: root.seatStatusLabel(seatDelegate.modelData); color: root.seatStatusColor(seatDelegate.modelData); font.pixelSize: 9; font.bold: true }
                                             Button { id: claimSeatButton; visible: seatDelegate.modelData.claimable === true; enabled: root.canClaimSeat(seatDelegate.modelData); text: seatDelegate.modelData.controlMode === "vmf-auto" ? "接管" : root.switchSeatSelection ? "申请" : "进入"; onClicked: root.requestSeat(seatDelegate.modelData)

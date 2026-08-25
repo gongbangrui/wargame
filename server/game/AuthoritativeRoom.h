@@ -118,7 +118,8 @@ private:
     Result invalidateTransfer(qint64 userId, const QString& code);
     QString seatForUser(qint64 userId) const;
     bool validSeatTemplate(const QString& seatId, const QString& templateId,
-                           QString* side = nullptr, QString* type = nullptr) const;
+                           QString* side = nullptr, QString* type = nullptr,
+                           bool vmfSingleSideOverride = false) const;
     QString allocateUnitId(const QString& side, const QString& templateId);
     qint64 chooseSuccessor(const QString& side);
     Result promote(qint64 commanderUserId, qint64 successorUserId);

@@ -7,13 +7,28 @@ Dialog {
     property var controller: null
     property var editor: null
     modal: true
-    anchors.centerIn: parent
+    anchors.centerIn: Overlay.overlay
     width: Math.min(800, parent ? parent.width - 32 : 800)
     height: Math.min(700, parent ? parent.height - 32 : 700)
     title: "运行模式"
     standardButtons: Dialog.NoButton
+    padding: 0
     closePolicy: root.controller.sessionMode === "unselected" ? Popup.NoAutoClose
                                                         : Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+    enter: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppContext.stateMotion; easing.type: Easing.OutCubic }
+            NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: AppContext.stateMotion; easing.type: Easing.OutBack }
+        }
+    }
+    exit: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 1; to: 0; duration: AppContext.fastMotion; easing.type: Easing.InCubic }
+            NumberAnimation { property: "scale"; from: 1; to: 0.98; duration: AppContext.fastMotion; easing.type: Easing.InCubic }
+        }
+    }
+    Overlay.modal: Rectangle { color: "#05080dcc" }
 
     property string selectedMode: "online"
     property bool compactLayout: width < 680

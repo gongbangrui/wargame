@@ -586,6 +586,31 @@ TEST(ProtocolTest, WelcomeMayOmitUnclaimedSeat) {
     EXPECT_TRUE(Protocol::validateServerEnvelope(welcome).valid);
 }
 
+TEST(ProtocolTest, AccountIdentityFieldsHaveNoApplicationLengthLimit) {
+    const QString longUsername = QStringLiteral("user-") + QString(4096, QLatin1Char('u'));
+    const auto welcome = Protocol::makeServerEnvelope(
+        QStringLiteral("welcome"), 1,
+        QJsonObject{{QStringLiteral("username"), longUsername},
+                    {QStringLiteral("displayName"), QStringLiteral("operator")},
+                    {QStringLiteral("room"), QStringLiteral("main")} });
+    EXPECT_TRUE(Protocol::validateServerEnvelope(welcome).valid);
+
+    const auto seats = Protocol::makeServerEnvelope(
+        QStringLiteral("seatState"), 2,
+        QJsonObject{{QStringLiteral("roomId"), QStringLiteral("main")},
+                    {QStringLiteral("yourSeatId"), QStringLiteral("red_commander")},
+                    {QStringLiteral("seats"), QJsonArray{QJsonObject{
+                         {QStringLiteral("seatId"), QStringLiteral("red_commander")},
+                         {QStringLiteral("displayName"), longUsername}}}}});
+    EXPECT_TRUE(Protocol::validateServerEnvelope(seats).valid);
+
+    QJsonObject invalidWelcome = welcome;
+    QJsonObject payload = invalidWelcome.value(QStringLiteral("payload")).toObject();
+    payload[QStringLiteral("username")] = QStringLiteral("   ");
+    invalidWelcome[QStringLiteral("payload")] = payload;
+    EXPECT_FALSE(Protocol::validateServerEnvelope(invalidWelcome).valid);
+}
+
 TEST(ProtocolTest, RejectsMalformedLifecycleSeatDeploymentIntelAndCommandProjections) {
     const QJsonObject malformedSnapshot = Protocol::makeServerEnvelope(
         QStringLiteral("snapshot"), 1,
@@ -677,6 +702,17 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
                                      {QStringLiteral("enabled"), true},
                                      {QStringLiteral("humanStagesRemainManual"), true},
                                      {QStringLiteral("timeoutTakeover"), false}}},
+                                {QStringLiteral("vmfWorkflow"), QJsonObject{
+                                     {QStringLiteral("taskId"), QStringLiteral("red:guided-strike")},
+                                     {QStringLiteral("stage"), QStringLiteral("idle")},
+                                     {QStringLiteral("side"), QStringLiteral("red")},
+                                     {QStringLiteral("reconId"), QStringLiteral("red_r1")},
+                                     {QStringLiteral("targetId"), QString()},
+                                     {QStringLiteral("attackerId"), QString()},
+                                     {QStringLiteral("guideId"), QString()},
+                                     {QStringLiteral("correlationId"), QString()},
+                                     {QStringLiteral("createdAt"), 0.0},
+                                     {QStringLiteral("updatedAt"), 0.0}}},
                                 {QStringLiteral("running"), false},
                                 {QStringLiteral("simTime"), 12.5},
                                 {QStringLiteral("speed"), 2.0},
@@ -702,6 +738,8 @@ TEST(ProtocolTest, ProjectsLifecycleSeatDeploymentIntelAndCommandPayloads) {
     EXPECT_EQ(snapshot.lifecycle.fixedTargetSide, QStringLiteral("blue"));
     EXPECT_TRUE(snapshot.lifecycle.scenarioEditable);
     EXPECT_TRUE(snapshot.lifecycle.vmfAutomation.value(QStringLiteral("enabled")).toBool());
+    EXPECT_EQ(snapshot.lifecycle.vmfWorkflow.value(QStringLiteral("reconId")).toString(),
+              QStringLiteral("red_r1"));
     EXPECT_EQ(snapshot.lifecycle.seats.front().controllerType,
               QStringLiteral("placeholder"));
     EXPECT_EQ(snapshot.lifecycle.seats.front().controlMode, QStringLiteral("vmf-auto"));

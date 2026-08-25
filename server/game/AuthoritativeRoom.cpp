@@ -616,7 +616,8 @@ bool AuthoritativeRoom::isAiSeat(const QString& seatId) const {
 }
 
 bool AuthoritativeRoom::validSeatTemplate(const QString& seatId, const QString& templateId,
-                                          QString* side, QString* type) const {
+                                          QString* side, QString* type,
+                                          bool vmfSingleSideOverride) const {
     const QStringList parts = seatParts(seatId);
     if (parts.size() < 2 || parts.size() > 3 || !m_templates.contains(templateId)) return false;
     if (parts.first() != QLatin1String("red") && parts.first() != QLatin1String("blue")) return false;
@@ -632,7 +633,7 @@ bool AuthoritativeRoom::validSeatTemplate(const QString& seatId, const QString& 
         const QString baseId = parts.at(0) + QLatin1Char('_') + parts.at(1);
         const int index = expectedType == QLatin1String("commander")
             ? 1 : parts.value(2).toInt();
-        const bool provisionedVmfSeat = m_vmfSingleSide
+        const bool provisionedVmfSeat = (m_vmfSingleSide || vmfSingleSideOverride)
             && parts.first() == QLatin1String("red") && index == 1
             && (expectedType == QLatin1String("recon")
                 || expectedType == QLatin1String("attack")
@@ -1434,7 +1435,8 @@ bool AuthoritativeRoom::restore(const QJsonObject& object, QString* error) {
             || (vmfSingleSide && seat.side == QLatin1String("blue")
                 && seat.controlMode != QLatin1String("fixed-target"))
             || seats.contains(seat.seatId)
-            || !validSeatTemplate(seat.seatId, seat.selectedTemplate, &side, &type)
+            || !validSeatTemplate(seat.seatId, seat.selectedTemplate, &side, &type,
+                                  vmfSingleSide)
             || (!seat.sourceUnitId.isEmpty()
                 && (source.id.isEmpty() || source.side != seat.side
                     || source.kind != seat.selectedTemplate))

@@ -119,14 +119,16 @@ Item {
     function occupiedFor(key) {
         var count = 0
         var seats = root.seatsForKey(key)
-        for (var i = 0; i < seats.length; ++i) if (seats[i].occupied) ++count
+        for (var i = 0; i < seats.length; ++i)
+            if (seats[i].occupied && (seats[i].controllerType || "human") === "human") ++count
         return count
     }
 
     function occupiedSeatCount() {
         var count = 0
         var seats = root.controller ? root.controller.onlineSeats : []
-        for (var i = 0; i < seats.length; ++i) if (seats[i].occupied) ++count
+        for (var i = 0; i < seats.length; ++i)
+            if (seats[i].occupied && (seats[i].controllerType || "human") === "human") ++count
         return count
     }
 
@@ -364,10 +366,7 @@ Item {
                     ColumnLayout { anchors.fill: parent; anchors.margins: 14; spacing: 10
                         RowLayout { Layout.fillWidth: true; spacing: 8
                             Icon { name: "settings"; iconColor: root.cyan; iconSize: 16 }
-                            ColumnLayout { Layout.fillWidth: true; spacing: 1
-                                Text { text: "场景"; color: root.ink; font.pixelSize: 14; font.bold: true }
-                                Text { text: root.strictVmf ? "VMF" : root.controller.roomMode === "pve" ? "PVE" : "PVP"; color: root.dim; font.pixelSize: 9 }
-                            }
+                            Text { Layout.fillWidth: true; text: "场景"; color: root.ink; font.pixelSize: 14; font.bold: true }
                         }
                         Text { visible: root.controller.roomDescription.length > 0; Layout.fillWidth: true; text: root.controller.roomDescription; color: root.dim; font.pixelSize: 10; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
                         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
@@ -385,7 +384,6 @@ Item {
                                         Text { text: sideSummary.modelData === "red" ? (root.strictVmf ? "红方参演战位" : "红方") : (root.strictVmf ? "蓝方固定靶" : "蓝方"); color: root.ink; font.pixelSize: 10; font.bold: true }
                                         Text { text: root.sideOccupied(sideSummary.modelData) + " / " + root.sideCapacity(sideSummary.modelData) + (root.strictVmf && sideSummary.modelData === "blue" ? " 个托管目标" : " 个战位"); color: root.dim; font.pixelSize: 9 }
                                     }
-                                    Text { text: root.strictVmf && sideSummary.modelData === "blue" ? "固定不行动" : root.sideOccupied(sideSummary.modelData) ? "有占用" : "空闲"; color: root.sideOccupied(sideSummary.modelData) ? root.cyan : root.dim; font.pixelSize: 9 }
                                 }
                             }
                         }

@@ -541,13 +541,18 @@ Item {
             }
 
             Rectangle {
+                id: mapHint
+                visible: root.positionPickMode || root.positionStatus.length > 0
+                         || (!root.editable && root.controller && root.controller.networked
+                             && root.controller.isRoomAdmin
+                             && root.controller.matchPhase === "preparing")
                 anchors.left: parent.left; anchors.bottom: parent.bottom
                 anchors.right: root.narrowLayout ? parent.right : undefined
                 anchors.leftMargin: 24; anchors.bottomMargin: 24
                 anchors.rightMargin: root.narrowLayout ? 24 : 0
                 color: "#0c1122"; border.color: "#1e2d4a"; radius: 8
-                implicitHeight: Math.max(36, hintText.implicitHeight + 16)
-                implicitWidth: Math.min(parent.width - 48, hintText.implicitWidth + 28)
+                implicitHeight: visible ? Math.max(36, hintText.implicitHeight + 16) : 0
+                implicitWidth: visible ? Math.min(parent.width - 48, hintText.implicitWidth + 28) : 0
                 Text {
                     id: hintText
                     anchors.fill: parent; anchors.margins: 8

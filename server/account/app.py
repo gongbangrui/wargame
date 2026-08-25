@@ -248,8 +248,8 @@ app = FastAPI(
 
 
 class LoginBody(BaseModel):
-    username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=MIN_PASSWORD_LENGTH)
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
 
     @field_validator("username", mode="before")
     @classmethod
@@ -258,7 +258,7 @@ class LoginBody(BaseModel):
 
 
 class UserBody(BaseModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    username: str = Field(min_length=1)
     display_name: str = Field(min_length=1, max_length=64)
     role: Literal["player", "room_admin", "editor"] = "player"
     password: str | None = Field(default=None)
@@ -267,15 +267,18 @@ class UserBody(BaseModel):
     @field_validator("username", "display_name", mode="before")
     @classmethod
     def strip_text(cls, value: object) -> object:
-        return value.strip() if isinstance(value, str) else value
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value must not be empty")
+        return normalized
 
     @field_validator("password", mode="before")
     @classmethod
     def validate_optional_password(cls, value: object) -> object:
         if value == "":
             return None
-        if isinstance(value, str) and len(value) < MIN_PASSWORD_LENGTH:
-            raise ValueError(f"password must contain at least {MIN_PASSWORD_LENGTH} characters")
         return value
 
     @field_validator("role", mode="before")

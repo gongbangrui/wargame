@@ -10,8 +10,23 @@ Dialog {
     property var appWindow: null
     signal sessionChangeRequested()
     modal: true
+    anchors.centerIn: Overlay.overlay
     title: "联网设置"
     standardButtons: Dialog.NoButton
+    padding: 0
+    enter: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppContext.stateMotion; easing.type: Easing.OutCubic }
+            NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: AppContext.stateMotion; easing.type: Easing.OutBack }
+        }
+    }
+    exit: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 1; to: 0; duration: AppContext.fastMotion; easing.type: Easing.InCubic }
+            NumberAnimation { property: "scale"; from: 1; to: 0.98; duration: AppContext.fastMotion; easing.type: Easing.InCubic }
+        }
+    }
+    Overlay.modal: Rectangle { color: "#05080dcc" }
     width: Math.max(360, Math.min(620, parent ? parent.width - 32 : 620))
     height: Math.max(420, Math.min(700, parent ? parent.height - 32 : 700))
     property var onlineDefs: [
@@ -44,6 +59,34 @@ Dialog {
         shortcutEditor.reload()
     }
     background: Rectangle { color: AppContext.page; border.color: AppContext.line; radius: 6; border.width: 1 }
+    header: Rectangle {
+        implicitHeight: 52
+        color: AppContext.panel
+        border.color: AppContext.line
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 10
+            spacing: 10
+            Icon { name: "settings"; iconColor: AppContext.signal; iconSize: 18 }
+            Text {
+                Layout.fillWidth: true
+                text: "联网设置"
+                color: AppContext.textStrong
+                font.pixelSize: 15
+                font.bold: true
+            }
+            GhostButton {
+                text: ""
+                iconName: "close"
+                iconSize: 17
+                implicitWidth: 36
+                implicitHeight: 34
+                onClicked: root.close()
+                Accessible.name: "关闭联网设置"
+            }
+        }
+    }
     contentItem: Flickable {
         clip: true; contentWidth: width; contentHeight: body.implicitHeight + 24
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -98,10 +141,6 @@ Dialog {
             }
             SettingsSection { title: "联网快捷键"; iconName: "shortcut"
                 ShortcutEditor { id: shortcutEditor; controller: root.controller; definitions: root.onlineDefs; storagePrefix: "shortcuts/online/"; onShortcutChanged: root.load() }
-            }
-            RowLayout { Layout.fillWidth: true
-                Item { Layout.fillWidth: true }
-                GhostButton { text: "关闭"; iconName: "close"; onClicked: root.close() }
             }
         }
     }

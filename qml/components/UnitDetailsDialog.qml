@@ -220,7 +220,7 @@ Dialog {
                     Rectangle {
                         Layout.preferredWidth: headerStatusText.implicitWidth + 18
                         Layout.preferredHeight: 22
-                        radius: 11
+                        radius: 4
                         color: Qt.rgba(dlg.healthAccent.r, dlg.healthAccent.g, dlg.healthAccent.b, 0.14)
                         border.color: Qt.rgba(dlg.healthAccent.r, dlg.healthAccent.g, dlg.healthAccent.b, 0.62)
                         Text {
@@ -288,7 +288,7 @@ Dialog {
                     ColumnLayout {
                         Layout.preferredWidth: 96
                         spacing: 2
-                        Text { text: "生命状态"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text { text: "耐久"; color: AppContext.muted; font.pixelSize: 9 }
                         Text {
                             text: Math.round(Number(dlg.snap.hp || 0)) + " / " + Math.round(Number(dlg.snap.maxHp || 0))
                             color: dlg.healthAccent
@@ -316,7 +316,7 @@ Dialog {
                         visible: !dlg.narrow
                         Layout.preferredWidth: 82
                         spacing: 2
-                        Text { text: "当前速度"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text { text: "速度"; color: AppContext.muted; font.pixelSize: 9 }
                         Text {
                             text: dlg.snap.speed !== undefined ? Math.round(Number(dlg.snap.speed)) + " m/s" : "-"
                             color: AppContext.textStrong
@@ -329,7 +329,7 @@ Dialog {
                         visible: !dlg.narrow
                         Layout.preferredWidth: 76
                         spacing: 2
-                        Text { text: "数据 revision"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text { text: "版本"; color: AppContext.muted; font.pixelSize: 9 }
                         Text {
                             text: dlg.controller && dlg.controller.networked ? String(dlg.controller.unitStateRevision) : "LOCAL"
                             color: AppContext.signal
@@ -350,7 +350,7 @@ Dialog {
                     ColumnLayout {
                         Layout.preferredWidth: 82
                         spacing: 1
-                        Text { text: "当前速度"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text { text: "速度"; color: AppContext.muted; font.pixelSize: 9 }
                         Text {
                             text: dlg.snap.speed !== undefined ? Math.round(Number(dlg.snap.speed)) + " m/s" : "-"
                             color: AppContext.textStrong
@@ -362,7 +362,7 @@ Dialog {
                     ColumnLayout {
                         Layout.preferredWidth: 76
                         spacing: 1
-                        Text { text: "数据 revision"; color: AppContext.muted; font.pixelSize: 9 }
+                        Text { text: "版本"; color: AppContext.muted; font.pixelSize: 9 }
                         Text {
                             text: dlg.controller && dlg.controller.networked ? String(dlg.controller.unitStateRevision) : "LOCAL"
                             color: AppContext.signal

@@ -1367,7 +1367,7 @@ function openUserModal(user = null) {
   $("displayName").value = user ? user.displayName : "";
   $("userRole").value = normalizeAccountRole(user?.role);
   $("enabled").checked = user ? user.enabled : true;
-  $("userPassword").required = false;
+  $("userPassword").required = !user;
   $("passwordHint").textContent = user ? "留空表示不修改密码" : "";
   openModal($("userModal"), $("username"));
 }

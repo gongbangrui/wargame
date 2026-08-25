@@ -113,11 +113,13 @@ Rectangle {
                     renderType: Text.NativeRendering
                 }
             }
-            GhostButton {
-                text: ""
+            TonalButton {
+                text: "详情"
                 iconName: "table"
-                iconSize: 18
-                implicitWidth: 34
+                iconSize: 15
+                base: t.accentSoft
+                textColor: t.textStrong
+                paddingH: 10
                 implicitHeight: 30
                 onClicked: unitDetailsDialog.open()
                 ToolTip.visible: hovered

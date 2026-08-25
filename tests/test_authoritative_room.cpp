@@ -2119,6 +2119,39 @@ TEST(AuthoritativeRoomTest, RestoresHighBitRngStateSerializedAsSignedJson) {
     EXPECT_EQ(restored.rngState(), room.rngState());
 }
 
+TEST(AuthoritativeRoomTest, RestoresVmfProvisionedSeatBeyondScenarioCapacity) {
+    AuthoritativeRoom room = configuredRoom();
+    Scenario scenario = ScenarioIo::defaultScenario();
+    std::erase_if(scenario.units, [](const ScenarioUnit& unit) {
+        return unit.side == QLatin1String("red")
+            && unit.kind == QLatin1String("groundscout");
+    });
+    QString error;
+    ASSERT_TRUE(room.setScenarioUnits(scenario.units, &error)) << error.toStdString();
+    const QHash<QString, int> limits{
+        {QStringLiteral("red_commander"), 1},
+        {QStringLiteral("red_attack"), 1},
+        {QStringLiteral("red_recon"), 1},
+        {QStringLiteral("red_ground"), 0},
+        {QStringLiteral("red_jammer"), 0},
+        {QStringLiteral("blue_commander"), 1},
+        {QStringLiteral("blue_attack"), 1},
+        {QStringLiteral("blue_recon"), 1},
+        {QStringLiteral("blue_ground"), 1},
+        {QStringLiteral("blue_jammer"), 1}};
+    ASSERT_TRUE(room.setSeatLimits(limits, &error)) << error.toStdString();
+    const auto vmfPolicy = room.setVmfSingleSide(true);
+    ASSERT_TRUE(vmfPolicy.ok) << vmfPolicy.code.toStdString();
+    ASSERT_TRUE(room.hasSeat(QStringLiteral("red_ground_1")));
+
+    AuthoritativeRoom restored = configuredRoom();
+    ASSERT_TRUE(restored.setScenarioUnits(scenario.units, &error)) << error.toStdString();
+    ASSERT_TRUE(restored.setSeatLimits(limits, &error)) << error.toStdString();
+    ASSERT_TRUE(restored.restore(room.toJson(), &error)) << error.toStdString();
+    EXPECT_EQ(restored.seat(QStringLiteral("red_ground_1")).controllerType,
+              QStringLiteral("placeholder"));
+}
+
 TEST(AuthoritativeRoomTest, PreparingCommanderDisconnectDoesNotForfeitMatch) {
     auto room = configuredRoom();
     claimCommanders(room);

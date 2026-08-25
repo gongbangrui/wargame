@@ -337,5 +337,42 @@ class AccountRoomLifecycleTest(unittest.TestCase):
 
         self.assertEqual(self.pending_invalidation_count(user_id), 1)
 
+    def test_single_character_user_credentials_are_valid_but_empty_values_are_rejected(self) -> None:
+        created = self.app.create_user(
+            self.app.UserBody(
+                username="x",
+                display_name="x",
+                password="p",
+                enabled=True,
+            ),
+            None,
+        )
+        self.assertEqual(created["user"]["username"], "x")
+        with self.assertRaises(ValueError):
+            self.app.UserBody(username=" ", display_name="x", password="p")
+        with self.assertRaises(ValueError):
+            self.app.LoginBody(username="x", password="")
+
+    def test_long_credentials_and_password_whitespace_are_preserved(self) -> None:
+        username = "user-" + "x" * 256
+        password = " p " + "y" * 256
+        created = self.app.create_user(
+            self.app.UserBody(
+                username=username,
+                display_name="long credentials",
+                password=password,
+                enabled=True,
+            ),
+            None,
+        )
+        self.assertEqual(created["user"]["username"], username)
+        with self.app.database() as db:
+            row = db.execute(
+                "SELECT password_hash FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertTrue(self.app.verify_password(row["password_hash"], password))
+
 if __name__ == "__main__":
     unittest.main()

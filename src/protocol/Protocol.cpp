@@ -63,6 +63,10 @@ bool validString(const QJsonValue& value, int maximumLength, bool allowEmpty = f
         && (allowEmpty || !value.toString().trimmed().isEmpty());
 }
 
+bool validAccountText(const QJsonValue& value, bool allowEmpty = false) {
+    return value.isString() && (allowEmpty || !value.toString().trimmed().isEmpty());
+}
+
 bool validNonNegativeInteger(const QJsonValue& value) {
     if (!value.isDouble()) return false;
     const double number = value.toDouble();
@@ -187,6 +191,10 @@ bool validOptionalString(const QJsonObject& object, const QString& field, int ma
         || validString(object.value(field), maximumLength, allowEmpty);
 }
 
+bool validOptionalAccountText(const QJsonObject& object, const QString& field) {
+    return !object.contains(field) || validAccountText(object.value(field), true);
+}
+
 bool validOptionalIdentifier(const QJsonObject& object, const QString& field,
                              bool allowEmpty = false) {
     if (!object.contains(field)) return true;
@@ -198,7 +206,7 @@ bool projectSeat(const QJsonObject& object, SeatProjection* projection) {
     if (!validIdentifier(object.value(QStringLiteral("seatId")))
         || !validOptionalString(object, QStringLiteral("seatType"), MaxIdentifierLength)
         || !validOptionalString(object, QStringLiteral("side"), MaxIdentifierLength)
-        || !validOptionalString(object, QStringLiteral("displayName"), 128)
+        || !validOptionalAccountText(object, QStringLiteral("displayName"))
         || (object.contains(QStringLiteral("slot"))
             && !validNonNegativeInteger(object.value(QStringLiteral("slot"))))
         || (object.contains(QStringLiteral("capacity"))
@@ -911,12 +919,13 @@ bool validVmfWorkflow(const QJsonValue& value) {
     const QJsonObject workflow = value.toObject();
     static const QSet<QString> fields{
         QStringLiteral("taskId"), QStringLiteral("stage"), QStringLiteral("side"),
-        QStringLiteral("targetId"), QStringLiteral("attackerId"),
+        QStringLiteral("reconId"), QStringLiteral("targetId"), QStringLiteral("attackerId"),
         QStringLiteral("guideId"), QStringLiteral("correlationId"),
         QStringLiteral("createdAt"), QStringLiteral("updatedAt")};
     if (!hasOnlyFields(workflow, fields)) return false;
     for (const QString& field : {QStringLiteral("taskId"), QStringLiteral("stage"),
-                                 QStringLiteral("side"), QStringLiteral("targetId"),
+                                 QStringLiteral("side"), QStringLiteral("reconId"),
+                                 QStringLiteral("targetId"),
                                  QStringLiteral("attackerId"), QStringLiteral("guideId"),
                                  QStringLiteral("correlationId")}) {
         if (!validOptionalString(workflow, field, MaxIdentifierLength, true)) return false;
@@ -1915,8 +1924,8 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
         return invalid(QStringLiteral("严格 VMF 服务器消息需要协议 schema 8"));
     }
     if (type == QLatin1String("welcome")) {
-        if (!validString(payload.value(QStringLiteral("username")), 128)
-            || !validString(payload.value(QStringLiteral("displayName")), 128, true)) {
+        if (!validAccountText(payload.value(QStringLiteral("username")))
+            || !validAccountText(payload.value(QStringLiteral("displayName")), true)) {
             return invalid(QStringLiteral("欢迎消息中的账号身份无效"));
         }
         if (payload.contains(QStringLiteral("role"))) {
