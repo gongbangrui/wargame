@@ -180,7 +180,7 @@ void MessageBus::dispatch(const Message& msg) {
         for (const auto& uid : recipients) {
             if (uid != m.sender && canCommunicate(m.sender, uid)) reachable.push_back(uid);
         }
-        if (m.automaticAck && !reachable.empty()) m_seenAutomaticMessages.insert(m.id);
+        if (m.automaticAck && !reachable.empty()) rememberAutomaticMessageId(m.id);
         for (const auto& uid : reachable) {
             deliver(m, uid);
             maybeAutoAck(m, uid);
@@ -189,12 +189,21 @@ void MessageBus::dispatch(const Message& msg) {
         qDebug() << "[bus] dropping message with empty receiver" << m.sender;
     } else {
         if (canCommunicate(m.sender, m.receiver)) {
-            if (m.automaticAck) m_seenAutomaticMessages.insert(m.id);
+            if (m.automaticAck) rememberAutomaticMessageId(m.id);
             deliver(m, m.receiver);
             maybeAutoAck(m, m.receiver);
         } else {
             qDebug() << "[bus]" << m.sender << "->" << m.receiver << "NO COMM";
         }
+    }
+}
+
+void MessageBus::rememberAutomaticMessageId(const QString& messageId) {
+    if (messageId.isEmpty() || m_seenAutomaticMessages.contains(messageId)) return;
+    m_seenAutomaticMessages.insert(messageId);
+    m_seenAutomaticMessageOrder.append(messageId);
+    while (m_seenAutomaticMessageOrder.size() > MaxAutomaticMessageIds) {
+        m_seenAutomaticMessages.remove(m_seenAutomaticMessageOrder.takeFirst());
     }
 }
 
@@ -360,17 +369,18 @@ bool MessageBus::restorePendingAckState(const QJsonArray& state, QString* error)
 
 QJsonArray MessageBus::automaticMessageState() const {
     QJsonArray result;
-    for (const QString& id : m_seenAutomaticMessages) result.append(id);
+    for (const QString& id : m_seenAutomaticMessageOrder) result.append(id);
     return result;
 }
 
 bool MessageBus::restoreAutomaticMessageState(const QJsonArray& state, QString* error) {
     if (error) error->clear();
-    if (state.size() > 4096) {
+    if (state.size() > MaxAutomaticMessageIds) {
         if (error) *error = QStringLiteral("自动 ACK 去重状态过大");
         return false;
     }
     QSet<QString> restored;
+    QStringList restoredOrder;
     for (const QJsonValue& value : state) {
         if (!value.isString() || value.toString().trimmed().isEmpty()
             || value.toString().size() > 128 || restored.contains(value.toString())) {
@@ -378,8 +388,10 @@ bool MessageBus::restoreAutomaticMessageState(const QJsonArray& state, QString* 
             return false;
         }
         restored.insert(value.toString());
+        restoredOrder.append(value.toString());
     }
     m_seenAutomaticMessages = std::move(restored);
+    m_seenAutomaticMessageOrder = std::move(restoredOrder);
     return true;
 }
 

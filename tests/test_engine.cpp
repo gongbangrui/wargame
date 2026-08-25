@@ -92,6 +92,18 @@ TEST_F(EngineTest, ReplayUsesTheRecordedVariableStepSequence) {
               expected);
 }
 
+TEST_F(EngineTest, DisabledReplayRecordingDoesNotAccumulateLongRunningState) {
+    engine.setReplayRecordingEnabled(false);
+    EXPECT_FALSE(engine.replayRecordingEnabled());
+
+    engine.stepOnce(30.0);
+
+    EXPECT_DOUBLE_EQ(engine.replayDuration(), 0.0);
+    QString error;
+    EXPECT_FALSE(engine.seekReplay(0.0, &error));
+    EXPECT_FALSE(error.isEmpty());
+}
+
 TEST_F(EngineTest, CommandSetSpeed) {
     auto* u = engine.unit("red_a1");
     ASSERT_NE(u, nullptr);

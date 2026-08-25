@@ -140,7 +140,7 @@ bool AuthoritativeRoom::setSeatLimits(const QHash<QString, int>& limits, QString
         const int index = parts.size() == 2 ? 1 : parts.value(2).toInt(&ok);
         const int normalizedIndex = parts.size() == 2 ? 1 : (ok ? index : -1);
         const bool provisionedVmfSeat = m_vmfSingleSide && seat.side == QLatin1String("red")
-            && seat.controllerType == QLatin1String("placeholder")
+            && normalizedIndex == 1
             && (seat.seatType == QLatin1String("recon")
                 || seat.seatType == QLatin1String("attack")
                 || seat.seatType == QLatin1String("ground"));

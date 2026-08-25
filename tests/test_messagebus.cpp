@@ -220,3 +220,24 @@ TEST_F(MessageBusTest, BroadcastHandlerMayUnregisterItself) {
     EXPECT_EQ(otherDeliveries, 1);
     EXPECT_FALSE(bus.isRegistered("red_r1"));
 }
+
+TEST_F(MessageBusTest, AutomaticMessageDedupeEvictsOldestAtRuntimeLimit) {
+    QJsonArray restored;
+    for (qsizetype index = 0; index < MessageBus::MaxAutomaticMessageIds; ++index) {
+        restored.append(QStringLiteral("old-%1").arg(index));
+    }
+    QString error;
+    ASSERT_TRUE(bus.restoreAutomaticMessageState(restored, &error)) << error.toStdString();
+
+    Message message;
+    message.id = QStringLiteral("new-message");
+    message.sender = QStringLiteral("red_cp");
+    message.receiver = QStringLiteral("red_r1");
+    message.automaticAck = true;
+    ASSERT_TRUE(bus.send(message));
+
+    const QJsonArray state = bus.automaticMessageState();
+    ASSERT_EQ(state.size(), MessageBus::MaxAutomaticMessageIds);
+    EXPECT_EQ(state.at(0).toString(), QStringLiteral("old-1"));
+    EXPECT_EQ(state.at(state.size() - 1).toString(), QStringLiteral("new-message"));
+}

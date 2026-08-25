@@ -161,6 +161,8 @@ struct Message {
 class MessageBus : public QObject {
     Q_OBJECT
 public:
+    static constexpr qsizetype MaxAutomaticMessageIds = 4096;
+
     using Handler = std::function<void(const Message&)>;
     using VmfEncoder = std::function<bool(const Message&, Message*, QString*)>;
 
@@ -225,6 +227,7 @@ private:
     void deliver(const Message& msg, const QString& targetId);
     void dispatch(const Message& msg);
     void maybeAutoAck(const Message& msg, const QString& recipientId);
+    void rememberAutomaticMessageId(const QString& messageId);
 
     struct PendingAck {
         Message message;
@@ -236,6 +239,7 @@ private:
     std::unordered_map<QString, Reg> m_units;
     QHash<QString, PendingAck> m_pendingAcks;
     QSet<QString> m_seenAutomaticMessages;
+    QStringList m_seenAutomaticMessageOrder;
     double m_simulationTime = 0.0;
     double m_ackTimeoutSeconds = 3.0;
     int m_maxAckRetries = 2;

@@ -599,6 +599,36 @@ TEST(StateProjectorTest, ObserverEventsWhitelistLifecycleAndDropSensitiveKinds) 
     }
 }
 
+TEST(StateProjectorTest, ProjectedVmfEventRetainsSideMetadataAndPassesProtocolValidation) {
+    SimulationEngine engine;
+    engine.loadDefaultScenario();
+    const QJsonObject event{
+        {QStringLiteral("kind"), QStringLiteral("vmfMessage")},
+        {QStringLiteral("messageId"), QStringLiteral("vmf-message-1")},
+        {QStringLiteral("traceId"), QStringLiteral("vmf-trace-1")},
+        {QStringLiteral("correlationId"), QStringLiteral("vmf-correlation-1")},
+        {QStringLiteral("vmfMessage"), QStringLiteral("Target Report")},
+        {QStringLiteral("wireFormat"), QStringLiteral("vmf-design-v1")},
+        {QStringLiteral("wireBitLength"), 8},
+        {QStringLiteral("senderUnitId"), QStringLiteral("red_r1")},
+        {QStringLiteral("receiverUnitId"), QStringLiteral("red_cp")},
+        {QStringLiteral("messageType"), QStringLiteral("TargetReport")},
+        {QStringLiteral("validated"), true},
+        {QStringLiteral("fieldCount"), 1},
+        {QStringLiteral("acked"), true},
+        {QStringLiteral("senderSide"), QStringLiteral("red")},
+        {QStringLiteral("receiverSide"), QStringLiteral("red")}};
+
+    const QJsonObject projected = StateProjector::projectEvent(
+        engine, QStringLiteral("red_commander"), event, QStringLiteral("red_cp"));
+    EXPECT_EQ(projected.value(QStringLiteral("senderSide")), QStringLiteral("red"));
+    EXPECT_EQ(projected.value(QStringLiteral("receiverSide")), QStringLiteral("red"));
+    const QJsonObject envelope = Protocol::makeServerEnvelope(
+        QStringLiteral("vmfEvent"), 1, projected);
+    const Protocol::ValidationResult validation = Protocol::validateServerEnvelope(envelope);
+    EXPECT_TRUE(validation.valid) << validation.message.toStdString();
+}
+
 TEST(StateProjectorTest, ObserverProjectionProducesContiguousDeltaAndStableScenario) {
     SimulationEngine engine;
     engine.loadDefaultScenario();

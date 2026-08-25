@@ -21,6 +21,7 @@ const accountUrl = (process.env.ACCOUNT_URL || "http://127.0.0.1:8080").replace(
 const adminUsername = process.env.ADMIN_USERNAME || "admin";
 const adminPassword = process.env.ADMIN_PASSWORD;
 const fixturesOnly = process.env.VMF_FIXTURES_ONLY === "1";
+const runtimeOnly = process.env.VMF_RUNTIME_ONLY === "1";
 if (!fixturesOnly && !adminPassword) throw new Error("请设置 ADMIN_PASSWORD 后运行 VMF 引导打击验收");
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -91,6 +92,35 @@ class GameSession {
       if (message.type === "snapshot") {
         this.state = structuredClone(message.payload);
         this.messages.push({ type: "state", payload: structuredClone(this.state) });
+      } else if (message.type === "delta" && this.state
+                 && message.payload.baseStateRevision === this.state.stateRevision) {
+        const byId = new Map(this.state.units.map(unit => [unit.id, unit]));
+        for (const unit of message.payload.units || []) byId.set(unit.id, unit);
+        this.state.units = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+        if (message.payload.projectiles) {
+          this.state.projectiles = structuredClone(message.payload.projectiles);
+        }
+        if (message.payload.roomState) {
+          this.state.roomState = structuredClone(message.payload.roomState);
+        }
+        if (message.payload.messages) this.state.messages = structuredClone(message.payload.messages);
+        if (message.payload.mapMarks) this.state.mapMarks = structuredClone(message.payload.mapMarks);
+        if (message.payload.intelDelta) {
+          const delta = message.payload.intelDelta;
+          const current = this.state.intelState || { revision: 0, records: [], shareTargets: [] };
+          assert(delta.baseRevision === current.revision,
+            `${this.name}: 情报增量基线不连续`);
+          const records = new Map((current.records || []).map(record => [record.intelId, record]));
+          for (const record of delta.upserts || []) records.set(record.intelId, structuredClone(record));
+          for (const intelId of delta.deletedIntelIds || []) records.delete(intelId);
+          this.state.intelState = {
+            revision: delta.revision,
+            records: [...records.values()].sort((a, b) => a.intelId.localeCompare(b.intelId)),
+            shareTargets: structuredClone(delta.shareTargets || []),
+          };
+        }
+        this.state.stateRevision = message.payload.stateRevision;
+        this.messages.push({ type: "state", payload: structuredClone(this.state) });
       }
     });
     this.send("auth", { token: this.token });
@@ -110,17 +140,34 @@ class GameSession {
   }
 
   waitFor(predicate, timeoutMs = 10000) {
-    const existing = this.messages.find(predicate);
+    return this.waitForAfter(0, predicate, timeoutMs);
+  }
+
+  waitForAfter(startIndex, predicate, timeoutMs = 10000, label = "消息") {
+    const findMessage = () => this.messages.slice(startIndex).find(predicate);
+    const existing = findMessage();
     if (existing) return Promise.resolve(existing);
     return new Promise((resolveMessage, reject) => {
       const timer = setTimeout(() => {
         clearInterval(interval);
         const errors = this.messages.filter(message => message.type === "error")
-          .map(message => message.payload?.code || "error");
-        reject(new Error(`${this.name}: 等待消息超时; errors=${errors.join(",")}`));
+          .map(message => `${message.payload?.code || "error"}:`
+            + `${message.payload?.message || ""}`);
+        const states = this.messages.slice(startIndex).filter(message => message.type === "state");
+        const latest = states.at(-1)?.payload;
+        const room = latest?.roomState || {};
+        const scanUnits = (latest?.units || [])
+          .filter(unit => unit.abilities?.scan || unit.scanCooldownRemaining !== undefined)
+          .map(unit => `${unit.id}:${scanCooldown(latest, unit.id).toFixed(2)}`)
+          .join(",");
+        reject(new Error(`${this.name}: 等待${label}超时; errors=${errors.join(",")}; `
+          + `latestSim=${Number(room.simTime || 0).toFixed(2)}; `
+          + `latestRevision=${room.stateRevision ?? latest?.stateRevision ?? "?"}; `
+          + `phase=${room.phase || "?"}; engineRunning=${room.running ?? "?"}; `
+          + `scan=${scanUnits || "none"}; states=${states.length}`));
       }, timeoutMs);
       const interval = setInterval(() => {
-        const found = this.messages.find(predicate);
+        const found = findMessage();
         if (!found) return;
         clearTimeout(timer); clearInterval(interval); resolveMessage(found);
       }, 25);
@@ -207,6 +254,8 @@ function seatById(session, seatId) {
 }
 
 async function claim(session, seatId) {
+  await session.waitFor(message => message.type === "seatState"
+    && message.payload?.seats?.some(seat => seat.seatId === seatId));
   session.send("claimSeat", { seatId });
   await session.waitFor(message => message.type === "seatState"
     && message.payload?.yourSeatId === seatId);
@@ -215,24 +264,143 @@ async function claim(session, seatId) {
 async function deploy(commander, seatId, position) {
   const seat = seatById(commander, seatId);
   assert(seat?.unitId, `没有找到 ${seatId} 对应的单位`);
+  const start = commander.messages.length;
   commander.send("deployment", { unitId: seat.unitId, targetSeatId: seatId, position });
-  await commander.waitFor(message => message.type === "state"
-    && message.payload?.roomState?.seats?.some(item => item.seatId === seatId && item.deployed));
+  const outcome = await commander.waitForAfter(start, message =>
+    (message.type === "state"
+      && message.payload?.roomState?.seats?.some(item => item.seatId === seatId && item.deployed))
+    || message.type === "error");
+  assert(outcome.type === "state",
+    `${seatId} 部署失败: ${outcome.payload?.code || "UNKNOWN"}: ${outcome.payload?.message || ""}`);
   return seat.unitId;
+}
+
+function scanCooldown(state, reconUnitId) {
+  const recon = state?.units?.find(unit => unit.id === reconUnitId);
+  if (!recon) return null;
+  return Number(recon.abilities?.scan?.cooldownRemaining
+    ?? recon.scanCooldownRemaining ?? 0);
+}
+
+function taskFromState(state, taskId) {
+  return state?.roomState?.vmfTasks?.tasks?.find(task => task.taskId === taskId);
+}
+
+async function runRuntimeAcceptance(adminToken, login, suffix, sessions) {
+  const commander = new GameSession("runtimeCommander", login.gameWebSocketUrl, login.token);
+  sessions.push(commander);
+  await commander.connect();
+  commander.send("joinRoom", { roomId: "main" });
+  await commander.waitFor(message => message.type === "seatState");
+  await claim(commander, "red_commander");
+
+  const reconSeat = seatById(commander, "red_recon_1");
+  assert(reconSeat?.unitId, "严格 VMF 自动侦察战位没有运行单位");
+  assert(reconSeat.controllerType === "placeholder" && reconSeat.controlMode === "vmf-auto",
+    "红方侦察战位未保持服务器自动托管");
+
+  const readyStart = commander.messages.length;
+  commander.send("seatReady", { ready: true });
+  await commander.waitForAfter(readyStart, message => message.type === "state"
+    && message.payload?.roomState?.readyForStart === true);
+
+  const runStart = commander.messages.length;
+  const start = await request("/api/admin/rooms/main/start", { method: "POST" }, adminToken);
+  if (start.operation?.operationId) {
+    await waitForRoomOperation(adminToken, start.operation.operationId, "running");
+  }
+  const running = await commander.waitForAfter(runStart, message => message.type === "state"
+    && message.payload?.roomState?.phase === "running", 15000, "running");
+  const simulationStartedAt = Number(running.payload.roomState.simTime || 0);
+  const wallStartedAt = Date.now();
+
+  const scanStarted = await commander.waitForAfter(runStart, message => message.type === "state"
+    && scanCooldown(message.payload, reconSeat.unitId) > 0.1, 15000, "scan started");
+  const scanStartedIndex = commander.messages.indexOf(scanStarted);
+  const intelState = await commander.waitForAfter(runStart, message => message.type === "state"
+    && message.payload?.intelState?.records?.some(record => record.type === "sensorContact"
+      && record.actionable && record.knownAttributes?.side === "blue"), 15000, "intel acquired");
+  const contact = intelState.payload.intelState.records.find(record => record.type === "sensorContact"
+    && record.actionable && record.knownAttributes?.side === "blue");
+  assert(contact?.targetId, "自动侦察敌情没有提供可用于任务的目标 ID");
+
+  const taskId = `runtime-task-${suffix}`;
+  const requestId = `runtime-create-${suffix}`;
+  const correlationId = `runtime-correlation-${suffix}`;
+  const resultStart = commander.messages.length;
+  commander.send("vmfTaskCommand", {
+    requestId,
+    taskId,
+    expectedTaskRevision: 0,
+    action: "createTask",
+    messages: [],
+    commanderSeatId: "red_commander",
+    reconSeatId: "red_recon_1",
+    attackSeatId: "red_attack_1",
+    groundSeatId: "red_ground_1",
+    targetId: contact.targetId,
+    correlationId,
+  }, requestId);
+  const taskResult = await commander.waitForAfter(resultStart,
+    message => message.type === "vmfTaskResult" && message.payload?.requestId === requestId,
+    10000, "task result");
+  assert(taskResult.payload.code === "OK"
+    && ["accepted", "blocked"].includes(taskResult.payload.status),
+  `指挥席创建严格 VMF 任务失败: ${taskResult.payload.code}`);
+  await commander.waitForAfter(resultStart, message => message.type === "state"
+    && taskFromState(message.payload, taskId)?.stage === "targetReported", 15000, "task stage");
+
+  const cooldownEnded = await commander.waitForAfter(scanStartedIndex + 1,
+    message => message.type === "state"
+      && scanCooldown(message.payload, reconSeat.unitId) !== null
+      && scanCooldown(message.payload, reconSeat.unitId) <= 0.05, 60000, "cooldown ended");
+  const cooldownEndedIndex = commander.messages.indexOf(cooldownEnded);
+  const cooldownEndedAt = Number(cooldownEnded.payload.roomState.simTime || 0);
+  const afterCooldown = await commander.waitForAfter(cooldownEndedIndex + 1,
+    message => message.type === "state"
+      && message.payload?.roomState?.phase === "running"
+      && Number(message.payload.roomState.simTime || 0) >= cooldownEndedAt + 2, 10000,
+    "post-cooldown progress");
+
+  let priorCooldown = 0;
+  let scanActivations = 0;
+  for (const message of commander.messages.slice(runStart)) {
+    if (message.type !== "state") continue;
+    const cooldown = scanCooldown(message.payload, reconSeat.unitId);
+    if (cooldown === null) continue;
+    if (cooldown > 0.1 && priorCooldown <= 0.1) ++scanActivations;
+    priorCooldown = cooldown;
+  }
+  assert(scanActivations === 1,
+    `自动侦察跨冷却周期重复释放，检测到 ${scanActivations} 次冷却上升`);
+
+  const simulationElapsed = Number(afterCooldown.payload.roomState.simTime || 0)
+    - simulationStartedAt;
+  const wallElapsed = (Date.now() - wallStartedAt) / 1000;
+  const clockRatio = simulationElapsed / Math.max(0.001, wallElapsed);
+  assert(simulationElapsed >= 45 && clockRatio >= 0.7 && clockRatio <= 1.4,
+    `推演时钟推进异常: sim=${simulationElapsed.toFixed(2)}s, wall=${wallElapsed.toFixed(2)}s`);
+  assert(taskFromState(afterCooldown.payload, taskId), "长时运行后严格 VMF 任务状态丢失");
+
+  console.log("VMF 运行态联网验收通过：自动侦察仅释放 1 次，侦察目标可创建任务，"
+    + `任务已进入目标报告阶段；sim=${simulationElapsed.toFixed(2)}s, `
+    + `wall=${wallElapsed.toFixed(2)}s, ratio=${clockRatio.toFixed(3)}, `
+    + `intel=${afterCooldown.payload.intelState?.records?.length || 0}。`);
 }
 
 async function main() {
   const tempDirectory = await mkdtemp(join(tmpdir(), "wargame-vmf-smoke-"));
   const suffix = `vmf${Date.now().toString(36)}`;
   const password = `Smoke-${suffix}-Pass`;
-  const accountSpecs = [
-    ["redCommander", "red_commander", "红方指挥官"],
-    ["blueCommander", "blue_commander", "蓝方指挥官"],
-    ["redRecon", "red_recon_1", "红方侦察机"],
-    ["redAttack", "red_attack_1", "红方攻击机"],
-    ["redGround", "red_ground_1", "红方地面分队"],
-    ["observer", null, "观摩人员"],
-  ];
+  const accountSpecs = runtimeOnly
+    ? [["redCommander", "red_commander", "红方指挥官"]]
+    : [
+      ["redCommander", "red_commander", "红方指挥官"],
+      ["redRecon", "red_recon_1", "红方侦察机"],
+      ["redAttack", "red_attack_1", "红方攻击机"],
+      ["redGround", "red_ground_1", "红方地面分队"],
+      ["observer", null, "观摩人员"],
+    ];
   const accounts = accountSpecs.map(([key, seatId, displayName]) => ({
     key, seatId, username: `${suffix}-${key}`, display_name: displayName,
     password, enabled: true,
@@ -259,6 +427,14 @@ async function main() {
       }, adminToken);
       createdUsers.push(created.user);
     }
+    const roomDirectory = await request("/api/admin/rooms", {}, adminToken);
+    const currentRoom = roomDirectory.rooms?.find(item => item.roomId === "main");
+    if (currentRoom && currentRoom.status !== "stopped" && currentRoom.status !== "finished") {
+      const stop = await request("/api/admin/rooms/main/stop", { method: "POST" }, adminToken);
+      if (stop.operation?.operationId) {
+        await waitForRoomOperation(adminToken, stop.operation.operationId, "stopped");
+      }
+    }
     const open = await request("/api/admin/rooms/main/open", { method: "POST" }, adminToken);
     if (open.operation?.operationId) {
       await waitForRoomOperation(adminToken, open.operation.operationId, "preparing");
@@ -277,6 +453,10 @@ async function main() {
         method: "POST", body: JSON.stringify({ username: account.username, password }),
       });
     }
+    if (runtimeOnly) {
+      await runRuntimeAcceptance(adminToken, logins.redCommander, suffix, sessions);
+      return;
+    }
     const byKey = {};
     for (const account of accounts) {
       const session = new GameSession(account.key,
@@ -290,7 +470,6 @@ async function main() {
       "房间当前未启用 communicationPolicy.format=vmf-design-v1，请使用 VMF 场景启动服务器");
 
     await claim(byKey.redCommander, "red_commander");
-    await claim(byKey.blueCommander, "blue_commander");
     await claim(byKey.redRecon, "red_recon_1");
     await claim(byKey.redAttack, "red_attack_1");
     await claim(byKey.redGround, "red_ground_1");
@@ -300,7 +479,6 @@ async function main() {
     unitIds.recon = await deploy(redCommander, "red_recon_1", { x: 3000, y: 7500, alt: 3000 });
     unitIds.attack = await deploy(redCommander, "red_attack_1", { x: 4000, y: 7500, alt: 2000 });
     unitIds.ground = await deploy(redCommander, "red_ground_1", { x: 5000, y: 7500, alt: 0 });
-    await deploy(byKey.blueCommander, "blue_commander", { x: 18000, y: 7500, alt: 50 });
 
     const correlationId = `guided-${suffix}`;
     let traceCounter = 0;
@@ -314,8 +492,11 @@ async function main() {
         wireBitLength: fixture.wireBitLength, requiresAck: true, retryCount: 0,
         fieldCount: 0, payload,
       });
-      const event = await session.waitFor(message => session.messages.indexOf(message) >= start
-        && message.type === "vmfEvent" && message.payload?.traceId === traceId);
+      const event = await session.waitForAfter(start, message =>
+        (message.type === "vmfEvent" && message.payload?.traceId === traceId)
+        || message.type === "error");
+      assert(event.type === "vmfEvent",
+        `${messageType} 被拒绝: ${event.payload?.code || "UNKNOWN"}: ${event.payload?.message || ""}`);
       assert(event.payload.acked === true, `${messageType} 未得到自动 ACK`);
       return traceId;
     };
@@ -389,7 +570,7 @@ async function main() {
       && message.payload?.code === "VMF_SEQUENCE_INVALID");
     byKey.observer.send("vmfMessage", duplicatePayload);
     await byKey.observer.waitFor(message => message.type === "error"
-      && message.payload?.code === "SEAT_REQUIRED");
+      && message.payload?.code === "OBSERVER_READ_ONLY");
     console.log("VMF 引导打击联网验收通过：目录映射、ACK、工作流、重复 trace、角色/归属校验和观察员脱敏均正常。");
   } finally {
     for (const session of sessions) session.close();

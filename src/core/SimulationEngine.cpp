@@ -26,6 +26,8 @@ constexpr size_t kMaxSchedulePoints = 512;
 constexpr qsizetype kMaxUnitIdLength = 64;
 constexpr qsizetype kMaxCallsignLength = 128;
 constexpr double kMaxMapExtentMeters = 1'000'000.0;
+constexpr double kMaxRealtimeStepSeconds = 0.5;
+constexpr double kMaxRealtimeDebtSeconds = 10.0;
 
 bool isKnownKind(const QString& kind) {
     return kind == QLatin1String("commandpost")
@@ -189,6 +191,7 @@ SimulationEngine::SimulationEngine(ITransport* transport, QObject* parent)
     }
 
     m_timer.setInterval(50);
+    m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, &QTimer::timeout, this, [this](){ onTickInternal(false, 0.0); });
     // Forward bus emissions through the transport sink so the engine's
     // message cache and QML signals stay in sync regardless of which
@@ -679,13 +682,15 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
         m_replayCommands.clear();
         m_replaySteps.clear();
         m_replayCheckpoints.clear();
-        m_replayInitialScenario = m_scenario;
-        m_replayInitialSeed = m_battleSeed;
+        m_replayInitialScenario = m_replayRecordingEnabled ? m_scenario : Scenario{};
+        m_replayInitialSeed = m_replayRecordingEnabled ? m_battleSeed : 0;
         m_lastReplayCheckpointTime = 0.0;
         m_recordedDuration = 0.0;
-        m_recordedFinalSnapshot = collectAllUnitsSnapshot();
-        m_recordedFinalProjectiles = projectilesSnapshot();
-        captureReplayCheckpoint();
+        m_recordedFinalSnapshot = m_replayRecordingEnabled
+            ? collectAllUnitsSnapshot() : QJsonArray{};
+        m_recordedFinalProjectiles = m_replayRecordingEnabled
+            ? projectilesSnapshot() : QJsonArray{};
+        if (m_replayRecordingEnabled) captureReplayCheckpoint();
         appendTimeline(QStringLiteral("system"), QStringLiteral("场景已加载"),
                        QJsonObject{{QStringLiteral("unitCount"),
                                     static_cast<qint64>(m_units.size())}});
@@ -819,14 +824,43 @@ void SimulationEngine::setRunning(bool r) {
     }
     if (m_running == r) return;
     m_running = r;
-    if (m_running) m_timer.start();
-    else m_timer.stop();
+    if (m_running) {
+        m_realtimeDebtSeconds = 0.0;
+        m_realtimeTick.start();
+        m_timer.start();
+    } else {
+        m_timer.stop();
+        m_realtimeTick.invalidate();
+        m_realtimeDebtSeconds = 0.0;
+    }
     emit runningChanged();
     if (!m_replaying) {
         appendTimeline(QStringLiteral("control"),
                        r ? QStringLiteral("推演开始/继续")
                          : QStringLiteral("推演暂停"));
     }
+}
+
+void SimulationEngine::setReplayRecordingEnabled(bool enabled) {
+    if (m_replayRecordingEnabled == enabled) return;
+    m_replayRecordingEnabled = enabled;
+    if (enabled) {
+        m_replayInitialScenario = m_scenario;
+        m_replayInitialSeed = m_battleSeed;
+        m_recordedDuration = simTime();
+        m_recordedFinalSnapshot = collectAllUnitsSnapshot();
+        m_recordedFinalProjectiles = projectilesSnapshot();
+        captureReplayCheckpoint();
+        return;
+    }
+    m_replayInitialScenario = {};
+    m_replayInitialSeed = 0;
+    m_replayCommands.clear();
+    m_replaySteps.clear();
+    m_replayCheckpoints.clear();
+    m_recordedDuration = 0.0;
+    m_recordedFinalSnapshot = {};
+    m_recordedFinalProjectiles = {};
 }
 
 void SimulationEngine::setSideFrozen(const QString& side, bool frozen) {
@@ -851,6 +885,8 @@ void SimulationEngine::setSpeedMul(double m) {
     if (!std::isfinite(m)) return;
     m = std::clamp(m, 0.0, 8.0);
     if (m_clock->speedMul() == m) return;
+    m_realtimeDebtSeconds = 0.0;
+    if (m_running && m_realtimeTick.isValid()) m_realtimeTick.restart();
     m_clock->setSpeedMul(m);
     emit speedMulChanged();
 }
@@ -875,7 +911,23 @@ void SimulationEngine::flushDirtyUnits() {
 }
 
 void SimulationEngine::onTickInternal(bool manual, double manualDt) {
-    const double dt = manual ? manualDt : m_clock->tickInterval() * m_clock->speedMul();
+    double dt = manualDt;
+    if (!manual) {
+        if (!m_realtimeTick.isValid()) {
+            m_realtimeTick.start();
+            return;
+        }
+        const double wallSeconds = static_cast<double>(m_realtimeTick.nsecsElapsed()) / 1e9;
+        m_realtimeTick.restart();
+        // A busy projection or durable write must not permanently slow the
+        // authoritative clock. Retain bounded debt while limiting each step,
+        // so a suspended process cannot jump several seconds in one iteration.
+        m_realtimeDebtSeconds = std::min(
+            kMaxRealtimeDebtSeconds,
+            m_realtimeDebtSeconds + wallSeconds * m_clock->speedMul());
+        dt = std::min(kMaxRealtimeStepSeconds, m_realtimeDebtSeconds);
+        m_realtimeDebtSeconds = std::max(0.0, m_realtimeDebtSeconds - dt);
+    }
     if (!manual && dt <= 0.0) return;
     m_clock->advance(dt);
     if (m_transport && m_transport->bus()) {
@@ -903,7 +955,7 @@ void SimulationEngine::onTickInternal(bool manual, double manualDt) {
 
     checkWinLoseCondition();
 
-    if (!m_replaying) {
+    if (!m_replaying && m_replayRecordingEnabled) {
         m_replaySteps.push_back(ReplayStep{simTime() - dt, dt});
         m_recordedDuration = std::max(m_recordedDuration, simTime());
         m_recordedFinalSnapshot = collectAllUnitsSnapshot();
@@ -1964,8 +2016,10 @@ CommandResult SimulationEngine::executeCommand(const QString& action, const QVar
                                      m_lastError);
     }
     if (!m_replaying) {
-        m_replayCommands.push_back(ReplayCommand{simTime(), ++m_replayCommandSequence,
-                                                  action, args});
+        if (m_replayRecordingEnabled) {
+            m_replayCommands.push_back(ReplayCommand{simTime(), ++m_replayCommandSequence,
+                                                      action, args});
+        }
         appendTimeline(QStringLiteral("command"), QStringLiteral("命令已接受"),
                        QJsonObject{{QStringLiteral("action"), action},
                                    {QStringLiteral("args"),
@@ -2937,6 +2991,8 @@ void SimulationEngine::applyRemoteRuntimeState(const QJsonArray& units, double s
                                                bool running, double speedMul,
                                                bool partial) {
     m_timer.stop();
+    m_realtimeTick.invalidate();
+    m_realtimeDebtSeconds = 0.0;
     const bool runningChangedValue = m_running != running;
     const bool speedChangedValue = m_clock->speedMul() != speedMul;
     m_running = running;
@@ -3245,7 +3301,11 @@ bool SimulationEngine::restoreCheckpointState(const QJsonArray& units,
         || !SnapshotCodec::decodeGlobalCheckpoint(*this, globalState, &restoreError)) {
         SnapshotCodec::decodeCheckpointUnits(*this, rollbackState, nullptr);
         SnapshotCodec::decodeGlobalCheckpoint(*this, rollbackGlobalState, nullptr);
-        if (wasRunning) m_timer.start();
+        if (wasRunning) {
+            m_realtimeDebtSeconds = 0.0;
+            m_realtimeTick.start();
+            m_timer.start();
+        }
         if (error) *error = restoreError;
         return false;
     }
@@ -3253,7 +3313,14 @@ bool SimulationEngine::restoreCheckpointState(const QJsonArray& units,
     m_clock->setSpeedMul(speedMul);
     applyFrozenSidePolicy();
     m_running = running && m_readyForSim;
-    if (m_running) m_timer.start();
+    if (m_running) {
+        m_realtimeDebtSeconds = 0.0;
+        m_realtimeTick.start();
+        m_timer.start();
+    } else {
+        m_realtimeTick.invalidate();
+        m_realtimeDebtSeconds = 0.0;
+    }
     emit runningChanged();
     emit speedMulChanged();
     emit simTimeChanged();
@@ -3330,7 +3397,7 @@ void SimulationEngine::appendTimeline(const QString& category, const QString& ti
 }
 
 void SimulationEngine::captureReplayCheckpoint() {
-    if (m_replaying) return;
+    if (m_replaying || !m_replayRecordingEnabled) return;
     m_replayCheckpoints.push_back(ReplayCheckpoint{
         simTime(), static_cast<qsizetype>(m_replayCommands.size()),
         static_cast<qsizetype>(m_replaySteps.size()), collectCheckpointState(),
@@ -3343,12 +3410,17 @@ void SimulationEngine::captureReplayCheckpoint() {
 }
 
 double SimulationEngine::replayDuration() const {
+    if (!m_replayRecordingEnabled) return 0.0;
     return std::max(m_recordedDuration,
                     m_replayCommands.empty() ? 0.0 : m_replayCommands.back().time);
 }
 
 bool SimulationEngine::seekReplay(double targetTime, QString* error) {
     if (error) error->clear();
+    if (!m_replayRecordingEnabled) {
+        if (error) *error = QStringLiteral("当前引擎未启用本地回放记录");
+        return false;
+    }
     if (!std::isfinite(targetTime) || targetTime < 0.0
         || targetTime > replayDuration() + 1e-6) {
         if (error) *error = QStringLiteral("回放时间超出可用范围");

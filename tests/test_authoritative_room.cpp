@@ -3267,7 +3267,10 @@ TEST(GameServerObserverTest, AuthenticatedPlayerCanSelectObserverRoleOverWebSock
     QWebSocket* socket = server.m_clients.keys().constFirst();
     sendClientEnvelope(client, QStringLiteral("auth"), QStringLiteral("observer-auth"),
                        QJsonObject{{QStringLiteral("token"), QStringLiteral("observer-token")}});
-    ASSERT_TRUE(waitFor([&server, socket]() { return server.m_clients.value(socket).authenticated; }));
+    ASSERT_TRUE(waitFor([&server, socket]() {
+        return server.m_clients.contains(socket)
+            && server.m_clients.value(socket).authenticated;
+    }, 5000));
     sendClientEnvelope(client, QStringLiteral("joinRoom"), QStringLiteral("observer-join"),
                        QJsonObject{{QStringLiteral("roomId"), server.m_roomId},
                                    {QStringLiteral("asObserver"), true}});
@@ -3286,7 +3289,7 @@ TEST(GameServerObserverTest, AuthenticatedPlayerCanSelectObserverRoleOverWebSock
                 .value(QStringLiteral("roomState")).toObject()
                 .value(QStringLiteral("observer")).toBool();
         });
-    });
+    }, 5000);
     ASSERT_TRUE(observerJoined);
     EXPECT_TRUE(server.m_clients.value(socket).observer);
     EXPECT_EQ(server.m_clients.value(socket).roomId, server.m_roomId);
@@ -4047,6 +4050,71 @@ TEST(GameServerStrictVmfTest, PlayerTakesAutomatedSeatDuringPreparation) {
     EXPECT_EQ(claimed.unitId, automated.unitId);
 }
 
+TEST(GameServerStrictVmfTest, PlayerTakesProvisionedAutomatedSeatBeyondConfiguredCapacity) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    Scenario configured = server.m_runInitialScenario;
+    std::erase_if(configured.units, [](const ScenarioUnit& unit) {
+        return unit.side == QLatin1String("red")
+            && unit.kind == QLatin1String("groundscout");
+    });
+    server.m_runInitialScenario = configured;
+    ASSERT_TRUE(server.m_engine.setScenario(configured));
+    QString scenarioUnitError;
+    ASSERT_TRUE(server.m_authoritativeRoom.setScenarioUnits(
+        configured.units, &scenarioUnitError)) << scenarioUnitError.toStdString();
+    server.m_seatLimits[QStringLiteral("red_ground")] = 0;
+    QString seatLimitError;
+    ASSERT_TRUE(server.m_authoritativeRoom.setSeatLimits(server.m_seatLimits, &seatLimitError))
+        << seatLimitError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    ASSERT_TRUE(server.applyProtocolProfilePolicy());
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    server.syncAuthoritativeSeats();
+
+    const auto automated = server.m_authoritativeRoom.seat(QStringLiteral("red_ground_1"));
+    ASSERT_EQ(automated.controllerType, QStringLiteral("placeholder"));
+    ASSERT_FALSE(automated.unitId.isEmpty());
+    EXPECT_TRUE(automated.sourceUnitId.isEmpty());
+    ASSERT_NE(server.m_engine.unit(automated.unitId), nullptr);
+
+    QWebSocket socket;
+    auto& session = server.m_clients[&socket];
+    session.authenticated = true;
+    session.accountRole = QStringLiteral("player");
+    session.userId = 2;
+    session.username = QStringLiteral("ground");
+    session.roomId = server.m_roomId;
+
+    server.handleClaimSeat(
+        &socket, QJsonObject{{QStringLiteral("seatId"), QStringLiteral("red_ground_1")}});
+
+    EXPECT_EQ(session.seatId, QStringLiteral("red_ground_1"));
+    const auto claimed = server.m_authoritativeRoom.seat(QStringLiteral("red_ground_1"));
+    EXPECT_EQ(claimed.controllerType, QStringLiteral("human"));
+    EXPECT_EQ(claimed.userId, 2);
+    EXPECT_EQ(claimed.unitId, automated.unitId);
+    EXPECT_DOUBLE_EQ(claimed.position.x, automated.position.x);
+    EXPECT_DOUBLE_EQ(claimed.position.y, automated.position.y);
+    EXPECT_DOUBLE_EQ(claimed.position.alt, automated.position.alt);
+    EXPECT_NE(server.m_engine.unit(claimed.unitId), nullptr);
+
+    EXPECT_TRUE(server.m_authoritativeRoom.setSeatLimits(server.m_seatLimits, &seatLimitError))
+        << seatLimitError.toStdString();
+    server.reconcileSeatConfiguration(false);
+    const auto reconciled = server.m_authoritativeRoom.seat(QStringLiteral("red_ground_1"));
+    EXPECT_EQ(reconciled.controllerType, QStringLiteral("human"));
+    EXPECT_EQ(reconciled.userId, 2);
+    EXPECT_EQ(reconciled.unitId, automated.unitId);
+    EXPECT_EQ(session.seatId, QStringLiteral("red_ground_1"));
+}
+
 TEST(GameServerStrictVmfTest, PlayerTakesAutomatedSeatWithoutResetDuringMatch) {
     QTemporaryDir temporary;
     ASSERT_TRUE(temporary.isValid());
@@ -4212,13 +4280,32 @@ TEST(GameServerStrictVmfTest, AutomatedReconAcquiresTargetBeforeTaskCreation) {
     server.runStrictVmfAutomation();
 
     EXPECT_GT(reconUnit->scanState().cooldownRemaining, 0.0);
+    server.refreshIntelLedger();
     const QSet<QString> after = StateProjector::visibleUnitIds(
         server.m_engine, QStringLiteral("red_commander"), commander.unitId);
     EXPECT_TRUE(std::any_of(after.cbegin(), after.cend(), [&server](const QString& id) {
         const UnitBase* unit = server.m_engine.unit(id);
         return unit && unit->sideStr() == QLatin1String("blue");
     }));
+    const Protocol::IntelState& commanderIntel = server.m_intelLedger.state(
+        QStringLiteral("red_commander"));
+    EXPECT_TRUE(std::any_of(
+        commanderIntel.records.cbegin(), commanderIntel.records.cend(),
+        [&server](const Protocol::IntelContact& contact) {
+            const UnitBase* target = server.m_engine.unit(contact.targetId);
+            return contact.type == QLatin1String("sensorContact") && contact.actionable
+                && target && target->sideStr() == QLatin1String("blue");
+        }));
     EXPECT_EQ(server.m_eventSequence, 1U);
+
+    server.m_engine.setRunning(false);
+    server.m_engine.stepOnce(reconUnit->scanState().cooldownSec + 1.0);
+    server.m_engine.setRunning(true);
+    ASSERT_TRUE(reconUnit->scanState().available());
+    server.runStrictVmfAutomation();
+
+    EXPECT_EQ(server.m_eventSequence, 1U);
+    EXPECT_DOUBLE_EQ(reconUnit->scanState().cooldownRemaining, 0.0);
 }
 
 TEST(GameServerStrictVmfTest, AutomatedReconSearchesForTargetsOutsideScanRange) {

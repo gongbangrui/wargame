@@ -4,9 +4,9 @@
 
 namespace gbr {
 
-/// @brief Default clock: real-time ticks at 50ms with speedMul scaling.
-/// @details Behaviour-identical to the original pre-refactor SimulationEngine
-/// timer. speedMul = 0 pauses; speedMul = 1 advances 0.05s per real-time tick.
+/// @brief Default clock used by the real-time simulation timer.
+/// @details The engine requests a 50 ms cadence and advances this clock by
+/// monotonic elapsed wall time scaled by speedMul.
 class RealTimeClock : public IClock {
 public:
     double simTime() const override { return m_simTime; }

@@ -800,6 +800,52 @@ TEST(SimulationControllerTest, OnlineAttackTargetsRequireServerActionableSensorI
               blueIds.constFirst());
 }
 
+TEST(SimulationControllerTest, OnlineAttackTargetsIncludeServerProjectedScanContact) {
+    SimulationController controller;
+    QString targetId;
+    QJsonObject projected;
+    for (const QJsonValue& value : controller.engine()->collectAllUnitsSnapshot()) {
+        const QJsonObject unit = value.toObject();
+        if (unit.value(QStringLiteral("side")).toString() == QLatin1String("blue")
+            && unit.value(QStringLiteral("alive")).toBool()) {
+            targetId = unit.value(QStringLiteral("id")).toString();
+            projected = unit;
+            break;
+        }
+    }
+    ASSERT_FALSE(targetId.isEmpty());
+    projected[QStringLiteral("status")] = QStringLiteral("已探测");
+    controller.engine()->applyRemoteRuntimeState(QJsonArray{projected}, 1.0, true, 1.0, true);
+    ASSERT_EQ(controller.engine()->unitSnapshot(targetId)
+                  .value(QStringLiteral("status")).toString(),
+              QStringLiteral("已探测"));
+    bool projectedContactPresent = false;
+    for (const QJsonValue& value : controller.engine()->collectAllUnitsSnapshot()) {
+        const QJsonObject unit = value.toObject();
+        if (unit.value(QStringLiteral("id")).toString() == targetId
+            && unit.value(QStringLiteral("status")).toString() == QStringLiteral("已探测")) {
+            projectedContactPresent = true;
+        }
+    }
+    ASSERT_TRUE(projectedContactPresent);
+    ASSERT_TRUE(controller.engine()->unitSnapshot(targetId)
+                    .value(QStringLiteral("alive")).toBool());
+    ASSERT_EQ(controller.engine()->unitSnapshot(targetId)
+                  .value(QStringLiteral("side")).toString(),
+              QStringLiteral("blue"));
+    SimulationControllerTestPeer::seedOnlineIntelRecords(controller, {});
+    ASSERT_TRUE(controller.isNetworked());
+    ASSERT_EQ(controller.engine()->unitSnapshot(targetId)
+                  .value(QStringLiteral("status")).toString(),
+              QStringLiteral("已探测"));
+
+    const QVariantList targets = controller.detectedEnemyOptions(
+        QString(), QStringLiteral("red"), QStringLiteral("blue"));
+
+    ASSERT_EQ(targets.size(), 1);
+    EXPECT_EQ(targets.constFirst().toMap().value(QStringLiteral("id")).toString(), targetId);
+}
+
 TEST(SimulationControllerTest, ResetIntelHistoryRejectsLatePageFromPreviousSession) {
     SimulationController controller;
     SimulationControllerTestPeer::seedPendingIntelHistory(

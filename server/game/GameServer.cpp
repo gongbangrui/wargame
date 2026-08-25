@@ -618,6 +618,7 @@ GameServer::GameServer(QObject* parent)
       m_persistence(env("CHECKPOINT_PATH", QDir(m_dataDir).filePath(QStringLiteral("room-checkpoint.json"))),
                     env("COMMAND_LOG_PATH", QDir(m_dataDir).filePath(QStringLiteral("room-commands.jsonl"))), m_dataDir),
       m_roomId(env("GAME_ROOM_ID", QStringLiteral("main"))) {
+    m_engine.setReplayRecordingEnabled(false);
     m_server.setMaxPendingConnections(kMaxPendingConnections);
     m_seatLimits = seatLimitsForScenario(ScenarioIo::defaultScenario());
     QString seatLimitError;
@@ -886,7 +887,14 @@ GameServer::GameServer(QObject* parent)
                 handleFastDdsEnvelope(topic, payload);
             });
 
-    m_snapshotTimer.setInterval(100);
+    // Projection builds a complete permission-filtered state and may encode
+    // a sizeable delta.  Running it ten times per second monopolizes the
+    // event loop during an active VMF room, while a 200 ms cadence still
+    // keeps unit movement and ability cooldowns smooth to clients.
+    const int snapshotIntervalMs = qEnvironmentVariableIntValue(
+        "WARGAME_SNAPSHOT_INTERVAL_MS");
+    m_snapshotTimer.setInterval(snapshotIntervalMs >= 50
+                                    ? snapshotIntervalMs : 200);
     connect(&m_snapshotTimer, &QTimer::timeout, this,
             [this]() {
                 if (m_phase != QLatin1String("running") || !m_engine.running()) return;
@@ -905,7 +913,16 @@ GameServer::GameServer(QObject* parent)
     connect(&m_presenceTimer, &QTimer::timeout, this, &GameServer::reportRoomPresence);
     m_monitorStatusTimer.setInterval(1000);
     connect(&m_monitorStatusTimer, &QTimer::timeout, this, &GameServer::writeMonitorStatus);
-    m_checkpointTimer.setInterval(10000);
+    // Checkpoint serialization performs a durable atomic write and fsync on
+    // the server's event-loop thread.  A short interval can starve the
+    // simulation timer under slow container or network volumes, making the
+    // authoritative countdown visibly lag.  Commands and lifecycle changes
+    // still persist immediately; this periodic checkpoint is only the
+    // bounded crash-recovery safety net.
+    const int checkpointIntervalMs = qEnvironmentVariableIntValue(
+        "WARGAME_CHECKPOINT_INTERVAL_MS");
+    m_checkpointTimer.setInterval(checkpointIntervalMs >= 5000
+                                      ? checkpointIntervalMs : 30000);
     connect(&m_checkpointTimer, &QTimer::timeout, this, [this]() {
         QString error;
         if (!persistRoomState(&error)) {
@@ -1138,8 +1155,14 @@ void GameServer::reconcileSeatConfiguration(bool resetReadinessForParameterChang
     for (const AuthoritativeRoom::Seat& seat : seats) {
         const SeatDescriptor descriptor = describeSeat(seat.seatId);
         const int capacity = m_seatLimits.value(descriptor.baseId, 0);
+        const bool provisionedVmfSeat =
+            m_protocolProfile == QLatin1String("vmf-guided-strike-v1")
+            && descriptor.side == QLatin1String("red") && descriptor.index == 1
+            && (descriptor.type == QLatin1String("recon")
+                || descriptor.type == QLatin1String("attack")
+                || descriptor.type == QLatin1String("ground"));
         if (descriptor.side.isEmpty() || descriptor.type.isEmpty()
-            || descriptor.index > capacity) {
+            || (!provisionedVmfSeat && descriptor.index > capacity)) {
             if (m_authoritativeRoom.removeUser(seat.userId)) {
                 revokedUsers.insert(seat.userId);
                 if (!seat.unitId.isEmpty()) revokedUnitIds.append(seat.unitId);
@@ -3011,7 +3034,11 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
         sendError(socket, QStringLiteral("SEAT_NOT_FOUND"), QStringLiteral("战位不存在"));
         return;
     }
-    if (capacity == 0 || descriptor.index > capacity
+    const bool provisionedVmfTakeover = placeholderTakeover && descriptor.index == 1
+        && (descriptor.type == QLatin1String("recon")
+            || descriptor.type == QLatin1String("attack")
+            || descriptor.type == QLatin1String("ground"));
+    if ((!provisionedVmfTakeover && (capacity == 0 || descriptor.index > capacity))
         || (descriptor.type == QLatin1String("commander") && descriptor.index != 1)) {
         sendError(socket, QStringLiteral("SEAT_NOT_FOUND"), QStringLiteral("战位不存在或已超出房间容量"));
         return;
@@ -3047,10 +3074,14 @@ void GameServer::handleClaimSeat(QWebSocket* socket, const QJsonObject& payload)
                                                : QStringLiteral("jammeruav"));
     GeoPos initialPosition;
     QString initialPositionError;
-    if (!livePlaceholderTakeover
-        && !initialPositionForSeat(seatId, &initialPosition, &initialPositionError)) {
-        sendError(socket, QStringLiteral("INITIAL_UNIT_MISSING"), initialPositionError);
-        return;
+    if (!livePlaceholderTakeover) {
+        if (placeholderTakeover && requestedTakeoverSeat.deployed) {
+            initialPosition = requestedTakeoverSeat.position;
+        } else if (!initialPositionForSeat(seatId, &initialPosition,
+                                           &initialPositionError)) {
+            sendError(socket, QStringLiteral("INITIAL_UNIT_MISSING"), initialPositionError);
+            return;
+        }
     }
     if (!session.seatId.isEmpty() && session.seatId != seatId) {
         const QJsonObject beforeRoom = m_authoritativeRoom.toJson();
@@ -5051,6 +5082,15 @@ void GameServer::runStrictVmfAutomation() {
         }
         UnitBase* scanner = m_engine.unit(seat.unitId);
         if (!scanner || !scanner->alive() || scanner->kind() != UnitKind::ReconUAV) continue;
+        const bool hasPriorContact = std::any_of(
+            m_intelLedger.state(seatId).records.cbegin(),
+            m_intelLedger.state(seatId).records.cend(),
+            [this, scanner](const Protocol::IntelContact& contact) {
+                const UnitBase* target = m_engine.unit(contact.targetId);
+                return contact.type == QLatin1String("sensorContact") && target
+                    && target->alive() && target->side() != scanner->side();
+            });
+        if (hasPriorContact) continue;
         const QSet<QString> visible = StateProjector::sensorVisibleUnitIds(
             m_engine, seat.seatId, scanner->id());
         const bool hostileVisible = std::any_of(
@@ -8783,13 +8823,23 @@ QJsonObject GameServer::projectedIntelState(const ClientSession& session) const 
 void GameServer::refreshIntelLedger() {
     if (m_roomId.isEmpty()) return;
     const QDateTime now = QDateTime::currentDateTimeUtc();
-    bool changed = m_intelLedger.advance(now) > 0;
+    m_intelLedger.advance(now);
+    QHash<QString, QStringList> activeScanSources;
+    for (const QJsonValue& value : m_engine.activeScanContacts()) {
+        const QJsonObject scan = value.toObject();
+        const QString side = scan.value(QStringLiteral("side")).toString();
+        const QString targetId = scan.value(QStringLiteral("targetId")).toString();
+        const QString scannerId = scan.value(QStringLiteral("scannerId")).toString();
+        if (!side.isEmpty() && !targetId.isEmpty() && !scannerId.isEmpty()) {
+            activeScanSources[side + QLatin1Char('\0') + targetId].append(scannerId);
+        }
+    }
     QStringList seatIds = m_authoritativeRoom.seats().keys();
     seatIds.sort();
     for (const QString& seatId : seatIds) {
         const AuthoritativeRoom::Seat seat = m_authoritativeRoom.seat(seatId);
         if (seat.side.isEmpty() || seat.unitId.isEmpty() || !seat.connected) continue;
-        const QSet<QString> visible = StateProjector::sensorVisibleUnitIds(
+        const QSet<QString> visible = StateProjector::visibleUnitIds(
             m_engine, seatId, seat.unitId);
         for (const QString& targetId : visible) {
             UnitBase* target = m_engine.unit(targetId);
@@ -8804,9 +8854,17 @@ void GameServer::refreshIntelLedger() {
             const QJsonObject known{{QStringLiteral("callsign"), runtime.value(QStringLiteral("callsign"))},
                                     {QStringLiteral("kind"), runtime.value(QStringLiteral("kind"))},
                                     {QStringLiteral("side"), runtime.value(QStringLiteral("side"))}};
-            const IntelLedger::Result result = m_intelLedger.observeSensor(
-                seatId, targetId, known, position, source->id(), now);
-            changed = changed || result.changed;
+            QString observationSourceId = source->id();
+            for (const QString& scannerId : activeScanSources.value(
+                     seat.side + QLatin1Char('\0') + targetId)) {
+                if (scannerId == source->id()
+                    || StateProjector::canTransmit(m_engine, scannerId, source->id())) {
+                    observationSourceId = scannerId;
+                    break;
+                }
+            }
+            m_intelLedger.observeSensor(
+                seatId, targetId, known, position, observationSourceId, now);
         }
     }
     m_sharedIntel.clear();
@@ -8819,7 +8877,6 @@ void GameServer::refreshIntelLedger() {
             }
         }
     }
-    if (changed) persistRoomState();
 }
 
 bool GameServer::sendEnvelope(QWebSocket* socket, const QString& type,

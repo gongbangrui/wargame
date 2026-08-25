@@ -14,6 +14,11 @@ namespace gbr {
 // replay cannot accidentally expose or retain transient QObject state.
 class IntelLedger final {
 public:
+    static constexpr qsizetype HistoryLimit = 256;
+    static constexpr double ObservationRefreshIntervalSec = 2.0;
+    static constexpr double MovementHistoryIntervalSec = 5.0;
+    static constexpr double ImmediateMovementDistanceM = 1000.0;
+
     struct Config {
         double staleAfterSec = 10.0;
         double archiveAfterSec = 120.0;
@@ -71,6 +76,9 @@ private:
     static QJsonObject positionObject(const QJsonObject& position);
     static QString contactKey(const QString& seatId, const QString& targetId);
     static bool validPosition(const QJsonObject& position);
+    static double positionDistance(const QJsonObject& left, const QJsonObject& right);
+    static const Protocol::IntelHistoryEntry* latestHistoryEntry(
+        const SeatLedger& ledger, const QString& intelId);
     void record(SeatLedger& ledger, Protocol::IntelHistoryEntry entry);
     void bump(SeatLedger& ledger);
     QHash<QString, SeatLedger> m_seats;

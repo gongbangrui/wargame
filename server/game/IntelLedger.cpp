@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace gbr {
 
@@ -82,6 +83,24 @@ bool IntelLedger::validPosition(const QJsonObject& position) {
     return std::isfinite(x) && std::isfinite(y) && x >= 0.0 && y >= 0.0;
 }
 
+double IntelLedger::positionDistance(const QJsonObject& left, const QJsonObject& right) {
+    if (!validPosition(left) || !validPosition(right)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::hypot(left.value(QStringLiteral("x")).toDouble()
+                          - right.value(QStringLiteral("x")).toDouble(),
+                      left.value(QStringLiteral("y")).toDouble()
+                          - right.value(QStringLiteral("y")).toDouble());
+}
+
+const Protocol::IntelHistoryEntry* IntelLedger::latestHistoryEntry(
+    const SeatLedger& ledger, const QString& intelId) {
+    for (auto it = ledger.history.crbegin(); it != ledger.history.crend(); ++it) {
+        if (it->intelId == intelId) return &*it;
+    }
+    return nullptr;
+}
+
 void IntelLedger::clear() { m_seats.clear(); }
 
 void IntelLedger::setConfig(const Config& config) {
@@ -125,8 +144,7 @@ void IntelLedger::record(SeatLedger& ledger, Protocol::IntelHistoryEntry entry) 
     entry.historyId = entry.historyId.isEmpty()
         ? QStringLiteral("ih_%1").arg(ledger.nextHistory++) : entry.historyId;
     ledger.history.append(std::move(entry));
-    constexpr qsizetype kMaxHistory = 20000;
-    while (ledger.history.size() > kMaxHistory) ledger.history.removeFirst();
+    while (ledger.history.size() > HistoryLimit) ledger.history.removeFirst();
 }
 
 IntelLedger::Result IntelLedger::observeSensor(const QString& seatId, const QString& targetId,
@@ -149,12 +167,35 @@ IntelLedger::Result IntelLedger::observeSensor(const QString& seatId, const QStr
     const QString now = timestamp(observedAt);
     const QJsonObject normalizedPosition = positionObject(position);
     Protocol::IntelContact* contact = findContact(ledger.state, id);
-    const bool semanticChange = !contact
+    const bool metadataChange = !contact
         || contact->knownAttributes != knownAttributes
-        || contact->lastPosition != normalizedPosition
-        || contact->freshness != QLatin1String("live")
-        || !contact->actionable
+        || contact->sourceUnitId != sourceUnitId
+        || contact->freshness != QLatin1String("live") || !contact->actionable
         || std::abs(contact->confidence - 100.0) > 0.001;
+    const double movement = contact
+        ? positionDistance(contact->lastPosition, normalizedPosition)
+        : std::numeric_limits<double>::infinity();
+    const QDateTime lastObserved = contact ? parseTimestamp(contact->lastObservedAt) : QDateTime{};
+    const double observationAge = lastObserved.isValid()
+        ? lastObserved.msecsTo(observedAt) / 1000.0
+        : std::numeric_limits<double>::infinity();
+    const bool observationDue = !contact || metadataChange
+        || observationAge >= ObservationRefreshIntervalSec
+        || movement >= ImmediateMovementDistanceM;
+    const Protocol::IntelHistoryEntry* previousHistory = contact
+        ? latestHistoryEntry(ledger, id) : nullptr;
+    const QDateTime previousHistoryAt = previousHistory
+        ? parseTimestamp(previousHistory->occurredAt) : QDateTime{};
+    const double historyAge = previousHistoryAt.isValid()
+        ? previousHistoryAt.msecsTo(observedAt) / 1000.0
+        : std::numeric_limits<double>::infinity();
+    const double historyMovement = previousHistory
+        ? positionDistance(previousHistory->position, normalizedPosition)
+        : std::numeric_limits<double>::infinity();
+    const bool historyDue = metadataChange
+        || (contact && contact->lastPosition != normalizedPosition
+            && (historyAge >= MovementHistoryIntervalSec
+                || historyMovement >= ImmediateMovementDistanceM));
     if (!contact) {
         Protocol::IntelContact created;
         created.intelId = id;
@@ -173,7 +214,7 @@ IntelLedger::Result IntelLedger::observeSensor(const QString& seatId, const QStr
                                           knownAttributes, {}};
         entry.targetId = targetId;
         record(ledger, std::move(entry));
-    } else if (semanticChange) {
+    } else if (historyDue) {
         result.code = QStringLiteral("UPDATED");
         Protocol::IntelHistoryEntry entry{{}, id, QStringLiteral("updated"), now,
                                           seatId, sourceUnitId, {}, {},
@@ -181,21 +222,25 @@ IntelLedger::Result IntelLedger::observeSensor(const QString& seatId, const QStr
                                           knownAttributes, {}};
         entry.targetId = targetId;
         record(ledger, std::move(entry));
+    } else if (observationDue) {
+        result.code = QStringLiteral("UPDATED");
     } else {
         result.code = QStringLiteral("UNCHANGED");
     }
-    contact->knownAttributes = knownAttributes;
-    contact->lastPosition = normalizedPosition;
-    contact->sourceSeatId = seatId;
-    contact->sourceUnitId = sourceUnitId;
-    contact->lastObservedAt = now;
-    contact->receivedAt = now;
-    contact->freshness = QStringLiteral("live");
-    contact->actionable = true;
-    contact->confidence = 100.0;
-    if (semanticChange) bump(ledger);
+    if (observationDue) {
+        contact->knownAttributes = knownAttributes;
+        contact->lastPosition = normalizedPosition;
+        contact->sourceSeatId = seatId;
+        contact->sourceUnitId = sourceUnitId;
+        contact->lastObservedAt = now;
+        contact->receivedAt = now;
+        contact->freshness = QStringLiteral("live");
+        contact->actionable = true;
+        contact->confidence = 100.0;
+        bump(ledger);
+    }
     result.ok = true;
-    result.changed = semanticChange;
+    result.changed = observationDue;
     result.intelId = id;
     result.affectedSeats = {seatId};
     return result;
@@ -216,6 +261,10 @@ IntelLedger::Result IntelLedger::createManualReport(const QString& seatId,
     }
     ensureSeat(seatId);
     SeatLedger& ledger = m_seats[seatId];
+    if (ledger.state.records.size() >= Protocol::MaxIntelRecords) {
+        result.code = QStringLiteral("INTEL_CAPACITY");
+        return result;
+    }
     const QString id = QStringLiteral("manual_%1_%2").arg(seatId).arg(ledger.nextIntel++);
     const QString now = timestamp(receivedAt);
     Protocol::IntelContact contact;
@@ -289,6 +338,10 @@ IntelLedger::Result IntelLedger::share(const QString& senderSeatId,
         // creating a second current record when that seat already observed it.
         current = findSensorContactByTarget(recipient.state, sourceContact.targetId);
     }
+    if (!current && recipient.state.records.size() >= Protocol::MaxIntelRecords) {
+        result.code = QStringLiteral("INTEL_CAPACITY");
+        return result;
+    }
     const QString now = timestamp(receivedAt);
     Protocol::IntelHistoryEntry sharedEntry{
         {}, intelId, QStringLiteral("shared"), now, sourceContact.sourceSeatId,
@@ -331,6 +384,9 @@ IntelLedger::Result IntelLedger::share(const QString& senderSeatId,
     propagation.append(QJsonObject{{QStringLiteral("sourceSeatId"), senderSeatId},
                                    {QStringLiteral("sourceIntelId"), intelId},
                                    {QStringLiteral("sharedAt"), now}});
+    while (propagation.size() > Protocol::MaxIntelPropagationSources) {
+        propagation.removeFirst();
+    }
     current->propagationSources = propagation;
     Protocol::IntelHistoryEntry receivedEntry{
         {}, current->intelId, QStringLiteral("received"), now, sourceContact.sourceSeatId,
@@ -497,6 +553,7 @@ bool IntelLedger::restore(const QJsonObject& object, QString* error) {
             }
             ledger.history.append(entry);
         }
+        while (ledger.history.size() > HistoryLimit) ledger.history.removeFirst();
         ledger.nextIntel = std::max<quint64>(1, value.value(QStringLiteral("nextIntel")).toInteger(1));
         ledger.nextHistory = std::max<quint64>(1, value.value(QStringLiteral("nextHistory")).toInteger(1));
         restored.insert(it.key(), std::move(ledger));

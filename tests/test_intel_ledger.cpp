@@ -40,8 +40,14 @@ TEST(IntelLedgerTest, StableSensorObservationsDoNotFloodHistory) {
     EXPECT_EQ(ledger.state("red_recon").revision, 1);
     EXPECT_EQ(ledger.history("red_recon").size(), 1);
 
+    const auto refreshed = ledger.observeSensor("red_recon", "blue_1", attributes,
+                                                position(110, 205), "red_recon_unit", atSeconds(2));
+    ASSERT_TRUE(refreshed.ok);
+    EXPECT_TRUE(refreshed.changed);
+    EXPECT_EQ(ledger.history("red_recon").size(), 1);
+
     const auto moved = ledger.observeSensor("red_recon", "blue_1", attributes,
-                                            position(120, 210), "red_recon_unit", atSeconds(2));
+                                            position(120, 210), "red_recon_unit", atSeconds(6));
     ASSERT_TRUE(moved.ok);
     EXPECT_TRUE(moved.changed);
     EXPECT_EQ(ledger.history("red_recon").size(), 2);
@@ -49,6 +55,51 @@ TEST(IntelLedgerTest, StableSensorObservationsDoNotFloodHistory) {
         "red_recon", Protocol::IntelHistoryQuery{QString(), 20, QStringLiteral("blue_1")});
     ASSERT_EQ(history.entries.size(), 2);
     EXPECT_EQ(history.entries.constFirst().targetId, QStringLiteral("blue_1"));
+}
+
+TEST(IntelLedgerTest, MovingContactsKeepBoundedSampledHistory) {
+    IntelLedger ledger;
+    const QJsonObject attributes{{QStringLiteral("callsign"), QStringLiteral("moving")},
+                                 {QStringLiteral("kind"), QStringLiteral("attackuav")}};
+    ASSERT_TRUE(ledger.observeSensor("red_recon", "blue_1", attributes,
+                                    position(0, 0), "red_recon_unit", atSeconds(0)).ok);
+
+    QDateTime observed = atSeconds(0);
+    for (int index = 1; index <= 4000; ++index) {
+        observed = observed.addMSecs(100);
+        ASSERT_TRUE(ledger.observeSensor(
+            "red_recon", "blue_1", attributes, position(index, index / 2.0),
+            "red_recon_unit", observed).ok);
+    }
+
+    EXPECT_LE(ledger.history("red_recon").size(), IntelLedger::HistoryLimit);
+    EXPECT_LT(ledger.history("red_recon").size(), 100);
+    ASSERT_EQ(ledger.state("red_recon").records.size(), 1);
+    EXPECT_GE(ledger.state("red_recon").records.constFirst()
+                  .lastPosition.value(QStringLiteral("x")).toDouble(),
+              3980.0);
+}
+
+TEST(IntelLedgerTest, RestoreTrimsLegacyOversizedHistory) {
+    IntelLedger source;
+    for (int index = 0; index < IntelLedger::HistoryLimit + 20; ++index) {
+        ASSERT_TRUE(source.createManualReport(
+            "red_ground", "obstacle", QStringLiteral("report-%1").arg(index),
+            position(index, index), {}, atSeconds(0).addSecs(index)).ok);
+    }
+    QJsonObject checkpoint = source.toJson();
+    QJsonObject seats = checkpoint.value(QStringLiteral("seats")).toObject();
+    QJsonObject seat = seats.value(QStringLiteral("red_ground")).toObject();
+    QJsonArray oversized = seat.value(QStringLiteral("history")).toArray();
+    for (int index = 0; index < 20; ++index) oversized.prepend(oversized.at(0));
+    seat[QStringLiteral("history")] = oversized;
+    seats[QStringLiteral("red_ground")] = seat;
+    checkpoint[QStringLiteral("seats")] = seats;
+
+    IntelLedger restored;
+    QString error;
+    ASSERT_TRUE(restored.restore(checkpoint, &error)) << error.toStdString();
+    EXPECT_EQ(restored.history("red_ground").size(), IntelLedger::HistoryLimit);
 }
 
 TEST(IntelLedgerTest, SensorFreshnessDecaysAndArchives) {
@@ -100,6 +151,25 @@ TEST(IntelLedgerTest, ShareRequiresSameSideAndPersistsPropagation) {
     EXPECT_EQ(ledger.state("red_attack").records.constFirst().targetId, QStringLiteral("blue_1"));
     EXPECT_EQ(ledger.state("red_attack").records.constFirst().note, QStringLiteral("handoff"));
     EXPECT_EQ(ledger.state("red_attack").records.constFirst().propagationSources.size(), 1);
+}
+
+TEST(IntelLedgerTest, RepeatedSharingKeepsProtocolValidBoundedPropagation) {
+    IntelLedger ledger;
+    ASSERT_TRUE(ledger.observeSensor("red_recon", "blue_1", {}, position(5, 6),
+                                     "red_recon_unit", atSeconds(0)).ok);
+    for (int index = 1; index <= Protocol::MaxIntelPropagationSources + 10; ++index) {
+        ASSERT_TRUE(ledger.share(
+            "red_recon", "red_attack", "red", "red", true,
+            "sensor_red_recon_blue_1", QStringLiteral("handoff-%1").arg(index),
+            atSeconds(0).addSecs(index)).ok);
+    }
+
+    ASSERT_EQ(ledger.state("red_attack").records.size(), 1);
+    EXPECT_EQ(ledger.state("red_attack").records.constFirst()
+                  .propagationSources.size(),
+              Protocol::MaxIntelPropagationSources);
+    EXPECT_TRUE(Protocol::validateIntelState(
+        ledger.state("red_attack").toJson()).valid);
 }
 
 TEST(IntelLedgerTest, ManualReportCanBeSharedWithoutBindingATarget) {

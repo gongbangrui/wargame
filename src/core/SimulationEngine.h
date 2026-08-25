@@ -20,6 +20,7 @@
 #include <QJsonArray>
 #include <QSet>
 #include <QHash>
+#include <QElapsedTimer>
 #include <QVariantList>
 #include <QVariantMap>
 #include <map>
@@ -101,6 +102,8 @@ public:
 
     void setRunning(bool r);
     bool running() const { return m_running; }
+    void setReplayRecordingEnabled(bool enabled);
+    bool replayRecordingEnabled() const { return m_replayRecordingEnabled; }
     void setSpeedMul(double m);
     double speedMul() const { return m_clock->speedMul(); }
     Q_INVOKABLE void stepOnce(double simSeconds = 1.0);
@@ -286,6 +289,8 @@ private:
     /// every schedule update / lookup.
     std::unordered_map<QString, size_t> m_scenarioIndex;
     QTimer m_timer;
+    QElapsedTimer m_realtimeTick;
+    double m_realtimeDebtSeconds = 0.0;
     QTimer m_dirtyTimer;
     bool m_running = false;
     QVariantList m_messageCache;
@@ -345,6 +350,7 @@ private:
     QJsonArray m_recordedFinalSnapshot;
     QJsonArray m_recordedFinalProjectiles;
     bool m_replaying = false;
+    bool m_replayRecordingEnabled = true;
 
     void cmdAssignTarget(const QVariantMap& args);
     void cmdSetFlightPlan(const QVariantMap& args);

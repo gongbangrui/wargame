@@ -1661,19 +1661,13 @@ QVariantList SimulationController::detectedEnemyOptions(const QString& attackerI
             const QJsonObject unit = value.toObject();
             unitsById.insert(unit.value(QStringLiteral("id")).toString(), unit);
         }
-        for (const QVariant& value : m_onlineIntelRecords) {
-            const QVariantMap contact = value.toMap();
-            if (!contact.value(QStringLiteral("actionable")).toBool()
-                || contact.value(QStringLiteral("type")).toString()
-                    != QLatin1String("sensorContact")) {
-                continue;
-            }
-            const QString targetId = contact.value(QStringLiteral("targetId")).toString();
+        const auto appendTarget = [&out, &added, &unitsById, &enemySide](
+                                      const QString& targetId) {
             const QJsonObject unit = unitsById.value(targetId);
             if (targetId.isEmpty() || added.contains(targetId) || unit.isEmpty()
                 || !unit.value(QStringLiteral("alive")).toBool()
                 || unit.value(QStringLiteral("side")).toString() != enemySide) {
-                continue;
+                return;
             }
             QVariantMap option;
             option[QStringLiteral("id")] = targetId;
@@ -1682,6 +1676,21 @@ QVariantList SimulationController::detectedEnemyOptions(const QString& attackerI
             option[QStringLiteral("side")] = unit.value(QStringLiteral("side")).toVariant();
             out.append(option);
             added.insert(targetId);
+        };
+        for (const QVariant& value : m_onlineIntelRecords) {
+            const QVariantMap contact = value.toMap();
+            if (!contact.value(QStringLiteral("actionable")).toBool()
+                || contact.value(QStringLiteral("type")).toString()
+                    != QLatin1String("sensorContact")) {
+                continue;
+            }
+            const QString targetId = contact.value(QStringLiteral("targetId")).toString();
+            appendTarget(targetId);
+        }
+        for (auto it = unitsById.cbegin(); it != unitsById.cend(); ++it) {
+            if (it->value(QStringLiteral("status")).toString() == QStringLiteral("已探测")) {
+                appendTarget(it.key());
+            }
         }
         return out;
     }

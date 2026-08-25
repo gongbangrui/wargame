@@ -2143,6 +2143,7 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
             QStringLiteral("retryCount"), QStringLiteral("acked"),
             QStringLiteral("catalogId"), QStringLiteral("trigger"),
             QStringLiteral("informationValue"),
+            QStringLiteral("senderSide"), QStringLiteral("receiverSide"),
             QStringLiteral("summary"), QStringLiteral("workflow"),
             QStringLiteral("wireBytes"), QStringLiteral("fields"),
             QStringLiteral("canonicalXml"), QStringLiteral("decodedXml"),
@@ -2173,6 +2174,8 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
                 && !validString(payload.value(QStringLiteral("trigger")), MaxIdentifierLength))
             || (payload.contains(QStringLiteral("informationValue"))
                 && !payload.value(QStringLiteral("informationValue")).isObject())
+            || !validOptionalString(payload, QStringLiteral("senderSide"), MaxIdentifierLength)
+            || !validOptionalString(payload, QStringLiteral("receiverSide"), MaxIdentifierLength)
             || (payload.contains(QStringLiteral("workflow"))
                 && !validVmfWorkflow(payload.value(QStringLiteral("workflow"))))
             || (payload.contains(QStringLiteral("wireBytes"))
