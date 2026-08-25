@@ -4981,6 +4981,124 @@ void GameServer::runStrictVmfAutomation() {
         return;
     }
 
+    const auto executeReconCommand = [this](const AuthoritativeRoom::Seat& seat,
+                                             const QString& action,
+                                             const QVariantMap& args) {
+        ClientSession automation;
+        automation.authenticated = true;
+        automation.roomId = m_roomId;
+        automation.seatId = seat.seatId;
+        automation.seatType = seat.seatType;
+        automation.side = seat.side;
+        automation.role = seat.seatId;
+        automation.username = QStringLiteral("VMF 自动侦察");
+        QString code;
+        QString reason;
+        if (!validateCommandOwnership(automation, action, args, &code, &reason)) {
+            audit(QStringLiteral("vmf"), QJsonObject{
+                {QStringLiteral("event"), QStringLiteral("reconAutomationRejected")},
+                {QStringLiteral("seatId"), seat.seatId},
+                {QStringLiteral("action"), action},
+                {QStringLiteral("code"), code},
+                {QStringLiteral("message"), reason}});
+            return false;
+        }
+        const QString commandId = QStringLiteral("vmf-recon:%1:%2")
+                                      .arg(seat.seatId)
+                                      .arg(m_eventSequence + 1);
+        const QString cacheKey = commandCacheKey(seat.controllerId, commandId);
+        QString persistenceError;
+        if (!recordDurableEvent(QStringLiteral("command"),
+                                QJsonObject{{QStringLiteral("commandId"), commandId},
+                                            {QStringLiteral("controllerType"),
+                                             QStringLiteral("placeholder")},
+                                            {QStringLiteral("controllerId"), seat.controllerId},
+                                            {QStringLiteral("seatId"), seat.seatId},
+                                            {QStringLiteral("generatedBy"),
+                                             QStringLiteral("vmf-auto")},
+                                            {QStringLiteral("action"), action},
+                                            {QStringLiteral("args"),
+                                             QJsonObject::fromVariantMap(args)}},
+                                &persistenceError)) {
+            audit(QStringLiteral("persistence"), QJsonObject{
+                {QStringLiteral("event"), QStringLiteral("reconAutomationFailed")},
+                {QStringLiteral("seatId"), seat.seatId},
+                {QStringLiteral("message"), persistenceError}});
+            return false;
+        }
+        const CommandResult result = m_engine.executeCommand(action, args);
+        QJsonObject resultPayload = result.toJson();
+        resultPayload[QStringLiteral("commandId")] = commandId;
+        resultPayload[QStringLiteral("serverTime")] = m_engine.simTime();
+        if (!m_commandResults.contains(cacheKey)) m_commandResultOrder.append(cacheKey);
+        m_commandResults.insert(cacheKey, resultPayload);
+        while (m_commandResultOrder.size() > 2048) {
+            m_commandResults.remove(m_commandResultOrder.takeFirst());
+        }
+        return result.accepted;
+    };
+
+    // A strict VMF task starts with a reconnaissance report. Automated recon
+    // seats must therefore acquire a target before any task exists, otherwise
+    // a commander-only demonstration can never leave the empty task state.
+    QStringList seatIds = m_authoritativeRoom.seats().keys();
+    seatIds.sort();
+    for (const QString& seatId : seatIds) {
+        const AuthoritativeRoom::Seat seat = m_authoritativeRoom.seat(seatId);
+        if (seat.side != QLatin1String("red") || seat.seatType != QLatin1String("recon")
+            || seat.controlMode != QLatin1String("vmf-auto")) {
+            continue;
+        }
+        UnitBase* scanner = m_engine.unit(seat.unitId);
+        if (!scanner || !scanner->alive() || scanner->kind() != UnitKind::ReconUAV) continue;
+        const QSet<QString> visible = StateProjector::sensorVisibleUnitIds(
+            m_engine, seat.seatId, scanner->id());
+        const bool hostileVisible = std::any_of(
+            visible.cbegin(), visible.cend(), [this, scanner](const QString& unitId) {
+                const UnitBase* unit = m_engine.unit(unitId);
+                return unit && unit->alive() && unit->side() != scanner->side();
+            });
+        if (hostileVisible) continue;
+
+        const UnitBase* nearestTarget = nullptr;
+        double nearestDistance = std::numeric_limits<double>::infinity();
+        for (const AuthoritativeRoom::Seat& candidate : m_authoritativeRoom.seats()) {
+            if (candidate.controlMode != QLatin1String("fixed-target")) continue;
+            const UnitBase* target = m_engine.unit(candidate.unitId);
+            if (!target || !target->alive() || target->side() == scanner->side()) continue;
+            const double distance = scanner->pos().distanceTo2D(target->pos());
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestTarget = target;
+            }
+        }
+        if (!nearestTarget) continue;
+        const double scanRange = scanner->scanState().range
+            * scanner->sensorHealth() * scanner->jamFactor();
+        if (nearestDistance <= scanRange) {
+            if (scanner->scanState().available()) {
+                executeReconCommand(
+                    seat, QStringLiteral("activateScan"),
+                    {{QStringLiteral("unitId"), scanner->id()}});
+            }
+            continue;
+        }
+        if (!scanner->schedule().empty()
+            || !scanner->checkpointState()
+                    .value(QStringLiteral("behavior")).toObject()
+                    .value(QStringLiteral("waypoints")).toArray().isEmpty()) {
+            continue;
+        }
+        const QVariantMap searchPoint{
+            {QStringLiteral("time"), m_engine.simTime()},
+            {QStringLiteral("x"), nearestTarget->pos().x},
+            {QStringLiteral("y"), nearestTarget->pos().y}};
+        const QVariantMap searchCommand{
+            {QStringLiteral("unitId"), scanner->id()},
+            {QStringLiteral("schedule"), QVariantList{searchPoint}}};
+        executeReconCommand(seat, QStringLiteral("setSchedule"), searchCommand);
+    }
+
     const auto actionForStage = [](const QString& stage) {
         static const QHash<QString, QString> actions{
             {QStringLiteral("awaitingTargetReport"), QStringLiteral("reportTarget")},

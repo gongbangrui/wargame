@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "AuthoritativeRoom.h"
+#include "StateProjector.h"
 #include "core/UnitBase.h"
 #include "protocol/Protocol.h"
 #include "protocol/StateDelta.h"
@@ -4170,6 +4171,98 @@ TEST(GameServerStrictVmfTest, RestoredLegacyRangesAreUpgradedToUnlimited) {
                             [](const ScenarioUnit& unit) {
                                 return unit.commRange == 2'000'000.0;
                             }));
+}
+
+TEST(GameServerStrictVmfTest, AutomatedReconAcquiresTargetBeforeTaskCreation) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    ASSERT_TRUE(server.applyProtocolProfilePolicy());
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.setReady(1, true).ok);
+    ASSERT_TRUE(server.applyDeployedScenario());
+    server.syncAuthoritativeSeats();
+    ASSERT_TRUE(server.m_authoritativeRoom.start().ok);
+    server.m_phase = QStringLiteral("running");
+    server.m_roomStatus = QStringLiteral("running");
+    server.m_engine.setRunning(true);
+    server.m_engine.stepOnce(0.1);
+
+    const AuthoritativeRoom::Seat commander =
+        server.m_authoritativeRoom.seat(QStringLiteral("red_commander"));
+    const AuthoritativeRoom::Seat recon =
+        server.m_authoritativeRoom.seat(QStringLiteral("red_recon_1"));
+    ASSERT_EQ(recon.controlMode, QStringLiteral("vmf-auto"));
+    UnitBase* reconUnit = server.m_engine.unit(recon.unitId);
+    ASSERT_NE(reconUnit, nullptr);
+    ASSERT_TRUE(reconUnit->scanState().available());
+    const QSet<QString> before = StateProjector::visibleUnitIds(
+        server.m_engine, QStringLiteral("red_commander"), commander.unitId);
+    EXPECT_TRUE(std::none_of(before.cbegin(), before.cend(), [&server](const QString& id) {
+        const UnitBase* unit = server.m_engine.unit(id);
+        return unit && unit->sideStr() == QLatin1String("blue");
+    }));
+
+    server.runStrictVmfAutomation();
+
+    EXPECT_GT(reconUnit->scanState().cooldownRemaining, 0.0);
+    const QSet<QString> after = StateProjector::visibleUnitIds(
+        server.m_engine, QStringLiteral("red_commander"), commander.unitId);
+    EXPECT_TRUE(std::any_of(after.cbegin(), after.cend(), [&server](const QString& id) {
+        const UnitBase* unit = server.m_engine.unit(id);
+        return unit && unit->sideStr() == QLatin1String("blue");
+    }));
+    EXPECT_EQ(server.m_eventSequence, 1U);
+}
+
+TEST(GameServerStrictVmfTest, AutomatedReconSearchesForTargetsOutsideScanRange) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    ASSERT_TRUE(server.applyProtocolProfilePolicy());
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.setReady(1, true).ok);
+    ASSERT_TRUE(server.applyDeployedScenario());
+    server.syncAuthoritativeSeats();
+    ASSERT_TRUE(server.m_authoritativeRoom.start().ok);
+    server.m_phase = QStringLiteral("running");
+    server.m_roomStatus = QStringLiteral("running");
+    server.m_engine.setRunning(true);
+
+    const AuthoritativeRoom::Seat recon =
+        server.m_authoritativeRoom.seat(QStringLiteral("red_recon_1"));
+    UnitBase* reconUnit = server.m_engine.unit(recon.unitId);
+    ASSERT_NE(reconUnit, nullptr);
+    reconUnit->setPosition(GeoPos{0.0, 0.0, reconUnit->pos().alt});
+    reconUnit->setSchedule({});
+    for (const AuthoritativeRoom::Seat& seat : server.m_authoritativeRoom.seats()) {
+        if (seat.controlMode != QLatin1String("fixed-target")) continue;
+        UnitBase* target = server.m_engine.unit(seat.unitId);
+        ASSERT_NE(target, nullptr);
+        target->setPosition(GeoPos{20000.0, 15000.0, target->pos().alt});
+    }
+    server.m_engine.stepOnce(0.1);
+    ASSERT_TRUE(reconUnit->schedule().empty());
+
+    server.runStrictVmfAutomation();
+
+    ASSERT_EQ(reconUnit->schedule().size(), 1U);
+    EXPECT_DOUBLE_EQ(reconUnit->schedule().front().x, 20000.0);
+    EXPECT_DOUBLE_EQ(reconUnit->schedule().front().y, 15000.0);
+    EXPECT_DOUBLE_EQ(reconUnit->scanState().cooldownRemaining, 0.0);
+    EXPECT_EQ(server.m_eventSequence, 1U);
 }
 
 TEST(GameServerPveLifecycleTest, DeploysAiBeforeRedCommanderReadiness) {
