@@ -41,6 +41,61 @@ constexpr qint64 kDdsTicketLifetimeMs = 120000;
 constexpr int kAiProviderPlanGraceMs = 1000;
 constexpr double kVmfUnlimitedCommunicationRangeM = 2'000'000.0;
 
+QJsonArray strictVmfAttackRoute(const UnitBase* attacker, const UnitBase* target,
+                                double mapWidth, double mapHeight) {
+    const auto* attack = qobject_cast<const AttackUAV*>(attacker);
+    if (!attack || !target || !std::isfinite(mapWidth) || !std::isfinite(mapHeight)
+        || mapWidth <= 0.0 || mapHeight <= 0.0) {
+        return {};
+    }
+    const double minimum = attack->minimumAttackRange();
+    const double maximum = attack->attackRange();
+    if (!std::isfinite(minimum) || !std::isfinite(maximum)
+        || maximum <= minimum + 1.0) {
+        return {};
+    }
+    const double margin = std::max(25.0, (maximum - minimum) * 0.05);
+    const double radius = std::clamp(attack->optimalAttackRange(),
+                                     minimum + margin, maximum - margin);
+    const GeoPos origin = attacker->pos();
+    const GeoPos destination = target->pos();
+    constexpr double kPi = 3.14159265358979323846;
+    QList<double> bearings{std::atan2(origin.y - destination.y,
+                                     origin.x - destination.x)};
+    for (int index = 0; index < 16; ++index) {
+        bearings.append(2.0 * kPi * static_cast<double>(index) / 16.0);
+    }
+
+    double bestX = 0.0;
+    double bestY = 0.0;
+    double bestScore = std::numeric_limits<double>::infinity();
+    for (const double bearing : bearings) {
+        const double x = destination.x + std::cos(bearing) * radius;
+        const double y = destination.y + std::sin(bearing) * radius;
+        if (x < 0.0 || y < 0.0 || x > mapWidth || y > mapHeight) continue;
+        const double dx = x - origin.x;
+        const double dy = y - origin.y;
+        const double score = dx * dx + dy * dy;
+        if (score < bestScore) {
+            bestScore = score;
+            bestX = x;
+            bestY = y;
+        }
+    }
+    if (!std::isfinite(bestScore)) return {};
+    return {QJsonObject{{QStringLiteral("x"), bestX},
+                        {QStringLiteral("y"), bestY}}};
+}
+
+QVariantList routeWaypoints(const QJsonArray& route) {
+    QVariantList waypoints;
+    waypoints.reserve(route.size());
+    for (const QJsonValue& value : route) {
+        waypoints.append(value.toObject().toVariantMap());
+    }
+    return waypoints;
+}
+
 QJsonObject payloadForWireVersion(const QString& type, const QJsonObject& payload,
                                   int schemaVersion) {
     QJsonObject compatible = payload;
@@ -244,9 +299,27 @@ QJsonObject addServerVmfDedupe(const QJsonObject& stateObject,
     vmf::RuntimeState state;
     QString error;
     if (!vmf::RuntimeState::fromJson(stateObject, &state, &error)) return stateObject;
+
+    // Preserve the existing order semantics without calling rememberMessageId()
+    // once per server id.  The repeated remove-and-append path is quadratic and
+    // can monopolize the event loop when a restored room has thousands of ids.
     QStringList ordered = ids.values();
     ordered.sort();
-    for (const QString& id : ordered) state.rememberMessageId(id);
+    QStringList merged;
+    merged.reserve(state.seenMessageIds.size() + ordered.size());
+    for (const QJsonValue& value : state.seenMessageIds) {
+        const QString id = value.toString();
+        if (!id.isEmpty() && !ids.contains(id)) merged.append(id);
+    }
+    for (const QString& id : ordered) {
+        if (!id.isEmpty()) merged.append(id);
+    }
+    const qsizetype first = std::max<qsizetype>(
+        0, merged.size() - vmf::RuntimeState::MaxSeenMessageIds);
+    state.seenMessageIds = {};
+    for (qsizetype index = first; index < merged.size(); ++index) {
+        state.seenMessageIds.append(merged.at(index));
+    }
     return state.toJson();
 }
 
@@ -4026,9 +4099,13 @@ bool GameServer::validateCommandOwnership(const ClientSession& session, const QS
     }
     if (action == QLatin1String("setFlightPlan")) {
         const QVariantList waypoints = args.value(QStringLiteral("waypoints")).toList();
-        if (waypoints.isEmpty() || waypoints.size() > kMaxSchedulePoints) {
+        if (waypoints.isEmpty()) {
             return reject(QStringLiteral("INVALID_ARGUMENT"),
-                          QStringLiteral("航路不能为空且不能超过 512 个航点"));
+                          QStringLiteral("航路至少需要一个有效航点"));
+        }
+        if (waypoints.size() > kMaxSchedulePoints) {
+            return reject(QStringLiteral("INVALID_ARGUMENT"),
+                          QStringLiteral("航路最多支持 512 个航点"));
         }
         for (const QVariant& waypoint : waypoints) {
             if (!validPoint(waypoint.toMap())) {
@@ -4711,10 +4788,21 @@ void GameServer::handleVmfTaskCommand(QWebSocket* socket, const QJsonObject& pay
         }
         bool waiting = false;
         for (const QString& binding : bindings) waiting = waiting || placeholders.contains(binding);
+        const UnitBase* attacker = m_engine.unit(
+            m_authoritativeRoom.seat(bindings.at(2)).unitId);
+        const ScenarioMap& map = m_engine.scenario().map;
+        const QJsonArray route = strictVmfAttackRoute(
+            attacker, target, map.widthMeters, map.heightMeters);
+        if (route.isEmpty()) {
+            reject(QStringLiteral("VMF_ROUTE_UNAVAILABLE"),
+                   QStringLiteral("无法为当前攻击机生成安全攻击航路"));
+            return;
+        }
         result = candidate.createTask(payload.value(QStringLiteral("taskId")).toString(), session.side,
                                       bindings.at(0), bindings.at(1), bindings.at(2), bindings.at(3),
                                       payload.value(QStringLiteral("targetId")).toString(),
-                                      payload.value(QStringLiteral("correlationId")).toString(), waiting, now);
+                                      payload.value(QStringLiteral("correlationId")).toString(), waiting, now,
+                                      route);
     } else {
         QSet<QString> placeholders;
         for (const auto& seat : m_authoritativeRoom.seats()) {
@@ -4851,6 +4939,13 @@ void GameServer::handleVmfTaskCommand(QWebSocket* socket, const QJsonObject& pay
                        QStringLiteral("VMF 消息任务或目标关联不一致"));
                 return;
             }
+            if (action == QLatin1String("dispatch") && !currentTask->route.isEmpty()
+                && domainPayload.value(QStringLiteral("waypoints")).toArray()
+                       != currentTask->route) {
+                reject(QStringLiteral("VMF_ROUTE_MISMATCH"),
+                       QStringLiteral("派单航路与任务的权威航路不一致"));
+                return;
+            }
             if (action == QLatin1String("reportBattleDamage")
                 || action == QLatin1String("confirmDamageAssessment")) {
                 const UnitBase* target = m_engine.unit(currentTask->targetId);
@@ -4919,9 +5014,12 @@ void GameServer::handleVmfTaskCommand(QWebSocket* socket, const QJsonObject& pay
     QVariantMap engineCommand;
     QString engineAction;
     if (currentTask && action == QLatin1String("dispatch")) {
-        const QJsonArray points = payload.value(QStringLiteral("messages")).toArray()
-                                      .first().toObject().value(QStringLiteral("payload"))
-                                      .toObject().value(QStringLiteral("waypoints")).toArray();
+        QJsonArray points = currentTask->route;
+        if (points.isEmpty()) {
+            points = payload.value(QStringLiteral("messages")).toArray()
+                         .first().toObject().value(QStringLiteral("payload"))
+                         .toObject().value(QStringLiteral("waypoints")).toArray();
+        }
         engineAction = QStringLiteral("setFlightPlan");
         engineCommand = {{QStringLiteral("attackerId"),
                           m_authoritativeRoom.seat(currentTask->attackSeatId).unitId},
@@ -5067,6 +5165,34 @@ void GameServer::runStrictVmfAutomation() {
             m_commandResults.remove(m_commandResultOrder.takeFirst());
         }
         return result.accepted;
+    };
+    const auto executeRecoveryCommand = [this](const StrictVmfTaskSet::Task& task,
+                                                const QString& action,
+                                                const QVariantMap& args) {
+        const CommandResult validation = m_engine.validateCommandRequest(action, args);
+        if (!validation.accepted) return false;
+        const QString commandId = QStringLiteral("vmf-recovery:%1:%2:%3")
+                                      .arg(task.taskId, action)
+                                      .arg(m_eventSequence + 1);
+        QString persistenceError;
+        if (!recordDurableEvent(
+                QStringLiteral("command"),
+                QJsonObject{{QStringLiteral("commandId"), commandId},
+                            {QStringLiteral("userId"), 0},
+                            {QStringLiteral("generatedBy"), QStringLiteral("vmf-auto")},
+                            {QStringLiteral("action"), action},
+                            {QStringLiteral("args"), QJsonObject::fromVariantMap(args)}},
+                &persistenceError)) {
+            audit(QStringLiteral("persistence"),
+                  QJsonObject{{QStringLiteral("event"),
+                               QStringLiteral("vmfRecoveryCommandFailed")},
+                              {QStringLiteral("taskId"), task.taskId},
+                              {QStringLiteral("message"), persistenceError}});
+            return false;
+        }
+        const CommandResult applied = m_engine.executeCommand(action, args);
+        if (applied.accepted) ++m_stateRevision;
+        return applied.accepted;
     };
 
     // A strict VMF task starts with a reconnaissance report. Automated recon
@@ -5259,6 +5385,65 @@ void GameServer::runStrictVmfAutomation() {
             backoff();
             continue;
         }
+        const auto* attackActor = qobject_cast<const AttackUAV*>(
+            m_engine.unit(m_authoritativeRoom.seat(task.attackSeatId).unitId));
+        if (action == QLatin1String("reportBattleDamage") && attackActor
+            && attackActor->hasActiveProjectile()) {
+            continue;
+        }
+        if (action == QLatin1String("engage")) {
+            if (!attackActor || attackActor->hasActiveProjectile()
+                || attackActor->cooldownRemaining() > 1e-9
+                || attackActor->serviceRequested()) {
+                continue;
+            }
+            if (attackActor->ammoRemaining() <= 0) {
+                const UnitBase* commandPost = m_engine.unit(
+                    m_authoritativeRoom.seat(task.commanderSeatId).unitId);
+                if (!commandPost) {
+                    backoff();
+                    continue;
+                }
+                if (attackActor->pos().distanceTo2D(commandPost->pos()) > 250.0) {
+                    if (!attackActor->hasActiveWaypoints()) {
+                        const QVariantMap returnArgs{
+                            {QStringLiteral("unitId"), attackActor->id()},
+                            {QStringLiteral("pos"),
+                             QVariantMap{{QStringLiteral("x"), commandPost->pos().x},
+                                         {QStringLiteral("y"), commandPost->pos().y}}}};
+                        if (!executeRecoveryCommand(task, QStringLiteral("withdraw"),
+                                                    returnArgs)) {
+                            backoff();
+                        }
+                    }
+                    continue;
+                }
+                const QVariantMap serviceArgs{
+                    {QStringLiteral("unitId"), attackActor->id()}};
+                if (!executeRecoveryCommand(task, QStringLiteral("service"),
+                                            serviceArgs)) {
+                    backoff();
+                }
+                continue;
+            }
+            const double targetDistance = attackActor->pos().distanceTo2D(target->pos());
+            if (targetDistance < attackActor->minimumAttackRange()
+                || targetDistance > attackActor->attackRange()) {
+                if (attackActor->hasActiveWaypoints()) continue;
+                const ScenarioMap& map = m_engine.scenario().map;
+                const QJsonArray recoveryRoute = strictVmfAttackRoute(
+                    attackActor, target, map.widthMeters, map.heightMeters);
+                const QVariantMap routeArgs{
+                    {QStringLiteral("attackerId"), attackActor->id()},
+                    {QStringLiteral("waypoints"), routeWaypoints(recoveryRoute)}};
+                if (recoveryRoute.isEmpty()
+                    || !executeRecoveryCommand(task, QStringLiteral("setFlightPlan"),
+                                               routeArgs)) {
+                    backoff();
+                }
+                continue;
+            }
+        }
         // Combat and damage reports are tied to simulation time.  This keeps
         // the automation deterministic while allowing the engine one or more
         // ticks to resolve a shot before the next protocol hand-off.
@@ -5283,7 +5468,6 @@ void GameServer::runStrictVmfAutomation() {
             continue;
         }
 
-        QStringList messageIds;
         QJsonArray traces;
         QJsonArray wireMessages;
         Message::Type messageType = Message::Type::CommCheck;
@@ -5311,10 +5495,24 @@ void GameServer::runStrictVmfAutomation() {
                                          {QStringLiteral("targetId"), task.targetId}};
             if (target) {
                 const GeoPos p = target->pos();
-                source.payload.insert(QStringLiteral("x"), p.x);
-                source.payload.insert(QStringLiteral("y"), p.y);
-                source.payload.insert(QStringLiteral("waypoints"), QJsonArray{
-                    QJsonObject{{QStringLiteral("x"), p.x}, {QStringLiteral("y"), p.y}}});
+                QJsonArray route = task.route;
+                if (route.isEmpty()) {
+                    const UnitBase* attacker = m_engine.unit(
+                        m_authoritativeRoom.seat(task.attackSeatId).unitId);
+                    const ScenarioMap& map = m_engine.scenario().map;
+                    route = strictVmfAttackRoute(attacker, target,
+                                                 map.widthMeters, map.heightMeters);
+                }
+                const QJsonObject routeEnd = route.isEmpty()
+                    ? QJsonObject{{QStringLiteral("x"), p.x},
+                                  {QStringLiteral("y"), p.y}}
+                    : route.last().toObject();
+                source.payload.insert(QStringLiteral("x"),
+                                      routeEnd.value(QStringLiteral("x")));
+                source.payload.insert(QStringLiteral("y"),
+                                      routeEnd.value(QStringLiteral("y")));
+                source.payload.insert(QStringLiteral("waypoints"),
+                                      route.isEmpty() ? QJsonArray{routeEnd} : route);
                 source.payload.insert(QStringLiteral("targets"), QJsonArray{
                     QJsonObject{{QStringLiteral("targetId"), task.targetId},
                                 {QStringLiteral("targetType"), target->kindStr()},
@@ -5354,7 +5552,6 @@ void GameServer::runStrictVmfAutomation() {
                 backoff();
                 continue;
             }
-            messageIds.append(encoded.id);
             const QJsonObject wire{
                 {QStringLiteral("messageId"), encoded.id},
                 {QStringLiteral("traceId"), encoded.traceId},
@@ -5394,11 +5591,17 @@ void GameServer::runStrictVmfAutomation() {
         QString engineAction;
         QVariantMap engineArgs;
         if (action == QLatin1String("dispatch")) {
-            const GeoPos p = target->pos();
+            QJsonArray route = task.route;
+            if (route.isEmpty()) {
+                const UnitBase* attacker = m_engine.unit(
+                    m_authoritativeRoom.seat(task.attackSeatId).unitId);
+                const ScenarioMap& map = m_engine.scenario().map;
+                route = strictVmfAttackRoute(attacker, target,
+                                             map.widthMeters, map.heightMeters);
+            }
             engineAction = QStringLiteral("setFlightPlan");
             engineArgs = {{QStringLiteral("attackerId"), m_authoritativeRoom.seat(task.attackSeatId).unitId},
-                          {QStringLiteral("waypoints"), QVariantList{
-                              QVariantMap{{QStringLiteral("x"), p.x}, {QStringLiteral("y"), p.y}}}}};
+                          {QStringLiteral("waypoints"), routeWaypoints(route)}};
         } else if (action == QLatin1String("engage")) {
             engineAction = QStringLiteral("engageTarget");
             engineArgs = {{QStringLiteral("attackerId"), m_authoritativeRoom.seat(task.attackSeatId).unitId},
@@ -5424,22 +5627,12 @@ void GameServer::runStrictVmfAutomation() {
         }
         const QString requestId = QStringLiteral("vmf-auto-%1-%2-%3")
                                       .arg(task.taskId).arg(task.taskRevision).arg(action);
-        const QString cacheKey = QStringLiteral("vmf-task:auto:%1").arg(requestId);
-        const QJsonObject response{{QStringLiteral("status"), result.status},
-                                   {QStringLiteral("taskRevision"), static_cast<qint64>(result.taskRevision)},
-                                   {QStringLiteral("messageIds"), QJsonArray::fromStringList(messageIds)},
-                                   {QStringLiteral("code"), result.code},
-                                   {QStringLiteral("retryable"), false},
-                                   {QStringLiteral("requestId"), requestId},
-                                   {QStringLiteral("generatedBy"), QStringLiteral("vmf-auto")}};
         QJsonObject durable{{QStringLiteral("action"), action},
                             {QStringLiteral("taskId"), task.taskId},
                             {QStringLiteral("requestId"), requestId},
-                            {QStringLiteral("cacheKey"), cacheKey},
                             {QStringLiteral("generatedBy"), QStringLiteral("vmf-auto")},
                             {QStringLiteral("status"), result.status},
                             {QStringLiteral("taskSet"), candidate.toJson()},
-                            {QStringLiteral("taskResult"), response},
                             {QStringLiteral("messages"), wireMessages}};
         if (!engineAction.isEmpty()) {
             durable.insert(QStringLiteral("engineAction"), engineAction);
@@ -5454,11 +5647,6 @@ void GameServer::runStrictVmfAutomation() {
             continue;
         }
         m_strictVmfTasks = candidate;
-        const QJsonObject cached{{QStringLiteral("commandId"), requestId},
-                                 {QStringLiteral("vmfTaskResult"), response}};
-        m_commandResults.insert(cacheKey, cached);
-        m_commandResultOrder.append(cacheKey);
-        while (m_commandResultOrder.size() > 2048) m_commandResults.remove(m_commandResultOrder.takeFirst());
         if (!engineAction.isEmpty()) {
             const CommandResult applied = m_engine.executeCommand(engineAction, engineArgs);
             if (!applied.accepted) {
@@ -5483,13 +5671,6 @@ void GameServer::runStrictVmfAutomation() {
         m_vmfAutomationFailureCount.remove(attemptKey);
         ++m_stateRevision;
         for (const QJsonValue& trace : traces) broadcastVmfEvent(trace.toObject());
-        QString checkpointError;
-        if (!persistRoomState(&checkpointError)) {
-            audit(QStringLiteral("persistence"), QJsonObject{
-                {QStringLiteral("event"), QStringLiteral("automationCheckpointDeferred")},
-                {QStringLiteral("taskId"), task.taskId},
-                {QStringLiteral("message"), checkpointError}});
-        }
     }
 }
 

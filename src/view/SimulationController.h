@@ -117,7 +117,7 @@ public:
     bool readyForSim() const { return isNetworked() ? m_remoteReadyForSim : m_engine.readyForSim(); }
     QString cpIssues() const { return isNetworked() ? m_remoteCpIssues : m_engine.cpIssues(); }
     QString lastError() const { return isNetworked() ? m_remoteLastError : m_engine.lastError(); }
-    QVariantList units() const { return m_engine.unitsForView(); }
+    QVariantList units() const;
     QVariantList projectiles() const {
         return isNetworked() ? m_remoteProjectiles : m_engine.projectilesForView();
     }
@@ -409,6 +409,8 @@ private:
     mutable QHash<QString, QString> m_cpCache;
     mutable QJsonArray m_snapshotCache;
     mutable bool m_snapshotCacheValid = false;
+    mutable QVariantList m_unitsViewCache;
+    mutable bool m_unitsViewCacheValid = false;
     quint64 m_unitStateRevision = 0;
     QString m_sessionMode = QStringLiteral("unselected");
     QString m_networkState = QStringLiteral("disconnected");

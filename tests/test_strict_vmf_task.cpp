@@ -150,6 +150,43 @@ TEST(StrictVmfTaskSetTest, ResourcesAreExclusiveAndCheckpointIsValidated) {
     EXPECT_FALSE(restored.restore(malformed, &error));
 }
 
+TEST(StrictVmfTaskSetTest, AuthoritativeRouteRoundTripsWithTaskCheckpoint) {
+    StrictVmfTaskSet tasks;
+    const QJsonArray route{
+        QJsonObject{{QStringLiteral("x"), 1200.0}, {QStringLiteral("y"), 2400.0}},
+        QJsonObject{{QStringLiteral("x"), 3600.0}, {QStringLiteral("y"), 4800.0}}};
+    ASSERT_TRUE(tasks.createTask(
+        QStringLiteral("red-task-route"), QStringLiteral("red"),
+        QStringLiteral("red_commander"), QStringLiteral("red_recon_1"),
+        QStringLiteral("red_attack_1"), QStringLiteral("red_ground_1"),
+        QStringLiteral("blue_gt_1"), QStringLiteral("corr-route"), false, 1.0,
+        route).ok);
+
+    StrictVmfTaskSet restored;
+    QString error;
+    ASSERT_TRUE(restored.restore(tasks.toJson(), &error)) << error.toStdString();
+    ASSERT_NE(restored.task(QStringLiteral("red-task-route")), nullptr);
+    EXPECT_EQ(restored.task(QStringLiteral("red-task-route"))->route, route);
+
+    QJsonObject legacy = tasks.toJson();
+    QJsonArray legacyTasks = legacy.value(QStringLiteral("tasks")).toArray();
+    QJsonObject legacyTask = legacyTasks.first().toObject();
+    QJsonArray legacyHistory;
+    for (int index = 0; index < 200; ++index) {
+        legacyHistory.append(QJsonObject{{QStringLiteral("action"),
+                                          QStringLiteral("legacy-%1").arg(index)}});
+    }
+    legacyTask[QStringLiteral("eventHistory")] = legacyHistory;
+    legacyTasks[0] = legacyTask;
+    legacy[QStringLiteral("tasks")] = legacyTasks;
+    ASSERT_TRUE(restored.restore(legacy, &error)) << error.toStdString();
+    EXPECT_EQ(restored.task(QStringLiteral("red-task-route"))->eventHistory.size(),
+              StrictVmfTaskSet::EventHistoryLimit);
+    EXPECT_EQ(restored.task(QStringLiteral("red-task-route"))->eventHistory.first()
+                  .toObject().value(QStringLiteral("action")).toString(),
+              QStringLiteral("legacy-136"));
+}
+
 TEST(StrictVmfTaskSetTest, CompletedHistoryIsBoundedAndRemainsRestorable) {
     StrictVmfTaskSet tasks;
     for (int index = 0; index <= StrictVmfTaskSet::HistoryLimit; ++index) {

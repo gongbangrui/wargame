@@ -16,6 +16,7 @@ class StrictVmfTaskSet final {
 public:
     static constexpr int ActiveLimitPerSide = 16;
     static constexpr int HistoryLimit = 100;
+    static constexpr int EventHistoryLimit = 64;
 
     struct Task {
         QString taskId;
@@ -50,7 +51,8 @@ public:
                       const QString& commanderSeatId, const QString& reconSeatId,
                       const QString& attackSeatId, const QString& groundSeatId,
                       const QString& targetId, const QString& correlationId,
-                      bool waitingForHuman, double now);
+                      bool waitingForHuman, double now,
+                      const QJsonArray& route = {});
     Result applyAction(const QJsonObject& command, const QString& actorSeatId,
                        const QSet<QString>& placeholderSeats, double now);
     Result setBlocked(const QString& taskId, const QString& code, double now);

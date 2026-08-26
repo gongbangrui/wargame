@@ -2,6 +2,7 @@
 
 #include "RoomPersistence.h"
 #include "core/Scenario.h"
+#include "units/AttackUAV.h"
 
 #include <QFile>
 #include <QCoreApplication>
@@ -962,6 +963,19 @@ TEST(RoomPersistenceTest, StrictPlaceholderTakeoverPreservesRuntimeAndResetClear
     ASSERT_NE(created, nullptr);
     EXPECT_EQ(created->health, QStringLiteral("active"));
     EXPECT_EQ(created->stage, QStringLiteral("awaitingTargetReport"));
+    ASSERT_EQ(created->route.size(), 1);
+    const QJsonObject routePoint = created->route.first().toObject();
+    const auto* attackUnit = qobject_cast<const AttackUAV*>(
+        server.m_engine.unit(unitId));
+    const UnitBase* routeTarget = server.m_engine.unit(QStringLiteral("blue_cp"));
+    ASSERT_NE(attackUnit, nullptr);
+    ASSERT_NE(routeTarget, nullptr);
+    const GeoPos approach{routePoint.value(QStringLiteral("x")).toDouble(),
+                          routePoint.value(QStringLiteral("y")).toDouble(),
+                          attackUnit->pos().alt};
+    const double approachDistance = approach.distanceTo2D(routeTarget->pos());
+    EXPECT_GT(approachDistance, attackUnit->minimumAttackRange());
+    EXPECT_LT(approachDistance, attackUnit->attackRange());
 
     UnitBase* automationActor = server.m_engine.unit(
         server.m_authoritativeRoom.seat(QStringLiteral("red_recon_1")).unitId);

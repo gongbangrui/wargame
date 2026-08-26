@@ -18,6 +18,23 @@ bool isOpenTask(const StrictVmfTaskSet::Task& task) {
         || task.health == QLatin1String("blocked");
 }
 
+bool validRoute(const QJsonArray& route) {
+    if (route.size() > 32) return false;
+    for (const QJsonValue& value : route) {
+        if (!value.isObject()) return false;
+        const QJsonObject point = value.toObject();
+        if (!point.value(QStringLiteral("x")).isDouble()
+            || !point.value(QStringLiteral("y")).isDouble()
+            || !std::isfinite(point.value(QStringLiteral("x")).toDouble())
+            || !std::isfinite(point.value(QStringLiteral("y")).toDouble())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+constexpr qsizetype kLegacyEventHistoryLimit = 4096;
+
 QJsonObject taskToJson(const StrictVmfTaskSet::Task& task) {
     return {{QStringLiteral("taskId"), task.taskId},
             {QStringLiteral("side"), task.side},
@@ -82,10 +99,14 @@ bool taskFromJson(const QJsonObject& object, StrictVmfTaskSet::Task* task, QStri
             && parsed.health != QLatin1String("completed")
             && parsed.health != QLatin1String("cancelled"))
         || !object.value(QStringLiteral("route")).isArray()
-        || parsed.route.size() > 32 || parsed.eventHistory.size() > 200
+        || !validRoute(parsed.route)
+        || parsed.eventHistory.size() > kLegacyEventHistoryLimit
         || !std::isfinite(parsed.createdAt) || parsed.createdAt < 0.0
         || !std::isfinite(parsed.updatedAt) || parsed.updatedAt < 0.0) {
         return fail(QStringLiteral("严格 VMF 任务检查点无效"));
+    }
+    while (parsed.eventHistory.size() > StrictVmfTaskSet::EventHistoryLimit) {
+        parsed.eventHistory.removeFirst();
     }
     const QJsonValue pending = object.value(QStringLiteral("pendingMessageIds"));
     if (!pending.isArray()) return fail(QStringLiteral("严格 VMF pending 消息无效"));
@@ -178,7 +199,9 @@ void StrictVmfTaskSet::appendHistory(Task& task, const QString& action,
                                          {QStringLiteral("health"), task.health},
                                          {QStringLiteral("code"), code},
                                          {QStringLiteral("time"), now}});
-    while (task.eventHistory.size() > 200) task.eventHistory.removeFirst();
+    while (task.eventHistory.size() > EventHistoryLimit) {
+        task.eventHistory.removeFirst();
+    }
 }
 
 StrictVmfTaskSet::Result StrictVmfTaskSet::failure(const QString& code,
@@ -196,10 +219,11 @@ StrictVmfTaskSet::Result StrictVmfTaskSet::success(Task& task, const QString& st
 StrictVmfTaskSet::Result StrictVmfTaskSet::createTask(
     const QString& taskId, const QString& side, const QString& commanderSeatId,
     const QString& reconSeatId, const QString& attackSeatId, const QString& groundSeatId,
-    const QString& targetId, const QString& correlationId, bool waitingForHuman, double now) {
+    const QString& targetId, const QString& correlationId, bool waitingForHuman, double now,
+    const QJsonArray& route) {
     if (!validId(taskId) || !validSide(side) || !validId(commanderSeatId)
         || !validId(reconSeatId) || !validId(attackSeatId) || !validId(groundSeatId)
-        || !validId(targetId) || !validId(correlationId)) {
+        || !validId(targetId) || !validId(correlationId) || !validRoute(route)) {
         return failure(QStringLiteral("INVALID_TASK"), QStringLiteral("严格 VMF 任务绑定无效"));
     }
     if (m_tasks.contains(taskId)) return failure(QStringLiteral("DUPLICATE_TASK"), QStringLiteral("任务已存在"));
@@ -217,7 +241,8 @@ StrictVmfTaskSet::Result StrictVmfTaskSet::createTask(
     task.taskId = taskId; task.side = side; task.commanderSeatId = commanderSeatId;
     task.reconSeatId = reconSeatId; task.attackSeatId = attackSeatId;
     task.groundSeatId = groundSeatId; task.targetId = targetId;
-    task.correlationId = correlationId; task.createdAt = now; task.updatedAt = now;
+    task.correlationId = correlationId; task.route = route;
+    task.createdAt = now; task.updatedAt = now;
     if (waitingForHuman) { task.health = QStringLiteral("blocked"); task.blockCode = QStringLiteral("WAITING_FOR_HUMAN"); }
     m_tasks.insert(taskId, task); m_historyOrder.append(taskId);
     while (m_tasks.size() > HistoryLimit) {

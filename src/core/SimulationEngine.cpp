@@ -2171,9 +2171,13 @@ CommandResult SimulationEngine::validateCommand(const QString& action,
     }
     if (action == QLatin1String("setFlightPlan")) {
         const QVariantList waypoints = args.value(QStringLiteral("waypoints")).toList();
-        if (waypoints.isEmpty() || waypoints.size() > 512) {
+        if (waypoints.isEmpty()) {
             return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
-                                         QStringLiteral("航路不能为空且不能超过 512 个航点"));
+                                         QStringLiteral("航路至少需要一个有效航点"));
+        }
+        if (waypoints.size() > 512) {
+            return CommandResult::reject(QString::fromLatin1(CommandCode::InvalidArgument),
+                                         QStringLiteral("航路最多支持 512 个航点"));
         }
         for (const QVariant& waypoint : waypoints) {
             if (!validPoint(waypoint.toMap())) {

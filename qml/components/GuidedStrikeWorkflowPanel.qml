@@ -128,6 +128,29 @@ Item {
         return labels[action] || "等待绑定战位操作"
     }
 
+    function strictActionHint(action) {
+        var hints = {
+            reportTarget: "核实已发现目标",
+            dispatch: "确认系统生成的目标航路",
+            acceptDispatch: "接收任务并开始航渡",
+            orderGroundGuidance: "通知地面战位准备引导",
+            markRendezvousReady: "确认攻击机进入会合区",
+            identityHello: "向地面战位发起识别",
+            identityConfirm: "确认攻击机身份",
+            sendGuidancePackage: "发送目标点与航路",
+            acceptGuidance: "接收地面引导航路",
+            reportAttackReady: "报告已进入攻击航线",
+            authorizeAttack: "允许攻击机实施打击",
+            engage: "对任务目标实施攻击",
+            reportBattleDamage: "回报目标毁伤状态",
+            confirmDamageAssessment: "确认毁伤评估",
+            confirmTargetDestroyed: "复核目标摧毁状态",
+            withdraw: "命令攻击机撤离",
+            markReturning: "确认开始返航"
+        }
+        return hints[action] || "等待任务状态更新"
+    }
+
     function syncStrictSelection() {
         if (!root.strictTasks.length) { root.selectedTaskId = ""; return }
         for (var i = 0; i < root.strictTasks.length; ++i)
@@ -378,8 +401,8 @@ Item {
                 Layout.fillWidth: true
                 Rectangle { Layout.preferredWidth: 3; Layout.preferredHeight: 24; color: root.cyan; radius: 2 }
                 ColumnLayout { Layout.fillWidth: true; spacing: 1
-                    Text { text: "VMF 引导打击"; color: root.ink; font.pixelSize: 13; font.bold: true }
-                    Text { text: "红方任务链 · 通信范围无限"; color: root.dim; font.pixelSize: 9 }
+                    Text { text: "VMF 任务"; color: root.ink; font.pixelSize: 13; font.bold: true }
+                    Text { text: "按高亮步骤操作 · 航路自动生成"; color: root.dim; font.pixelSize: 9 }
                 }
                 Rectangle {
                     Layout.preferredWidth: vmfPhaseText.implicitWidth + 14
@@ -477,7 +500,13 @@ Item {
                         Text { Layout.fillWidth: true; text: root.stageLabel(root.strictTask().stage); color: root.stageColor(root.strictTask().stage); font.pixelSize: 12; font.bold: true; elide: Text.ElideRight }
                         Text { text: root.strictTask().taskId ? ("rev " + Number(root.strictTask().taskRevision || 0)) : ""; color: root.dim; font.pixelSize: 8 }
                     }
-                    Text { Layout.fillWidth: true; text: "目标  " + (root.strictTask().targetId || "未绑定"); color: root.ink; font.pixelSize: 9; elide: Text.ElideMiddle }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "目标  " + (root.strictTask().targetId || "未绑定")
+                            + (root.strictTask().route && root.strictTask().route.length > 0
+                                ? "  ·  航路 " + root.strictTask().route.length + " 点" : "")
+                        color: root.ink; font.pixelSize: 9; elide: Text.ElideMiddle
+                    }
                     Text {
                         Layout.fillWidth: true
                         text: root.strictTask().health === "blocked"
@@ -487,6 +516,11 @@ Item {
                                 + " · " + root.strictActorStatus(root.strictTask())
                         color: root.strictTask().health === "blocked" ? root.orange : root.dim
                         font.pixelSize: 9; elide: Text.ElideRight
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: root.strictActionHint(root.strictStageAction(root.strictTask().stage))
+                        color: root.dim; font.pixelSize: 9; elide: Text.ElideRight
                     }
                     Button {
                         id: strictActionButton

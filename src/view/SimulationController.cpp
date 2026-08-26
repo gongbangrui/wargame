@@ -1070,16 +1070,22 @@ QVariantMap SimulationController::sendVmfTaskCommand(const QVariantMap& command)
                                            task.value(QStringLiteral("taskId"))},
                                           {QStringLiteral("targetId"),
                                            task.value(QStringLiteral("targetId"))}};
-            const QString routePointUnitId = domainType == Message::Type::WithdrawOrder
-                ? source.sender : task.value(QStringLiteral("targetId")).toString();
-            const QJsonArray targetPosition = m_engine.unitSnapshot(routePointUnitId)
-                                                  .value(QStringLiteral("position")).toArray();
-            if (targetPosition.size() >= 2) {
-                source.payload.insert(QStringLiteral("x"), targetPosition.at(0));
-                source.payload.insert(QStringLiteral("y"), targetPosition.at(1));
-                source.payload.insert(QStringLiteral("waypoints"), QJsonArray{
-                    QJsonObject{{QStringLiteral("x"), targetPosition.at(0)},
-                                {QStringLiteral("y"), targetPosition.at(1)}}});
+            QJsonArray route = task.value(QStringLiteral("route")).toArray();
+            if (domainType == Message::Type::WithdrawOrder || route.isEmpty()) {
+                const QString routePointUnitId = domainType == Message::Type::WithdrawOrder
+                    ? source.sender : task.value(QStringLiteral("targetId")).toString();
+                const QJsonArray targetPosition = m_engine.unitSnapshot(routePointUnitId)
+                                                      .value(QStringLiteral("position")).toArray();
+                if (targetPosition.size() >= 2) {
+                    route = QJsonArray{QJsonObject{{QStringLiteral("x"), targetPosition.at(0)},
+                                                   {QStringLiteral("y"), targetPosition.at(1)}}};
+                }
+            }
+            if (!route.isEmpty()) {
+                const QJsonObject destination = route.last().toObject();
+                source.payload.insert(QStringLiteral("x"), destination.value(QStringLiteral("x")));
+                source.payload.insert(QStringLiteral("y"), destination.value(QStringLiteral("y")));
+                source.payload.insert(QStringLiteral("waypoints"), route);
             }
             if (domainType == Message::Type::BattleDamageReport
                 || domainType == Message::Type::DamageAssessmentConfirm) {
@@ -1573,9 +1579,18 @@ QJsonArray SimulationController::allUnits() const {
     return m_snapshotCache;
 }
 
+QVariantList SimulationController::units() const {
+    if (!m_unitsViewCacheValid) {
+        m_unitsViewCache = m_engine.unitsForView();
+        m_unitsViewCacheValid = true;
+    }
+    return m_unitsViewCache;
+}
+
 void SimulationController::invalidateCaches() {
     m_cpCache.clear();
     m_snapshotCacheValid = false;
+    m_unitsViewCacheValid = false;
 }
 
 QJsonObject SimulationController::unitAt(const QString& id) const {

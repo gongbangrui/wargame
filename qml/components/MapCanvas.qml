@@ -136,8 +136,16 @@ Item {
             Math.min(root.mapTileMaxZoom, requested))
     }
 
-    // 公共刷新方法
-    function refresh() { innerCanvas.requestPaint() }
+    // Coalesce the many property notifications carried by one authoritative
+    // state update into one canvas paint on the next event-loop turn.
+    function refresh() {
+        if (root.visible) repaintTimer.restart()
+    }
+    Timer {
+        id: repaintTimer
+        interval: 0
+        onTriggered: innerCanvas.requestPaint()
+    }
     function unitListSource() {
         // QJsonArray/QVariantList values exposed through a QML var are not
         // guaranteed to satisfy Array.isArray(), although they still expose
@@ -172,9 +180,19 @@ Item {
         var output = []
         for (var i = 0; i < sourceList.length; ++i) {
             var source = sourceList[i] || ({})
-            var unit = JSON.parse(JSON.stringify(source))
             var position = root.unitPosition(source)
             if (!position) continue
+            var sourcePosition = source.position
+            var runtimeReady = sourcePosition && typeof sourcePosition.length === "number"
+                && sourcePosition.length >= 2 && source.alive !== undefined
+                && source.hp !== undefined && source.maxHp !== undefined
+                && source.movable !== undefined
+            if (runtimeReady) {
+                output.push(source)
+                continue
+            }
+            var unit = ({})
+            for (var key in source) unit[key] = source[key]
             unit.position = position
             unit.alive = source.alive !== false
             unit.hp = source.hp === undefined ? Number(source.maxHp || 100) : source.hp
@@ -187,14 +205,15 @@ Item {
         return output
     }
     function refreshUnitSource() {
-        if (!innerCanvas) return
+        if (!innerCanvas || !root.visible) return
         var projectedUnits = root.canvasUnits()
         root.observeAbilityTransitions(projectedUnits)
         innerCanvas.units = projectedUnits
-        if (root.controller && root.controller.networked) root.rebuildRecentPaths()
-        innerCanvas.requestPaint()
+        if (root.controller && !root.controller.networked) root.rebuildRecentPaths()
+        root.refresh()
     }
     function rebuildRecentPaths() {
+        if (!root.visible) return
         var map = ({})
         if (root.controller && root.controller.networked) {
             if (root.controller.isObserver) {
@@ -206,18 +225,30 @@ Item {
                         map[trail.unitId] = trail.points
                 }
             }
-            root.recentPathsByUnit = map
-            innerCanvas.requestPaint()
+            if (root.controller.isObserver
+                    || Object.keys(root.recentPathsByUnit || ({})).length > 0)
+                root.recentPathsByUnit = map
             return
         }
         var all = root.controller ? root.controller.allUnits() : []
+        var previous = root.recentPathsByUnit || ({})
+        var changed = false
         for (var i = 0; i < all.length; i++) {
             var snap = all[i]
-            if (snap && snap.recentPath && snap.recentPath.length > 0)
+            if (snap && snap.recentPath && snap.recentPath.length > 0) {
                 map[snap.id] = snap.recentPath
+                if (!changed) {
+                    var old = previous[snap.id]
+                    var last = snap.recentPath[snap.recentPath.length - 1]
+                    var oldLast = old && old.length > 0 ? old[old.length - 1] : null
+                    changed = !old || old.length !== snap.recentPath.length || !oldLast
+                        || oldLast.x !== last.x || oldLast.y !== last.y
+                }
+            }
         }
-        root.recentPathsByUnit = map
-        innerCanvas.requestPaint()
+        if (!changed && Object.keys(previous).length !== Object.keys(map).length)
+            changed = true
+        if (changed) root.recentPathsByUnit = map
     }
     function pulseActionAt(logicalPos, color) {
         if (!logicalPos) return
@@ -367,6 +398,13 @@ Item {
     onShowIntelManualChanged: refresh()
     onShowIntelUncertaintyChanged: refresh()
     onSelectedMapMarkerIdChanged: refresh()
+    onVisibleChanged: {
+        if (visible) {
+            root.applyMapInfo(false)
+            root.refreshUnitSource()
+            root.rebuildRecentPaths()
+        }
+    }
 
     Connections {
         target: root.controller
@@ -594,38 +632,10 @@ Item {
         Connections {
             target: root.controller
             function onUnitsForward() {
-                var projectedUnits = root.canvasUnits()
-                root.observeAbilityTransitions(projectedUnits)
-                innerCanvas.units = projectedUnits
-                if (root.controller.networked) {
-                    root.rebuildRecentPaths()
-                    return
-                }
-                // Only rebuild the recentPaths map if at least one path changed.
-                // Otherwise we trigger a full repaint on every 16ms engine tick.
-                var map = ({})
-                var prev = root.recentPathsByUnit || ({})
-                var changed = false
-                var all = root.controller.allUnits()
-                for (var i = 0; i < all.length; i++) {
-                    var snap = all[i]
-                    if (snap && snap.recentPath && snap.recentPath.length > 0) {
-                        map[all[i].id] = snap.recentPath
-                        if (!changed) {
-                            var old = prev[all[i].id]
-                            var last = snap.recentPath[snap.recentPath.length - 1]
-                            var oldLast = old && old.length > 0 ? old[old.length - 1] : null
-                            if (!old || old.length !== snap.recentPath.length || !oldLast
-                                    || oldLast.x !== last.x || oldLast.y !== last.y) changed = true
-                        }
-                    }
-                }
-                if (!changed && Object.keys(prev).length !== Object.keys(map).length) changed = true
-                if (changed) root.recentPathsByUnit = map
-                innerCanvas.requestPaint()
+                root.refreshUnitSource()
             }
             function onObserverTrajectoriesChanged() {
-                root.rebuildRecentPaths()
+                if (root.visible) root.rebuildRecentPaths()
             }
             function onProjectilesForward() {
                 innerCanvas.acceptProjectileSample(root.controller.projectiles)
@@ -1806,10 +1816,12 @@ Item {
 
     Component.onCompleted: {
         root.applyMapInfo(true)
-        root.refreshUnitSource()
-        innerCanvas.acceptProjectileSample(root.controller.projectiles)
-        root.rebuildRecentPaths()
-        innerCanvas.requestPaint()
+        if (root.visible) {
+            root.refreshUnitSource()
+            innerCanvas.acceptProjectileSample(root.controller.projectiles)
+            root.rebuildRecentPaths()
+            root.refresh()
+        }
     }
 
     // 全局 ESC 监听：退出路径引导模式
