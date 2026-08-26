@@ -87,6 +87,44 @@ QJsonArray strictVmfAttackRoute(const UnitBase* attacker, const UnitBase* target
                         {QStringLiteral("y"), bestY}}};
 }
 
+QJsonObject strictVmfReconApproachPoint(const UnitBase* scanner,
+                                        const UnitBase* target) {
+    if (!scanner || !target || scanner->kind() != UnitKind::ReconUAV) return {};
+    const double scanRange = scanner->scanState().range
+        * scanner->sensorHealth() * scanner->jamFactor();
+    const double distance = scanner->pos().distanceTo2D(target->pos());
+    if (!std::isfinite(scanRange) || scanRange <= 200.0
+        || !std::isfinite(distance) || distance <= 1.0) {
+        return {};
+    }
+
+    // Keep the aircraft comfortably inside its effective sweep range while
+    // retaining standoff. A point between two valid positions stays on-map.
+    const double standoff = std::clamp(scanRange * 0.65, 100.0, scanRange - 100.0);
+    if (distance <= standoff + 50.0) return {};
+    const double ratio = standoff / distance;
+    return QJsonObject{
+        {QStringLiteral("x"), target->pos().x
+                                  + (scanner->pos().x - target->pos().x) * ratio},
+        {QStringLiteral("y"), target->pos().y
+                                  + (scanner->pos().y - target->pos().y) * ratio}};
+}
+
+bool strictVmfNeedsAttackPositioning(const QString& stage) {
+    static const QSet<QString> positioningStages{
+        QStringLiteral("dispatchPending"),
+        QStringLiteral("enRoute"),
+        QStringLiteral("groundGuidancePending"),
+        QStringLiteral("rendezvousReady"),
+        QStringLiteral("identityHandshakePending"),
+        QStringLiteral("guidancePackagePending"),
+        QStringLiteral("routeAcceptancePending"),
+        QStringLiteral("attackLanePending"),
+        QStringLiteral("attackAuthorizationPending"),
+        QStringLiteral("engaging")};
+    return positioningStages.contains(stage);
+}
+
 QVariantList routeWaypoints(const QJsonArray& route) {
     QVariantList waypoints;
     waypoints.reserve(route.size());
@@ -5216,16 +5254,6 @@ void GameServer::runStrictVmfAutomation() {
                 return contact.type == QLatin1String("sensorContact") && target
                     && target->alive() && target->side() != scanner->side();
             });
-        if (hasPriorContact) continue;
-        const QSet<QString> visible = StateProjector::sensorVisibleUnitIds(
-            m_engine, seat.seatId, scanner->id());
-        const bool hostileVisible = std::any_of(
-            visible.cbegin(), visible.cend(), [this, scanner](const QString& unitId) {
-                const UnitBase* unit = m_engine.unit(unitId);
-                return unit && unit->alive() && unit->side() != scanner->side();
-            });
-        if (hostileVisible) continue;
-
         const UnitBase* nearestTarget = nullptr;
         double nearestDistance = std::numeric_limits<double>::infinity();
         for (const AuthoritativeRoom::Seat& candidate : m_authoritativeRoom.seats()) {
@@ -5239,30 +5267,33 @@ void GameServer::runStrictVmfAutomation() {
             }
         }
         if (!nearestTarget) continue;
-        const double scanRange = scanner->scanState().range
-            * scanner->sensorHealth() * scanner->jamFactor();
-        if (nearestDistance <= scanRange) {
-            if (scanner->scanState().available()) {
-                executeReconCommand(
-                    seat, QStringLiteral("activateScan"),
-                    {{QStringLiteral("unitId"), scanner->id()}});
+
+        const QJsonObject approach = strictVmfReconApproachPoint(scanner, nearestTarget);
+        if (!approach.isEmpty()) {
+            const double approachX = approach.value(QStringLiteral("x")).toDouble();
+            const double approachY = approach.value(QStringLiteral("y")).toDouble();
+            const auto& schedule = scanner->schedule();
+            const bool alreadyApproaching = !schedule.empty()
+                && std::hypot(schedule.back().x - approachX,
+                              schedule.back().y - approachY) <= 50.0;
+            if (!alreadyApproaching) {
+                const QVariantMap searchPoint{
+                    {QStringLiteral("time"), m_engine.simTime()},
+                    {QStringLiteral("x"), approachX},
+                    {QStringLiteral("y"), approachY}};
+                const QVariantMap searchCommand{
+                    {QStringLiteral("unitId"), scanner->id()},
+                    {QStringLiteral("schedule"), QVariantList{searchPoint}}};
+                executeReconCommand(seat, QStringLiteral("setSchedule"), searchCommand);
             }
             continue;
         }
-        if (!scanner->schedule().empty()
-            || !scanner->checkpointState()
-                    .value(QStringLiteral("behavior")).toObject()
-                    .value(QStringLiteral("waypoints")).toArray().isEmpty()) {
-            continue;
+
+        if (!hasPriorContact && scanner->scanState().available()) {
+            executeReconCommand(
+                seat, QStringLiteral("activateScan"),
+                {{QStringLiteral("unitId"), scanner->id()}});
         }
-        const QVariantMap searchPoint{
-            {QStringLiteral("time"), m_engine.simTime()},
-            {QStringLiteral("x"), nearestTarget->pos().x},
-            {QStringLiteral("y"), nearestTarget->pos().y}};
-        const QVariantMap searchCommand{
-            {QStringLiteral("unitId"), scanner->id()},
-            {QStringLiteral("schedule"), QVariantList{searchPoint}}};
-        executeReconCommand(seat, QStringLiteral("setSchedule"), searchCommand);
     }
 
     const auto actionForStage = [](const QString& stage) {
@@ -5387,6 +5418,37 @@ void GameServer::runStrictVmfAutomation() {
         }
         const auto* attackActor = qobject_cast<const AttackUAV*>(
             m_engine.unit(m_authoritativeRoom.seat(task.attackSeatId).unitId));
+        const AuthoritativeRoom::Seat attackSeat =
+            m_authoritativeRoom.seat(task.attackSeatId);
+        const bool attackOutsideLane = attackActor && target
+            && (attackActor->pos().distanceTo2D(target->pos())
+                    < attackActor->minimumAttackRange()
+                || attackActor->pos().distanceTo2D(target->pos())
+                    > attackActor->attackRange());
+        if (attackOutsideLane && strictVmfNeedsAttackPositioning(task.stage)
+            && attackSeat.controlMode == QLatin1String("vmf-auto")
+            && !attackActor->hasActiveWaypoints()
+            && !attackActor->serviceRequested()) {
+            QJsonArray route = task.route;
+            if (route.isEmpty()) {
+                const ScenarioMap& map = m_engine.scenario().map;
+                route = strictVmfAttackRoute(
+                    attackActor, target, map.widthMeters, map.heightMeters);
+            }
+            const QVariantMap routeArgs{
+                {QStringLiteral("attackerId"), attackActor->id()},
+                {QStringLiteral("waypoints"), routeWaypoints(route)}};
+            if (route.isEmpty()
+                || !executeRecoveryCommand(task, QStringLiteral("setFlightPlan"),
+                                           routeArgs)) {
+                backoff();
+            }
+            continue;
+        }
+        if (action == QLatin1String("reportAttackReady") && attackOutsideLane) {
+            // The protocol stage must reflect the aircraft's physical state.
+            continue;
+        }
         if (action == QLatin1String("reportBattleDamage") && attackActor
             && attackActor->hasActiveProjectile()) {
             continue;

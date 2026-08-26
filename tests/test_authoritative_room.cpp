@@ -5,6 +5,7 @@
 #include "core/UnitBase.h"
 #include "protocol/Protocol.h"
 #include "protocol/StateDelta.h"
+#include "units/AttackUAV.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -4279,6 +4280,22 @@ TEST(GameServerStrictVmfTest, AutomatedReconAcquiresTargetBeforeTaskCreation) {
 
     server.runStrictVmfAutomation();
 
+    ASSERT_EQ(reconUnit->schedule().size(), 1U);
+    EXPECT_DOUBLE_EQ(reconUnit->scanState().cooldownRemaining, 0.0);
+    const SchedulePoint approach = reconUnit->schedule().front();
+    const double initialDistance = reconUnit->pos().distanceTo2D(
+        GeoPos{approach.x, approach.y, reconUnit->pos().alt});
+    EXPECT_GT(initialDistance, 100.0);
+
+    const GeoPos beforeMove = reconUnit->pos();
+    server.m_engine.setRunning(false);
+    server.m_engine.stepOnce(1.0);
+    server.m_engine.setRunning(true);
+    EXPECT_GT(beforeMove.distanceTo2D(reconUnit->pos()), 100.0);
+
+    reconUnit->setPosition(GeoPos{approach.x, approach.y, reconUnit->pos().alt});
+    reconUnit->setSchedule({});
+    server.runStrictVmfAutomation();
     EXPECT_GT(reconUnit->scanState().cooldownRemaining, 0.0);
     server.refreshIntelLedger();
     const QSet<QString> after = StateProjector::visibleUnitIds(
@@ -4296,7 +4313,7 @@ TEST(GameServerStrictVmfTest, AutomatedReconAcquiresTargetBeforeTaskCreation) {
             return contact.type == QLatin1String("sensorContact") && contact.actionable
                 && target && target->sideStr() == QLatin1String("blue");
         }));
-    EXPECT_EQ(server.m_eventSequence, 1U);
+    EXPECT_EQ(server.m_eventSequence, 2U);
 
     server.m_engine.setRunning(false);
     server.m_engine.stepOnce(reconUnit->scanState().cooldownSec + 1.0);
@@ -4304,11 +4321,11 @@ TEST(GameServerStrictVmfTest, AutomatedReconAcquiresTargetBeforeTaskCreation) {
     ASSERT_TRUE(reconUnit->scanState().available());
     server.runStrictVmfAutomation();
 
-    EXPECT_EQ(server.m_eventSequence, 1U);
+    EXPECT_EQ(server.m_eventSequence, 2U);
     EXPECT_DOUBLE_EQ(reconUnit->scanState().cooldownRemaining, 0.0);
 }
 
-TEST(GameServerStrictVmfTest, AutomatedReconSearchesForTargetsOutsideScanRange) {
+TEST(GameServerStrictVmfTest, AutomatedReconReplacesStaleRouteWithSafeApproach) {
     QTemporaryDir temporary;
     ASSERT_TRUE(temporary.isValid());
     configureGameServerEnvironment(temporary);
@@ -4333,23 +4350,98 @@ TEST(GameServerStrictVmfTest, AutomatedReconSearchesForTargetsOutsideScanRange) 
     UnitBase* reconUnit = server.m_engine.unit(recon.unitId);
     ASSERT_NE(reconUnit, nullptr);
     reconUnit->setPosition(GeoPos{0.0, 0.0, reconUnit->pos().alt});
-    reconUnit->setSchedule({});
+    reconUnit->setSchedule({SchedulePoint{0.0, 100.0, 100.0}});
     for (const AuthoritativeRoom::Seat& seat : server.m_authoritativeRoom.seats()) {
         if (seat.controlMode != QLatin1String("fixed-target")) continue;
         UnitBase* target = server.m_engine.unit(seat.unitId);
         ASSERT_NE(target, nullptr);
         target->setPosition(GeoPos{20000.0, 15000.0, target->pos().alt});
     }
-    server.m_engine.stepOnce(0.1);
-    ASSERT_TRUE(reconUnit->schedule().empty());
-
     server.runStrictVmfAutomation();
 
     ASSERT_EQ(reconUnit->schedule().size(), 1U);
-    EXPECT_DOUBLE_EQ(reconUnit->schedule().front().x, 20000.0);
-    EXPECT_DOUBLE_EQ(reconUnit->schedule().front().y, 15000.0);
+    const SchedulePoint approach = reconUnit->schedule().front();
+    EXPECT_GT(std::hypot(approach.x - 100.0, approach.y - 100.0), 1000.0);
+    const GeoPos target{20000.0, 15000.0, reconUnit->pos().alt};
+    const double standoff = GeoPos{approach.x, approach.y, reconUnit->pos().alt}
+                                 .distanceTo2D(target);
+    EXPECT_GT(standoff, 1000.0);
+    EXPECT_LT(standoff, reconUnit->scanState().range);
     EXPECT_DOUBLE_EQ(reconUnit->scanState().cooldownRemaining, 0.0);
     EXPECT_EQ(server.m_eventSequence, 1U);
+
+    const GeoPos beforeMove = reconUnit->pos();
+    server.m_engine.setRunning(false);
+    server.m_engine.stepOnce(1.0);
+    server.m_engine.setRunning(true);
+    EXPECT_GT(beforeMove.distanceTo2D(reconUnit->pos()), 100.0);
+}
+
+TEST(GameServerStrictVmfTest, AutomatedAttackMovesAndRecoversLostRoute) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    configureGameServerEnvironment(temporary);
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-guided-strike-v1");
+    ASSERT_TRUE(server.applyProtocolProfilePolicy());
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.setReady(1, true).ok);
+    ASSERT_TRUE(server.applyDeployedScenario());
+    server.syncAuthoritativeSeats();
+    ASSERT_TRUE(server.m_authoritativeRoom.start().ok);
+    server.m_phase = QStringLiteral("running");
+    server.m_roomStatus = QStringLiteral("running");
+    server.m_engine.setRunning(true);
+
+    const AuthoritativeRoom::Seat attackSeat =
+        server.m_authoritativeRoom.seat(QStringLiteral("red_attack_1"));
+    const AuthoritativeRoom::Seat reconSeat =
+        server.m_authoritativeRoom.seat(QStringLiteral("red_recon_1"));
+    const AuthoritativeRoom::Seat groundSeat =
+        server.m_authoritativeRoom.seat(QStringLiteral("red_ground_1"));
+    auto* attacker = qobject_cast<AttackUAV*>(server.m_engine.unit(attackSeat.unitId));
+    const UnitBase* target = server.m_engine.unit(QStringLiteral("blue_cp"));
+    ASSERT_NE(attacker, nullptr);
+    ASSERT_NE(target, nullptr);
+    ASSERT_FALSE(reconSeat.seatId.isEmpty());
+    ASSERT_FALSE(groundSeat.seatId.isEmpty());
+    const QJsonArray route{QJsonObject{
+        {QStringLiteral("x"), target->pos().x - attacker->optimalAttackRange()},
+        {QStringLiteral("y"), target->pos().y}}};
+    const auto created = server.m_strictVmfTasks.createTask(
+        QStringLiteral("auto-motion"), QStringLiteral("red"),
+        QStringLiteral("red_commander"), reconSeat.seatId, attackSeat.seatId,
+        groundSeat.seatId, target->id(), QStringLiteral("auto-motion-corr"),
+        false, server.m_engine.simTime(), route);
+    ASSERT_TRUE(created.ok);
+    const QJsonObject report{
+        {QStringLiteral("taskId"), QStringLiteral("auto-motion")},
+        {QStringLiteral("expectedTaskRevision"),
+         static_cast<qint64>(created.taskRevision)},
+        {QStringLiteral("action"), QStringLiteral("reportTarget")}};
+    ASSERT_TRUE(server.m_strictVmfTasks.applyAction(
+        report, reconSeat.seatId, {}, server.m_engine.simTime()).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.disconnect(1).ok);
+    server.syncAuthoritativeSeats();
+    ASSERT_EQ(server.m_authoritativeRoom.seat(QStringLiteral("red_commander")).controlMode,
+              QStringLiteral("vmf-auto"));
+
+    server.runStrictVmfAutomation();
+    ASSERT_TRUE(attacker->hasActiveWaypoints());
+    const GeoPos beforeMove = attacker->pos();
+    server.m_engine.setRunning(false);
+    server.m_engine.stepOnce(1.0);
+    server.m_engine.setRunning(true);
+    EXPECT_GT(beforeMove.distanceTo2D(attacker->pos()), 100.0);
+
+    attacker->cancelWaypointMotion();
+    ASSERT_FALSE(attacker->hasActiveWaypoints());
+    server.runStrictVmfAutomation();
+    EXPECT_TRUE(attacker->hasActiveWaypoints());
 }
 
 TEST(GameServerPveLifecycleTest, DeploysAiBeforeRedCommanderReadiness) {
