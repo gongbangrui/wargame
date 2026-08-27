@@ -2506,6 +2506,7 @@ void GameServer::finishAuthentication(QWebSocket* socket, const QJsonObject& ide
     if (!session.side.isEmpty()) welcome.insert(QStringLiteral("side"), session.side);
     sendEnvelope(socket, QStringLiteral("welcome"), welcome);
     sendFullSnapshot(socket);
+    sendRoomDirectory(socket);
     sendSeatDirectory(socket);
     broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("presence")},
                                {QStringLiteral("message"), QStringLiteral("%1 已进入推演室").arg(session.username)}});

@@ -206,6 +206,39 @@ QJsonObject joinObserver(GameServer& server, QWebSocket* socket, QWebSocket& cli
     return snapshot;
 }
 
+TEST(GameServerLobbyTest, AuthenticationPublishesRoomDirectoryWithoutClientRefresh) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    ControlPlane control;
+    ASSERT_TRUE(control.listen());
+    const QJsonObject room = roomConfig(QStringLiteral("preparing"));
+    control.setRooms(QJsonArray{room});
+    configureEnvironment(temporary, control.port());
+    GameServer server;
+    ASSERT_TRUE(server.listen(0));
+    stopBackgroundTimers(server);
+    ASSERT_TRUE(waitFor([&server]() {
+        return server.m_roomDirectoryLoaded && server.m_roomDirectory.size() == 1;
+    }));
+
+    QList<QJsonObject> messages;
+    QWebSocket client;
+    QWebSocket* socket = openAndAuthenticate(server, client, messages);
+    ASSERT_NE(socket, nullptr);
+    ASSERT_TRUE(waitFor([&messages]() {
+        return !latestPayload(messages, QStringLiteral("roomDirectory")).isEmpty();
+    }));
+    const QJsonArray rooms = latestPayload(messages, QStringLiteral("roomDirectory"))
+                                 .value(QStringLiteral("rooms")).toArray();
+    ASSERT_EQ(rooms.size(), 1);
+    EXPECT_EQ(rooms.at(0).toObject().value(QStringLiteral("roomId")),
+              QStringLiteral("main"));
+    EXPECT_TRUE(rooms.at(0).toObject().value(QStringLiteral("enabled")).toBool());
+
+    client.close();
+    ASSERT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
+}
+
 struct ValidMessage {
     QString type;
     QJsonObject payload;
