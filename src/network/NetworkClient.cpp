@@ -503,6 +503,13 @@ void NetworkClient::onTextMessage(const QString& text) {
             fallbackToLegacyProtocol();
             return;
         }
+        if (!requestId.isEmpty() && m_pendingCommands.contains(requestId)) {
+            const PendingCommand pending = m_pendingCommands.take(requestId);
+            emit commandStatusChanged(requestId, pending.action, QStringLiteral("rejected"),
+                                      code, message);
+            emit commandRejected(message);
+            return;
+        }
         if (!requestId.isEmpty() && m_pendingIntelRequests.contains(requestId)) {
             const PendingIntelRequest pending = m_pendingIntelRequests.take(requestId);
             emit commandStatusChanged(requestId, pending.action, QStringLiteral("rejected"),
@@ -657,7 +664,8 @@ void NetworkClient::sendCommand(const QString& action, const QVariantMap& args) 
         emit commandRejected(validation.message);
         return;
     }
-    m_pendingCommands.insert(commandId, PendingCommand{action, jsonArgs});
+    m_pendingCommands.insert(commandId,
+                             PendingCommand{action, jsonArgs, QStringLiteral("command")});
     emit commandStatusChanged(commandId, action, QStringLiteral("queued"), {},
                               m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()
                                   ? QStringLiteral("状态同步完成后发送命令")
@@ -673,16 +681,22 @@ void NetworkClient::sendUnitOrder(const QString& unitId, const QString& text) {
 
 void NetworkClient::sendPendingCommand(const QString& commandId, bool retry) {
     if (!m_pendingCommands.contains(commandId) || !m_authenticated
-        || state() != QLatin1String("connected") || m_stateStore.waitingForSnapshot()
-        || m_stateStore.waitingForResync() || m_stateStore.stateRevision() <= 0) {
+        || state() != QLatin1String("connected")) {
         return;
     }
     PendingCommand& pending = m_pendingCommands[commandId];
-    const QJsonObject payload{{QStringLiteral("commandId"), commandId},
+    QJsonObject payload = pending.args;
+    if (pending.wireType == QLatin1String("command")) {
+        if (m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync()
+            || m_stateStore.stateRevision() <= 0) {
+            return;
+        }
+        payload = QJsonObject{{QStringLiteral("commandId"), commandId},
                               {QStringLiteral("action"), pending.action},
                               {QStringLiteral("stateRevision"), m_stateStore.stateRevision()},
                               {QStringLiteral("args"), pending.args}};
-    if (!sendEnvelope(QStringLiteral("command"), payload)) return;
+    }
+    if (!sendEnvelope(pending.wireType, payload, commandId)) return;
     pending.lastSentAtMs = m_monotonic.elapsed();
     ++pending.attempts;
     emit commandStatusChanged(commandId, pending.action,
@@ -725,8 +739,7 @@ void NetworkClient::retransmitPendingIntelRequests() {
 
 void NetworkClient::processPendingCommands() {
     if (m_pendingCommands.isEmpty() || !m_authenticated
-        || state() != QLatin1String("connected") || m_stateStore.waitingForSnapshot()
-        || m_stateStore.waitingForResync()) {
+        || state() != QLatin1String("connected")) {
         return;
     }
     const qint64 now = m_monotonic.elapsed();
@@ -734,10 +747,18 @@ void NetworkClient::processPendingCommands() {
     for (const QString& commandId : commandIds) {
         if (!m_pendingCommands.contains(commandId)) continue;
         PendingCommand& pending = m_pendingCommands[commandId];
+        if (pending.wireType == QLatin1String("command")
+            && (m_stateStore.waitingForSnapshot() || m_stateStore.waitingForResync())) {
+            continue;
+        }
         pending.onlineWaitMs += m_commandTimer.interval();
-        if (pending.onlineWaitMs >= 30000) {
+        const bool leavingRoom = pending.action == QLatin1String("leaveRoom");
+        const int timeoutMs = leavingRoom ? 15000 : 30000;
+        if (pending.onlineWaitMs >= timeoutMs) {
             const PendingCommand timedOut = m_pendingCommands.take(commandId);
-            const QString message = QStringLiteral("命令结果暂时未知，请以同步后的战场状态为准");
+            const QString message = leavingRoom
+                ? QStringLiteral("退出请求未获服务器确认，当前房间状态保持不变")
+                : QStringLiteral("命令结果暂时未知，请以同步后的战场状态为准");
             emit commandStatusChanged(commandId, timedOut.action, QStringLiteral("unknown"),
                                       QStringLiteral("CLIENT_TIMEOUT"), message);
             emit commandRejected(message);
@@ -850,7 +871,31 @@ void NetworkClient::rejectSeatTransfer(const QString& seatId, qint64 userId,
                            {QStringLiteral("requestedRevision"), requestedRevision}});
 }
 
-void NetworkClient::leaveRoom() { sendSimple(QStringLiteral("leaveRoom"), QJsonObject{}); }
+void NetworkClient::leaveRoom() {
+    const QString commandId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const auto reject = [this, commandId](const QString& code, const QString& message) {
+        emit commandStatusChanged(commandId, QStringLiteral("leaveRoom"),
+                                  QStringLiteral("rejected"), code, message);
+        emit commandRejected(message);
+    };
+    if (!m_authenticated || m_socket.state() != QAbstractSocket::ConnectedState) {
+        reject(QStringLiteral("CLIENT_NOT_CONNECTED"),
+               QStringLiteral("联网会话尚未建立"));
+        return;
+    }
+    if (m_pendingCommands.size() >= 128) {
+        reject(QStringLiteral("CLIENT_BACKPRESSURE"),
+               QStringLiteral("待确认命令过多，请等待服务器响应"));
+        return;
+    }
+    m_pendingCommands.insert(
+        commandId,
+        PendingCommand{QStringLiteral("leaveRoom"), {}, QStringLiteral("leaveRoom")});
+    emit commandStatusChanged(commandId, QStringLiteral("leaveRoom"),
+                              QStringLiteral("queued"), {},
+                              QStringLiteral("退出请求已进入发送队列"));
+    sendPendingCommand(commandId, false);
+}
 
 void NetworkClient::sendSeatReady(bool ready) {
     sendSimple(QStringLiteral("seatReady"), QJsonObject{{QStringLiteral("ready"), ready}});

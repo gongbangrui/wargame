@@ -133,6 +133,7 @@ private:
     struct PendingCommand {
         QString action;
         QJsonObject args;
+        QString wireType = QStringLiteral("command");
         qint64 lastSentAtMs = -1;
         int onlineWaitMs = 0;
         int attempts = 0;

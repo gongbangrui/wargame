@@ -87,6 +87,14 @@ public:
         emit controller.m_networkClient.roomDirectoryReceived(rooms);
     }
 
+    static void receiveLeaveStatus(SimulationController& controller, const QString& status) {
+        emit controller.m_networkClient.commandStatusChanged(
+            QStringLiteral("leave-request"), QStringLiteral("leaveRoom"), status,
+            status == QLatin1String("accepted") ? QStringLiteral("OK")
+                                                 : QStringLiteral("REJECTED"),
+            QStringLiteral("leave result"));
+    }
+
     static void setLeaveRoomPending(SimulationController& controller, bool pending) {
         controller.m_leaveRoomPending = pending;
     }
@@ -182,6 +190,10 @@ public:
 
     static int networkTestPendingIntelRequests(NetworkClient& client) {
         return client.m_pendingIntelRequests.size();
+    }
+
+    static int networkTestPendingCommands(NetworkClient& client) {
+        return client.m_pendingCommands.size();
     }
 
     static int controllerPendingIntelRequests(SimulationController& controller) {
@@ -467,6 +479,69 @@ TEST(NetworkClientTest, QueuesCommandUntilInitialSnapshotIsApplied) {
     ASSERT_FALSE(commandEnvelope.isEmpty());
     EXPECT_EQ(commandEnvelope.value(QStringLiteral("payload")).toObject()
                   .value(QStringLiteral("stateRevision")).toInteger(), 42);
+
+    client.close();
+    serverSocket->close();
+    server.close();
+}
+
+TEST(NetworkClientTest, LeaveRoomUsesCorrelatedCommandResultWithoutSnapshotDependency) {
+    int argc = 1;
+    char applicationName[] = "network_leave_ack_test";
+    char* argv[] = {applicationName, nullptr};
+    std::unique_ptr<QCoreApplication> application;
+    if (!QCoreApplication::instance()) application = std::make_unique<QCoreApplication>(argc, argv);
+
+    QWebSocketServer server(QStringLiteral("network leave acknowledgement test"),
+                            QWebSocketServer::NonSecureMode);
+    ASSERT_TRUE(server.listen(QHostAddress::LocalHost));
+    QWebSocket* serverSocket = nullptr;
+    QObject::connect(&server, &QWebSocketServer::newConnection, &server, [&]() {
+        serverSocket = server.nextPendingConnection();
+    });
+
+    NetworkClient client;
+    SimulationControllerTestPeer::openNetworkTestSocket(client, server.serverUrl());
+    ASSERT_TRUE(waitFor([&]() {
+        return serverSocket != nullptr
+            && SimulationControllerTestPeer::networkTestSocketConnected(client);
+    }));
+    SimulationControllerTestPeer::markNetworkTestAuthenticated(client);
+
+    QJsonObject leaveEnvelope;
+    QObject::connect(serverSocket, &QWebSocket::textMessageReceived, &client,
+                     [&leaveEnvelope](const QString& text) {
+        const QJsonObject envelope = QJsonDocument::fromJson(text.toUtf8()).object();
+        if (envelope.value(QStringLiteral("type")) == QLatin1String("leaveRoom")) {
+            leaveEnvelope = envelope;
+        }
+    });
+    QString acceptedId;
+    QObject::connect(&client, &NetworkClient::commandStatusChanged, &client,
+                     [&acceptedId](const QString& commandId, const QString& action,
+                                   const QString& status, const QString&, const QString&) {
+        if (action == QLatin1String("leaveRoom") && status == QLatin1String("accepted")) {
+            acceptedId = commandId;
+        }
+    });
+
+    client.leaveRoom();
+    ASSERT_TRUE(waitFor([&leaveEnvelope]() { return !leaveEnvelope.isEmpty(); }));
+    const QString requestId = leaveEnvelope.value(QStringLiteral("messageId")).toString();
+    EXPECT_FALSE(requestId.isEmpty());
+    EXPECT_TRUE(leaveEnvelope.value(QStringLiteral("payload")).toObject().isEmpty());
+    EXPECT_EQ(SimulationControllerTestPeer::networkTestPendingCommands(client), 1);
+
+    sendNetworkTestEnvelope(
+        serverSocket, QStringLiteral("commandResult"), 1,
+        QJsonObject{{QStringLiteral("commandId"), requestId},
+                    {QStringLiteral("accepted"), true},
+                    {QStringLiteral("code"), QStringLiteral("OK")},
+                    {QStringLiteral("message"), QStringLiteral("left")},
+                    {QStringLiteral("serverTime"), 0.0}});
+    ASSERT_TRUE(waitFor([&acceptedId]() { return !acceptedId.isEmpty(); }));
+    EXPECT_EQ(acceptedId, requestId);
+    EXPECT_EQ(SimulationControllerTestPeer::networkTestPendingCommands(client), 0);
 
     client.close();
     serverSocket->close();
@@ -981,12 +1056,26 @@ TEST(SimulationControllerTest, PveSnapshotPublishesAuthorizedConfigurationAndAiS
               QStringLiteral("ai"));
 }
 
-TEST(SimulationControllerTest, RoomDirectoryAfterLeaveClearsStaleSeatState) {
+TEST(SimulationControllerTest, UnrelatedRoomDirectoryDoesNotConfirmPendingLeave) {
     SimulationController controller;
     SimulationControllerTestPeer::seedActiveOnlineRoom(controller);
     SimulationControllerTestPeer::setLeaveRoomPending(controller, true);
 
-    SimulationControllerTestPeer::receiveRoomDirectory(controller);
+    SimulationControllerTestPeer::receiveRoomDirectory(
+        controller, QJsonArray{QJsonObject{{QStringLiteral("roomId"),
+                                            QStringLiteral("main")}}});
+
+    EXPECT_TRUE(controller.leaveRoomPending());
+    EXPECT_EQ(controller.currentRoomId(), QStringLiteral("main"));
+    EXPECT_EQ(controller.currentSeatId(), QStringLiteral("red_commander"));
+}
+
+TEST(SimulationControllerTest, ConfirmedLeaveClearsStaleRoomState) {
+    SimulationController controller;
+    SimulationControllerTestPeer::seedActiveOnlineRoom(controller);
+    SimulationControllerTestPeer::setLeaveRoomPending(controller, true);
+
+    SimulationControllerTestPeer::receiveLeaveStatus(controller, QStringLiteral("accepted"));
 
     EXPECT_FALSE(controller.leaveRoomPending());
     EXPECT_TRUE(controller.currentRoomId().isEmpty());
@@ -1000,11 +1089,26 @@ TEST(SimulationControllerTest, RoomDirectoryAfterLeaveClearsStaleSeatState) {
 
 TEST(SimulationControllerTest, LeavePendingClearsWhenServerRejectsRequest) {
     SimulationController controller;
+    SimulationControllerTestPeer::seedActiveOnlineRoom(controller);
+    SimulationControllerTestPeer::setLeaveRoomPending(controller, true);
+
+    SimulationControllerTestPeer::receiveLeaveStatus(controller, QStringLiteral("rejected"));
+
+    EXPECT_FALSE(controller.leaveRoomPending());
+    EXPECT_EQ(controller.currentRoomId(), QStringLiteral("main"));
+    EXPECT_EQ(controller.currentSeatId(), QStringLiteral("red_commander"));
+}
+
+TEST(SimulationControllerTest, UnrelatedCommandRejectionDoesNotCancelPendingLeave) {
+    SimulationController controller;
+    SimulationControllerTestPeer::seedActiveOnlineRoom(controller);
     SimulationControllerTestPeer::setLeaveRoomPending(controller, true);
 
     SimulationControllerTestPeer::receiveCommandRejected(controller);
 
-    EXPECT_FALSE(controller.leaveRoomPending());
+    EXPECT_TRUE(controller.leaveRoomPending());
+    EXPECT_EQ(controller.currentRoomId(), QStringLiteral("main"));
+    EXPECT_EQ(controller.currentSeatId(), QStringLiteral("red_commander"));
 }
 
 TEST(SimulationControllerTest, RejectedObserverJoinRestoresSeatSelectionFlow) {

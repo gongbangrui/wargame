@@ -75,17 +75,22 @@ public:
     quint16 port() const { return m_server.serverPort(); }
     void setRooms(const QJsonArray& rooms) { m_rooms = rooms; }
     void setKickRequests(const QJsonArray& requests) { m_kickRequests = requests; }
+    void setIdentity(const QJsonObject& identity) { m_identity = identity; }
+    void setRoomConfigResponse(const QJsonObject& room) { m_roomConfigResponse = room; }
 
 private:
     void respond(QTcpSocket* socket, const QByteArray& request) {
         QByteArray body;
         if (request.startsWith(QByteArrayLiteral("POST /api/internal/session "))) {
-            body = QByteArrayLiteral(
-                R"({"valid":true,"userId":3,"username":"observer","displayName":"Observer"})");
+            body = QJsonDocument(m_identity).toJson(QJsonDocument::Compact);
         } else if (request.startsWith(QByteArrayLiteral("GET /api/internal/rooms "))) {
             body = QJsonDocument(QJsonObject{{QStringLiteral("rooms"), m_rooms},
                                              {QStringLiteral("kickRequests"), m_kickRequests},
                                              {QStringLiteral("logoutRequests"), QJsonArray{}}})
+                       .toJson(QJsonDocument::Compact);
+        } else if (request.startsWith(QByteArrayLiteral("PUT /api/internal/rooms/main/config "))
+                   && !m_roomConfigResponse.isEmpty()) {
+            body = QJsonDocument(QJsonObject{{QStringLiteral("room"), m_roomConfigResponse}})
                        .toJson(QJsonDocument::Compact);
         } else {
             body = QByteArrayLiteral("{}");
@@ -100,6 +105,11 @@ private:
     QTcpServer m_server;
     QJsonArray m_rooms;
     QJsonArray m_kickRequests;
+    QJsonObject m_identity{{QStringLiteral("valid"), true},
+                           {QStringLiteral("userId"), 3},
+                           {QStringLiteral("username"), QStringLiteral("observer")},
+                           {QStringLiteral("displayName"), QStringLiteral("Observer")}};
+    QJsonObject m_roomConfigResponse;
 };
 
 void configureEnvironment(const QTemporaryDir& temporary, quint16 controlPort) {
@@ -420,7 +430,191 @@ TEST(GameServerObserverTest, ReadOnlyGateCoversEveryWriteAndAllowsTransportOpera
         return server.m_clients.contains(socket) && !server.m_clients.value(socket).observer
             && server.m_clients.value(socket).roomId.isEmpty();
     }));
+    ASSERT_TRUE(waitFor([&messages]() {
+        const QJsonObject result = latestPayload(
+            messages, QStringLiteral("commandResult"), [](const QJsonObject& payload) {
+                return payload.value(QStringLiteral("commandId"))
+                           == QLatin1String("allowed-leave");
+            });
+        return result.value(QStringLiteral("accepted")).toBool();
+    }));
+
+    const auto acceptedLeaveResults = [&messages]() {
+        return std::count_if(messages.cbegin(), messages.cend(), [](const QJsonObject& envelope) {
+            const QJsonObject payload = envelope.value(QStringLiteral("payload")).toObject();
+            return envelope.value(QStringLiteral("type")) == QLatin1String("commandResult")
+                && payload.value(QStringLiteral("commandId")) == QLatin1String("allowed-leave")
+                && payload.value(QStringLiteral("accepted")).toBool();
+        });
+    };
+    const int resultCount = acceptedLeaveResults();
+    sendClientEnvelope(client, QStringLiteral("leaveRoom"), QStringLiteral("allowed-leave"));
+    ASSERT_TRUE(waitFor([&acceptedLeaveResults, resultCount]() {
+        return acceptedLeaveResults() > resultCount;
+    }));
+    EXPECT_TRUE(latestPayload(messages, QStringLiteral("error"), [](const QJsonObject& payload) {
+        return payload.value(QStringLiteral("requestId")) == QLatin1String("allowed-leave")
+            && payload.value(QStringLiteral("code")) == QLatin1String("DUPLICATE_MESSAGE");
+    }).isEmpty());
     EXPECT_EQ(server.m_authoritativeRoom.revision(), roomRevision);
+    client.close();
+    ASSERT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
+}
+
+TEST(GameServerObserverTest, RoomAdminLeavesAfterApplyingDemoConfiguration) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    ControlPlane control;
+    ASSERT_TRUE(control.listen());
+    control.setIdentity(QJsonObject{{QStringLiteral("valid"), true},
+                                    {QStringLiteral("userId"), 7},
+                                    {QStringLiteral("username"), QStringLiteral("room-admin")},
+                                    {QStringLiteral("displayName"), QStringLiteral("Room Admin")},
+                                    {QStringLiteral("role"), QStringLiteral("room_admin")}});
+    control.setRooms(QJsonArray{roomConfig(QStringLiteral("preparing"))});
+    configureEnvironment(temporary, control.port());
+    GameServer server;
+    ASSERT_TRUE(server.listen(0));
+    stopBackgroundTimers(server);
+
+    QJsonObject limits;
+    for (auto it = server.m_seatLimits.cbegin(); it != server.m_seatLimits.cend(); ++it) {
+        limits.insert(it.key(), it.value());
+    }
+    control.setRoomConfigResponse(
+        QJsonObject{{QStringLiteral("roomId"), server.m_roomId},
+                    {QStringLiteral("name"), QStringLiteral("Demo Room")},
+                    {QStringLiteral("description"), QStringLiteral("updated")},
+                    {QStringLiteral("scenarioId"), QStringLiteral("default")},
+                    {QStringLiteral("protocolProfile"), QStringLiteral("vmf-demo-v2")},
+                    {QStringLiteral("configVersion"), 2},
+                    {QStringLiteral("seatLimits"), limits},
+                    {QStringLiteral("seatParameters"), QJsonObject{}},
+                    {QStringLiteral("updatedAt"), QStringLiteral("2026-08-27T00:00:00Z")}});
+
+    QList<QJsonObject> messages;
+    QWebSocket client;
+    QWebSocket* socket = openAndAuthenticate(server, client, messages);
+    ASSERT_NE(socket, nullptr);
+    ASSERT_EQ(server.m_clients.value(socket).accountRole, QStringLiteral("room_admin"));
+    sendClientEnvelope(client, QStringLiteral("joinRoom"), QStringLiteral("admin-join"),
+                       QJsonObject{{QStringLiteral("roomId"), server.m_roomId}});
+    ASSERT_TRUE(waitFor([&server, socket]() {
+        return server.m_clients.contains(socket)
+            && server.m_clients.value(socket).roomId == server.m_roomId
+            && server.m_clients.value(socket).seatId.isEmpty();
+    }));
+
+    sendClientEnvelope(
+        client, QStringLiteral("command"), QStringLiteral("admin-config-envelope"),
+        QJsonObject{{QStringLiteral("commandId"), QStringLiteral("admin-config")},
+                    {QStringLiteral("action"), QStringLiteral("updateRoomConfig")},
+                    {QStringLiteral("stateRevision"),
+                     static_cast<qint64>(server.m_stateRevision)},
+                    {QStringLiteral("args"),
+                     QJsonObject{{QStringLiteral("expectedConfigVersion"), 1},
+                                 {QStringLiteral("name"), QStringLiteral("Demo Room")},
+                                 {QStringLiteral("description"), QStringLiteral("updated")},
+                                 {QStringLiteral("scenarioId"), QStringLiteral("default")},
+                                 {QStringLiteral("protocolProfile"), QStringLiteral("vmf-demo-v2")},
+                                 {QStringLiteral("seatParameters"), QJsonObject{}}}}});
+    ASSERT_TRUE(waitFor([&messages]() {
+        return latestPayload(messages, QStringLiteral("commandResult"),
+                             [](const QJsonObject& payload) {
+            return payload.value(QStringLiteral("commandId")) == QLatin1String("admin-config")
+                && payload.value(QStringLiteral("accepted")).toBool();
+        }).value(QStringLiteral("accepted")).toBool();
+    }));
+    EXPECT_EQ(server.m_protocolProfile, QStringLiteral("vmf-demo-v2"));
+    EXPECT_EQ(server.m_configVersion, 2U);
+    EXPECT_EQ(server.m_clients.value(socket).roomId, server.m_roomId);
+
+    sendClientEnvelope(client, QStringLiteral("leaveRoom"), QStringLiteral("admin-leave"));
+    ASSERT_TRUE(waitFor([&messages]() {
+        return latestPayload(messages, QStringLiteral("commandResult"),
+                             [](const QJsonObject& payload) {
+            return payload.value(QStringLiteral("commandId")) == QLatin1String("admin-leave")
+                && payload.value(QStringLiteral("accepted")).toBool();
+        }).value(QStringLiteral("accepted")).toBool();
+    }));
+    EXPECT_TRUE(server.m_clients.value(socket).roomId.isEmpty());
+    EXPECT_EQ(server.m_phase, QStringLiteral("preparing"));
+
+    client.close();
+    ASSERT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
+}
+
+TEST(GameServerObserverTest, LastSeatedParticipantReceivesIdempotentLeaveResult) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    ControlPlane control;
+    ASSERT_TRUE(control.listen());
+    control.setIdentity(QJsonObject{{QStringLiteral("valid"), true},
+                                    {QStringLiteral("userId"), 8},
+                                    {QStringLiteral("username"), QStringLiteral("participant")},
+                                    {QStringLiteral("displayName"), QStringLiteral("Participant")},
+                                    {QStringLiteral("role"), QStringLiteral("player")}});
+    control.setRooms(QJsonArray{roomConfig(QStringLiteral("preparing"))});
+    configureEnvironment(temporary, control.port());
+    GameServer server;
+    ASSERT_TRUE(server.listen(0));
+    stopBackgroundTimers(server);
+
+    QList<QJsonObject> messages;
+    QWebSocket client;
+    QWebSocket* socket = openAndAuthenticate(server, client, messages);
+    ASSERT_NE(socket, nullptr);
+    sendClientEnvelope(client, QStringLiteral("joinRoom"), QStringLiteral("participant-join"),
+                       QJsonObject{{QStringLiteral("roomId"), server.m_roomId}});
+    ASSERT_TRUE(waitFor([&server, socket]() {
+        return server.m_clients.value(socket).roomId == server.m_roomId;
+    }));
+    sendClientEnvelope(client, QStringLiteral("claimSeat"), QStringLiteral("participant-seat"),
+                       QJsonObject{{QStringLiteral("seatId"),
+                                    QStringLiteral("red_commander")}});
+    ASSERT_TRUE(waitFor([&server, socket]() {
+        return server.m_clients.value(socket).seatId == QLatin1String("red_commander");
+    }));
+
+    sendClientEnvelope(
+        client, QStringLiteral("command"), QStringLiteral("collision-envelope"),
+        QJsonObject{{QStringLiteral("commandId"),
+                     QStringLiteral("room-lifecycle:leaveRoom:participant-leave")},
+                    {QStringLiteral("action"), QStringLiteral("halt")},
+                    {QStringLiteral("stateRevision"),
+                     static_cast<qint64>(server.m_stateRevision)},
+                    {QStringLiteral("args"),
+                     QJsonObject{{QStringLiteral("unitId"), QStringLiteral("red_cp")}}}});
+    ASSERT_TRUE(waitFor([&messages]() {
+        return !latestPayload(messages, QStringLiteral("commandResult"),
+                              [](const QJsonObject& payload) {
+            return payload.value(QStringLiteral("commandId"))
+                == QLatin1String("room-lifecycle:leaveRoom:participant-leave");
+        }).isEmpty();
+    }));
+
+    const auto acceptedLeaveResults = [&messages]() {
+        return std::count_if(messages.cbegin(), messages.cend(), [](const QJsonObject& envelope) {
+            const QJsonObject payload = envelope.value(QStringLiteral("payload")).toObject();
+            return envelope.value(QStringLiteral("type")) == QLatin1String("commandResult")
+                && payload.value(QStringLiteral("commandId")) == QLatin1String("participant-leave")
+                && payload.value(QStringLiteral("accepted")).toBool();
+        });
+    };
+    sendClientEnvelope(client, QStringLiteral("leaveRoom"), QStringLiteral("participant-leave"));
+    ASSERT_TRUE(waitFor([&server, socket, &acceptedLeaveResults]() {
+        return server.m_clients.value(socket).roomId.isEmpty()
+            && acceptedLeaveResults() == 1;
+    }));
+    EXPECT_TRUE(server.m_authoritativeRoom.seats().isEmpty());
+
+    sendClientEnvelope(client, QStringLiteral("leaveRoom"), QStringLiteral("participant-leave"));
+    ASSERT_TRUE(waitFor([&acceptedLeaveResults]() { return acceptedLeaveResults() == 2; }));
+    EXPECT_TRUE(latestPayload(messages, QStringLiteral("error"), [](const QJsonObject& payload) {
+        return payload.value(QStringLiteral("requestId")) == QLatin1String("participant-leave")
+            && payload.value(QStringLiteral("code")) == QLatin1String("DUPLICATE_MESSAGE");
+    }).isEmpty());
+
     client.close();
     ASSERT_TRUE(waitFor([&server]() { return server.m_clients.isEmpty(); }));
 }

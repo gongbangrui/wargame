@@ -194,7 +194,8 @@ private:
     void broadcastRoomDirectory();
     void handleJoinRoom(QWebSocket* socket, const QJsonObject& payload);
     void handleClaimSeat(QWebSocket* socket, const QJsonObject& payload);
-    void handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload);
+    void handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload,
+                         const QString& requestId, const QString& requestType);
     void handleSeatReady(QWebSocket* socket, const QJsonObject& payload);
     void handleDeployment(QWebSocket* socket, const QJsonObject& payload);
     void handleRedeployRequest(QWebSocket* socket);
@@ -265,7 +266,8 @@ private:
     void sendError(QWebSocket* socket, const QString& code, const QString& message,
                    const QString& requestId = QString());
     void sendCommandResult(QWebSocket* socket, const QString& commandId,
-                           const CommandResult& result);
+                           const CommandResult& result,
+                           const QString& resultCacheKey = QString());
     void sendIntelCommandResult(QWebSocket* socket, const QString& action,
                                 const QString& requestId, const CommandResult& result);
     void cacheIntelCommandResult(qint64 userId, const QString& action,

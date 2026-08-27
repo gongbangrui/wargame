@@ -247,17 +247,12 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
     connect(&m_networkClient, &NetworkClient::roomDirectoryReceived, this,
             [this](const QJsonArray& rooms) {
                 m_onlineRooms = rooms.toVariantList();
-                const bool leavingRoom = m_leaveRoomPending;
-                if (m_leaveRoomPending) {
-                    m_leaveRoomPending = false;
-                    emit leaveRoomPendingChanged();
-                }
                 const bool activeRoomStillListed = !m_currentRoomId.isEmpty()
                     && std::any_of(rooms.cbegin(), rooms.cend(), [this](const QJsonValue& value) {
                            return value.toObject().value(QStringLiteral("roomId")).toString()
                                == m_currentRoomId;
                        });
-                if (leavingRoom || !activeRoomStillListed) clearOnlineRoomDerivedState(false);
+                if (!activeRoomStillListed) clearOnlineRoomDerivedState(false);
                 emit onlineRoomsChanged();
             });
     connect(&m_networkClient, &NetworkClient::seatStateReceived, this,
@@ -506,10 +501,6 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
             m_observerJoinPending = false;
             clearOnlineRoomDerivedState(false);
         }
-        if (m_leaveRoomPending) {
-            m_leaveRoomPending = false;
-            emit leaveRoomPendingChanged();
-        }
         m_remoteLastError = message;
         emit errorForward(message);
     };
@@ -530,6 +521,20 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 m_lastCommandStatus = status;
                 m_lastCommandMessage = message;
                 emit commandStatusChanged();
+                if (action == QLatin1String("leaveRoom")
+                    && (status == QLatin1String("accepted")
+                        || status == QLatin1String("rejected")
+                        || status == QLatin1String("unknown")
+                        || status == QLatin1String("canceled"))) {
+                    if (m_leaveRoomPending) {
+                        m_leaveRoomPending = false;
+                        emit leaveRoomPendingChanged();
+                    }
+                    if (status == QLatin1String("accepted")) {
+                        clearOnlineRoomDerivedState(false);
+                        m_networkClient.requestRooms();
+                    }
+                }
                 if (action == QLatin1String("requestIntelHistory")
                     && commandId == m_onlineIntelHistoryRequestId
                     && (status == QLatin1String("accepted")
@@ -2251,15 +2256,6 @@ void SimulationController::leaveOnlineRoom() {
     m_leaveRoomPending = true;
     emit leaveRoomPendingChanged();
     m_networkClient.leaveRoom();
-    QTimer::singleShot(1500, this, [this]() {
-        if (m_leaveRoomPending) m_networkClient.requestRooms();
-    });
-    QTimer::singleShot(5000, this, [this]() {
-        if (!m_leaveRoomPending) return;
-        m_leaveRoomPending = false;
-        emit leaveRoomPendingChanged();
-        emit errorForward(QStringLiteral("退出请求未获服务器确认，请检查连接后重试"));
-    });
 }
 
 void SimulationController::setSeatReady(bool ready) {

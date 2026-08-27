@@ -273,6 +273,11 @@ QString intelRequestCacheKey(qint64 userId, const QString& action,
     return commandCacheKey(userId, QStringLiteral("intel:%1:%2").arg(action, requestId));
 }
 
+QString roomLifecycleCacheKey(qint64 userId, const QString& action,
+                              const QString& requestId) {
+    return QStringLiteral("room-lifecycle:%1:%2:%3").arg(userId).arg(action, requestId);
+}
+
 bool isIntelRequestType(const QString& type) {
     return type == QLatin1String("shareIntel")
         || type == QLatin1String("createIntelReport")
@@ -1542,6 +1547,14 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
             return;
         }
     }
+    if (type == QLatin1String("leaveRoom") || type == QLatin1String("releaseSeat")) {
+        const QString cacheKey = roomLifecycleCacheKey(session.userId, type, messageId);
+        if (m_commandResults.contains(cacheKey)) {
+            sendEnvelope(socket, QStringLiteral("commandResult"),
+                         m_commandResults.value(cacheKey));
+            return;
+        }
+    }
     if (type == QLatin1String("vmfTaskCommand")) {
         const QString requestId = payload.value(QStringLiteral("requestId")).toString();
         const QString cacheKey = QStringLiteral("vmf-task:%1:%2")
@@ -1590,8 +1603,11 @@ void GameServer::onTextMessage(QWebSocket* socket, const QString& text) {
     if (type == QLatin1String("roomList")) handleRoomList(socket);
     else if (type == QLatin1String("joinRoom")) handleJoinRoom(socket, payload);
     else if (type == QLatin1String("claimSeat")) handleClaimSeat(socket, payload);
-    else if (type == QLatin1String("leaveRoom")) handleLeaveRoom(socket, payload);
-    else if (type == QLatin1String("releaseSeat")) handleLeaveRoom(socket, payload);
+    else if (type == QLatin1String("leaveRoom")) {
+        handleLeaveRoom(socket, payload, messageId, type);
+    } else if (type == QLatin1String("releaseSeat")) {
+        handleLeaveRoom(socket, payload, messageId, type);
+    }
     else if (type == QLatin1String("seatReady")) handleSeatReady(socket, payload);
     else if (type == QLatin1String("deployment")) handleDeployment(socket, payload);
     else if (type == QLatin1String("requestRedeploy")) handleRedeployRequest(socket);
@@ -2859,8 +2875,13 @@ void GameServer::completeJoinRoom(QWebSocket* socket, const QJsonObject& payload
                                {QStringLiteral("message"), QStringLiteral("%1 已进入房间大厅").arg(session.username)}});
 }
 
-void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload) {
+void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload,
+                                 const QString& requestId, const QString& requestType) {
     ClientSession& session = m_clients[socket];
+    const QString cacheKey = roomLifecycleCacheKey(session.userId, requestType, requestId);
+    const auto finish = [this, socket, requestId, cacheKey](const CommandResult& result) {
+        sendCommandResult(socket, requestId, result, cacheKey);
+    };
     if (session.observer) {
         m_observerSelectionCache.remove(session.userId);
         session.observerTrajectorySelection.clear();
@@ -2871,6 +2892,7 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
         session.seatReady = false;
         session.observer = false;
         session.role = session.accountRole;
+        finish(CommandResult::ok(QStringLiteral("已退出房间")));
         handleRoomList(socket);
         return;
     }
@@ -2885,9 +2907,10 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
         QString resetError;
         if (!resetRoomIfEmpty(&resetError)) {
             session = originalSession;
-            sendError(socket, QStringLiteral("PERSISTENCE_FAILED"), resetError);
+            finish(CommandResult::reject(QStringLiteral("PERSISTENCE_FAILED"), resetError));
             return;
         }
+        finish(CommandResult::ok(QStringLiteral("已退出房间")));
         handleRoomList(socket);
         sendFullSnapshot(socket);
         broadcastSnapshots(true);
@@ -2918,9 +2941,10 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
         QString resetError;
         if (!resetRoomIfEmpty(&resetError)) {
             session = originalSession;
-            sendError(socket, QStringLiteral("PERSISTENCE_FAILED"), resetError);
+            finish(CommandResult::reject(QStringLiteral("PERSISTENCE_FAILED"), resetError));
             return;
         }
+        finish(CommandResult::ok(QStringLiteral("已退出房间")));
         handleRoomList(socket);
         sendFullSnapshot(socket);
         broadcastSnapshots(true);
@@ -2938,7 +2962,8 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
         ? m_authoritativeRoom.leave(session.userId, successorUserId)
         : m_authoritativeRoom.leaveRoom(session.userId);
     if (!result.ok) {
-        sendError(socket, result.code, QStringLiteral("离开或指挥权移交请求被拒绝"));
+        finish(CommandResult::reject(result.code,
+                                     QStringLiteral("离开或指挥权移交请求被拒绝")));
         return;
     }
     const QString previousSeat = session.seatId;
@@ -2957,14 +2982,14 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
     }
     if (!applyDepartureToRuntime(removedUnitIds, &scenarioError)) {
         restoreRoomStateBackup(backup);
-        sendError(socket, QStringLiteral("RUNTIME_RESET_FAILED"), scenarioError);
+        finish(CommandResult::reject(QStringLiteral("RUNTIME_RESET_FAILED"), scenarioError));
         return;
     }
     syncAuthoritativeSeats();
     QString persistenceError;
     if (!persistRoomState(&persistenceError)) {
         restoreRoomStateBackup(backup);
-        sendError(socket, QStringLiteral("PERSISTENCE_FAILED"), persistenceError);
+        finish(CommandResult::reject(QStringLiteral("PERSISTENCE_FAILED"), persistenceError));
         return;
     }
     session.roomId.clear();
@@ -2974,6 +2999,7 @@ void GameServer::handleLeaveRoom(QWebSocket* socket, const QJsonObject& payload)
     session.seatReady = false;
     session.observer = false;
     session.role = session.accountRole;
+    finish(CommandResult::ok(QStringLiteral("已退出房间")));
     handleRoomList(socket);
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (it->authenticated && it->roomId == m_roomId) sendSeatDirectory(it.key());
@@ -9758,12 +9784,13 @@ void GameServer::sendError(QWebSocket* socket, const QString& code, const QStrin
 }
 
 void GameServer::sendCommandResult(QWebSocket* socket, const QString& commandId,
-                                   const CommandResult& result) {
+                                   const CommandResult& result, const QString& resultCacheKey) {
     QJsonObject payload = result.toJson();
     payload[QStringLiteral("commandId")] = commandId;
     payload[QStringLiteral("serverTime")] = m_engine.simTime();
     if (socket && m_clients.contains(socket) && !commandId.isEmpty()) {
-        const QString key = commandCacheKey(m_clients.value(socket).userId, commandId);
+        const QString key = resultCacheKey.isEmpty()
+            ? commandCacheKey(m_clients.value(socket).userId, commandId) : resultCacheKey;
         if (!m_commandResults.contains(key)) m_commandResultOrder.append(key);
         m_commandResults.insert(key, payload);
         while (m_commandResultOrder.size() > 2048) {
