@@ -247,12 +247,15 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
     connect(&m_networkClient, &NetworkClient::roomDirectoryReceived, this,
             [this](const QJsonArray& rooms) {
                 m_onlineRooms = rooms.toVariantList();
-                const bool activeRoomStillListed = !m_currentRoomId.isEmpty()
+                const bool hadActiveRoom = !m_currentRoomId.isEmpty();
+                const bool activeRoomStillListed = hadActiveRoom
                     && std::any_of(rooms.cbegin(), rooms.cend(), [this](const QJsonValue& value) {
                            return value.toObject().value(QStringLiteral("roomId")).toString()
                                == m_currentRoomId;
                        });
-                if (!activeRoomStillListed) clearOnlineRoomDerivedState(false);
+                if (hadActiveRoom && !activeRoomStillListed) {
+                    clearOnlineRoomDerivedState(false);
+                }
                 emit onlineRoomsChanged();
             });
     connect(&m_networkClient, &NetworkClient::seatStateReceived, this,

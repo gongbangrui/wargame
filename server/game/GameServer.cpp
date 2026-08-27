@@ -2673,17 +2673,39 @@ void GameServer::handleRoomList(QWebSocket* socket) {
 }
 
 void GameServer::sendRoomDirectory(QWebSocket* socket) {
-    QJsonObject room{{QStringLiteral("roomId"), m_roomId},
-                     {QStringLiteral("name"), m_roomName},
-                     {QStringLiteral("description"), m_roomDescription},
-                     {QStringLiteral("status"), m_roomStatus},
-                     {QStringLiteral("mode"), m_roomMode},
-                     {QStringLiteral("aiDifficulty"), m_aiDifficulty},
-                     {QStringLiteral("configVersion"), static_cast<qint64>(m_configVersion)},
-                     {QStringLiteral("intelStaleAfterSec"), m_intelLedger.config().staleAfterSec},
-                     {QStringLiteral("intelArchiveAfterSec"), m_intelLedger.config().archiveAfterSec},
-                     {QStringLiteral("hostedByGameServer"), true},
-                     {QStringLiteral("scenarioId"), m_scenarioId}};
+    QJsonArray rooms;
+    QJsonObject room;
+    qsizetype currentRoomIndex = -1;
+    if (m_roomDirectoryLoaded) {
+        rooms = m_roomDirectory;
+        for (qsizetype index = 0; index < rooms.size(); ++index) {
+            if (rooms.at(index).toObject().value(QStringLiteral("roomId")).toString()
+                == m_roomId) {
+                currentRoomIndex = index;
+                room = rooms.at(index).toObject();
+                break;
+            }
+        }
+    }
+    room[QStringLiteral("roomId")] = m_roomId;
+    room[QStringLiteral("name")] = m_roomName;
+    room[QStringLiteral("description")] = m_roomDescription;
+    room[QStringLiteral("status")] = m_roomStatus;
+    room[QStringLiteral("mode")] = m_roomMode;
+    room[QStringLiteral("aiDifficulty")] = m_aiDifficulty;
+    room[QStringLiteral("configVersion")] = static_cast<qint64>(m_configVersion);
+    room[QStringLiteral("intelStaleAfterSec")] = m_intelLedger.config().staleAfterSec;
+    room[QStringLiteral("intelArchiveAfterSec")] = m_intelLedger.config().archiveAfterSec;
+    room[QStringLiteral("hostedByGameServer")] = true;
+    room[QStringLiteral("scenarioId")] = m_scenarioId;
+    room[QStringLiteral("protocolProfile")] = m_protocolProfile;
+    room[QStringLiteral("operationMode")] = isSingleSideVmfProfile(m_protocolProfile)
+        ? QStringLiteral("vmf-single-side") : QStringLiteral("standard");
+    room[QStringLiteral("participantSide")] = isSingleSideVmfProfile(m_protocolProfile)
+        ? QStringLiteral("red") : QStringLiteral("both");
+    room[QStringLiteral("fixedTargetSide")] = isSingleSideVmfProfile(m_protocolProfile)
+        ? QStringLiteral("blue") : QString();
+    if (!room.contains(QStringLiteral("enabled"))) room[QStringLiteral("enabled")] = true;
     QJsonObject limits;
     for (auto it = m_seatLimits.cbegin(); it != m_seatLimits.cend(); ++it) limits[it.key()] = it.value();
     room[QStringLiteral("seatLimits")] = limits;
@@ -2691,18 +2713,10 @@ void GameServer::sendRoomDirectory(QWebSocket* socket) {
     for (auto it = m_seatParameters.cbegin(); it != m_seatParameters.cend(); ++it)
         parameters[it.key()] = it.value();
     room[QStringLiteral("seatParameters")] = parameters;
-    QJsonArray rooms;
-    if (m_roomDirectoryLoaded) {
-        rooms = m_roomDirectory;
-        for (qsizetype index = 0; index < rooms.size(); ++index) {
-            if (rooms.at(index).toObject().value(QStringLiteral("roomId")).toString()
-                == m_roomId) {
-                rooms[index] = room;
-                break;
-            }
-        }
-    } else {
+    if (!m_roomDirectoryLoaded) {
         rooms.append(room);
+    } else if (currentRoomIndex >= 0) {
+        rooms[currentRoomIndex] = room;
     }
     sendEnvelope(socket, QStringLiteral("roomDirectory"), QJsonObject{{QStringLiteral("rooms"), rooms}});
 }

@@ -1199,6 +1199,32 @@ TEST(SimulationControllerTest, RoomDirectoryRefreshPreservesActiveRoomState) {
               QStringLiteral("stale chat"));
 }
 
+TEST(SimulationControllerTest, InitialRoomDirectoryPopulatesLobbyWithoutResettingSession) {
+    SimulationController controller;
+    SimulationControllerTestPeer::seedOnlineRoomSelection(controller);
+    int sessionChanges = 0;
+    QObject::connect(&controller, &SimulationController::sessionChanged,
+                     &controller, [&sessionChanges]() { ++sessionChanges; });
+
+    SimulationControllerTestPeer::receiveRoomDirectory(controller,
+        QJsonArray{QJsonObject{{QStringLiteral("roomId"), QStringLiteral("main")},
+                               {QStringLiteral("name"), QStringLiteral("主推演室")},
+                               {QStringLiteral("enabled"), true},
+                               {QStringLiteral("status"), QStringLiteral("preparing")},
+                               {QStringLiteral("protocolProfile"),
+                                QStringLiteral("vmf-demo-v2")},
+                               {QStringLiteral("hostedByGameServer"), true}}});
+
+    ASSERT_EQ(controller.onlineRooms().size(), 1);
+    const QVariantMap room = controller.onlineRooms().constFirst().toMap();
+    EXPECT_EQ(room.value(QStringLiteral("roomId")).toString(), QStringLiteral("main"));
+    EXPECT_EQ(room.value(QStringLiteral("name")).toString(), QStringLiteral("主推演室"));
+    EXPECT_EQ(room.value(QStringLiteral("protocolProfile")).toString(),
+              QStringLiteral("vmf-demo-v2"));
+    EXPECT_EQ(controller.onlineStage(), QStringLiteral("roomSelect"));
+    EXPECT_EQ(sessionChanges, 0);
+}
+
 TEST(SimulationControllerTest, ApplicationShutdownLogsOutWhenLoginReplyFinishedBeforeCallback) {
     int argc = 1;
     char applicationName[] = "controller_lifecycle_tests";

@@ -2498,7 +2498,7 @@ TEST(GameServerRoomDirectoryTest, PublishesAllConfiguredRoomsFromControlPlane) {
     QTemporaryDir temporary;
     ASSERT_TRUE(temporary.isValid());
     RoomControlReceiver roomControl(QByteArrayLiteral(
-        R"({"rooms":[{"roomId":"main","name":"主推演室","status":"preparing","hostedByGameServer":true,"updatedAt":"2026-08-04T02:40:00Z"},{"roomId":"secondary","name":"第二推演室","description":"网页创建的房间","status":"preparing","hostedByGameServer":false,"updatedAt":"2026-08-04T02:41:00Z"}],"kickRequests":[],"logoutRequests":[]})"));
+        R"({"rooms":[{"roomId":"main","name":"主推演室","enabled":true,"status":"preparing","protocolProfile":"vmf-demo-v2","hostedByGameServer":true,"updatedAt":"2026-08-04T02:40:00Z"},{"roomId":"secondary","name":"第二推演室","description":"网页创建的房间","status":"preparing","hostedByGameServer":false,"updatedAt":"2026-08-04T02:41:00Z"}],"kickRequests":[],"logoutRequests":[]})"));
     ASSERT_TRUE(roomControl.listen());
     configureGameServerEnvironment(temporary, roomControl.port());
 
@@ -2541,6 +2541,11 @@ TEST(GameServerRoomDirectoryTest, PublishesAllConfiguredRoomsFromControlPlane) {
     EXPECT_EQ(rooms.at(1).toObject().value(QStringLiteral("name")).toString(), QStringLiteral("第二推演室"));
     EXPECT_TRUE(rooms.at(0).toObject().value(QStringLiteral("hostedByGameServer")).toBool());
     EXPECT_FALSE(rooms.at(1).toObject().value(QStringLiteral("hostedByGameServer")).toBool());
+    EXPECT_TRUE(rooms.at(0).toObject().value(QStringLiteral("enabled")).toBool());
+    EXPECT_EQ(rooms.at(0).toObject().value(QStringLiteral("protocolProfile")).toString(),
+              QStringLiteral("vmf-demo-v2"));
+    EXPECT_EQ(rooms.at(0).toObject().value(QStringLiteral("operationMode")).toString(),
+              QStringLiteral("vmf-single-side"));
 
     server.m_clients[socket].authenticated = true;
     server.m_clients[socket].userId = 3;

@@ -10,7 +10,7 @@ PROJECT_VERSION="$(release_project_version "$ROOT_DIR")"
 VERSION="${WARGAME_VERSION:-${PROJECT_VERSION:-2.0.0}}"
 BUILD_ROOT="${WARGAME_BUILD_ROOT:-$ROOT_DIR/build/release}"
 SERVER_BUILD_ROOT="${WARGAME_SERVER_BUILD_ROOT:-$ROOT_DIR/build/server-release}"
-OUTPUT_ROOT="${WARGAME_RELEASE_OUTPUT:-$ROOT_DIR/dist/release-$VERSION}"
+OUTPUT_ROOT="${WARGAME_RELEASE_OUTPUT:-}"
 MANIFEST="$ROOT_DIR/deploy/release-manifest.env"
 
 usage() {
@@ -46,6 +46,7 @@ while (($#)); do
   esac
 done
 
+[[ -n "$OUTPUT_ROOT" ]] || OUTPUT_ROOT="$ROOT_DIR/dist/release-$VERSION"
 [[ "$VERSION" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || {
   printf 'invalid release version: %s\n' "$VERSION" >&2
   exit 2

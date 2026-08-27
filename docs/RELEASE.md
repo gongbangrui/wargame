@@ -18,6 +18,9 @@ WARGAME_VERSION=2.0.0 ./tools/build-release.sh --clean
 (cd dist/release-2.0.0 && sha256sum -c SHA256SUMS)
 ```
 
+也可以使用 `./tools/build-release.sh --version 2.0.0 --clean`；未显式设置
+`WARGAME_RELEASE_OUTPUT` 时，输出目录始终使用最终解析后的版本号。
+
 桌面客户端发布产物由 `appindex` 和同级 `map/` 目录共同组成；两者必须一起分发。
 `SHA256SUMS` 覆盖可执行文件、发布身份以及全部 GIS 运行时瓦片。
 
