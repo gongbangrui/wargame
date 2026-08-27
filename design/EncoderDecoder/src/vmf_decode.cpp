@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -351,19 +352,36 @@ std::vector<uint8_t> ReadAllBytes(const std::string& path) {
 
 int main(int argc, char** argv) {
   try {
-    if (argc != 5) {
+    std::filesystem::path structure_path;
+    std::filesystem::path content_path;
+    std::filesystem::path input_path;
+    std::filesystem::path output_path;
+    if (argc == 1) {
+      const std::filesystem::path executable_dir =
+          std::filesystem::absolute(std::filesystem::path(argv[0])).parent_path();
+      structure_path = executable_dir / "vmf_decode_default_structure.xml";
+      content_path = executable_dir / "vmf_decode_default_content.xml";
+      input_path = executable_dir / "vmf_decode_default.bin";
+      output_path = executable_dir / "vmf_decode_default.xml";
+      std::cout << "No arguments supplied; running the build-tree decode smoke test\n";
+    } else if (argc == 5) {
+      structure_path = argv[1];
+      content_path = argv[2];
+      input_path = argv[3];
+      output_path = argv[4];
+    } else {
       std::cerr << "Usage: vmf_decode <msg_structure.xml> <dic_content.xml> <in.bin> <out.xml>\n";
       return 1;
     }
 
     XMLDocument dict_doc;
-    if (dict_doc.LoadFile(argv[1]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to load dictionary: " << argv[1] << "\n";
+    if (dict_doc.LoadFile(structure_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to load dictionary: " << structure_path << "\n";
       return 1;
     }
     XMLDocument content_doc;
-    if (content_doc.LoadFile(argv[2]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to load content dictionary: " << argv[2] << "\n";
+    if (content_doc.LoadFile(content_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to load content dictionary: " << content_path << "\n";
       return 1;
     }
     const XMLElement* dict_message = dict_doc.FirstChildElement("Message");
@@ -373,15 +391,15 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    std::vector<uint8_t> input = ReadAllBytes(argv[3]);
+    std::vector<uint8_t> input = ReadAllBytes(input_path.string());
     BitReader reader(std::move(input));
     ContentDictionary content_dict(content_root);
     XMLDocument out_doc;
     Decoder decoder(&content_dict);
     decoder.Decode(dict_message, &reader, &out_doc);
 
-    if (out_doc.SaveFile(argv[4]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to save output XML: " << argv[4] << "\n";
+    if (out_doc.SaveFile(output_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to save output XML: " << output_path << "\n";
       return 1;
     }
 

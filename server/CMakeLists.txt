@@ -95,6 +95,8 @@ add_library(wargame_serverlib STATIC
     game/AuthoritativeRoom.cpp
     game/StrictVmfTask.h
     game/StrictVmfTask.cpp
+    game/VmfDemoWorkflow.h
+    game/VmfDemoWorkflow.cpp
     game/IntelLedger.h
     game/IntelLedger.cpp
     game/GameServer.h

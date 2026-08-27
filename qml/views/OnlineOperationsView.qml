@@ -66,6 +66,10 @@ Item {
     property color danger: AppContext.danger
     readonly property bool strictVmf: root.controller
         && root.controller.protocolProfile === "vmf-guided-strike-v1"
+    readonly property bool demoVmf: root.controller
+        && root.controller.protocolProfile === "vmf-demo-v2"
+    readonly property bool singleSideVmf: root.strictVmf || root.demoVmf
+    onDemoVmfChanged: if (demoVmf) tacticalViewIndex = 1
 
     onAttackTargetIdChanged: root.syncAttackTargetBox()
     onSelectedUnitIdChanged: root.queueSelectedUnitCenter()
@@ -137,7 +141,7 @@ Item {
     }
 
     property bool isHumanControlledSeat: root.controller
-        && (!root.strictVmf || root.controller.currentSeatSide === "red")
+        && (!root.singleSideVmf || root.controller.currentSeatSide === "red")
         && (root.controller.roomMode !== "pve" || root.controller.currentSeatSide === "red")
     property bool isCommander: root.isHumanControlledSeat && root.controller.currentSeatType === "commander"
     property bool canDeploy: root.isCommander && root.controller.matchPhase === "preparing"
@@ -346,7 +350,7 @@ Item {
         if (!room || room.enabled === false || room.hostedByGameServer !== true)
             return false
         return room.status === "preparing"
-                || (room.protocolProfile === "vmf-guided-strike-v1"
+                || (["vmf-guided-strike-v1", "vmf-demo-v2"].indexOf(room.protocolProfile) >= 0
                     && ["running", "paused"].indexOf(room.status) >= 0)
     }
     function roomCanObserve(room) {
@@ -354,8 +358,10 @@ Item {
                 && ["preparing", "running", "paused", "finished"].indexOf(room.status) >= 0
     }
     function roomModeLabel(room) {
+        if (room && room.protocolProfile === "vmf-demo-v2")
+            return "演示模式"
         if (room && room.protocolProfile === "vmf-guided-strike-v1")
-            return "VMF"
+            return "兼容模式 v1"
         if (room && room.mode === "pve") {
             var labels = { easy: "简单", normal: "普通", hard: "困难" }
             return "人机对抗 · " + (labels[room.aiDifficulty] || "普通")
@@ -363,8 +369,10 @@ Item {
         return "人人对抗"
     }
     function roomConfigurationLabel() {
+        if (root.demoVmf)
+            return "演示模式 · 红方"
         if (root.strictVmf)
-            return "VMF · 红方"
+            return "兼容模式 v1 · 红方"
         if (root.controller.roomMode === "pve") {
             var labels = { easy: "简单", normal: "普通", hard: "困难" }
             return "人机对抗 · " + (labels[root.controller.aiDifficulty] || "普通")
@@ -411,7 +419,7 @@ Item {
     }
     function canClaimSeat(seat) {
         if (!seat || seat.controllerType === "ai") return false
-        if (root.strictVmf) {
+        if (root.singleSideVmf) {
             if (seat.side !== "red" || seat.claimable !== true
                     || root.controller.currentSeatId) return false
             var strictPhase = root.controller.matchPhase
@@ -451,7 +459,7 @@ Item {
         if (root.switchRequestPending && seat.seatId === root.switchTargetSeatId)
             return "等待确认"
         if (root.canClaimSeat(seat)) return ""
-        if (root.strictVmf || root.isRoomEmpty()) return "先选红方指挥官"
+        if (root.singleSideVmf || root.isRoomEmpty()) return "先选红方指挥官"
         return "等待指挥官"
     }
     function seatStatusLabel(seat) {
@@ -608,7 +616,7 @@ Item {
                 root.selectedUnitId = ownSeat.unitId || root.selectedUnitId
             } else if (ownSeat && ownSeat.occupied) {
                 root.deploymentState = "waiting"
-                root.selectedUnitId = root.strictVmf ? (ownSeat.unitId || "") : ""
+                root.selectedUnitId = root.singleSideVmf ? (ownSeat.unitId || "") : ""
             }
             return
         }
@@ -1307,9 +1315,9 @@ Item {
                             background: Rectangle { color: "transparent"; border.color: root.line; radius: 4 }
                         }
                     }
-                    Text { text: root.switchSeatSelection ? (root.switchRequestPending ? "等待指挥官确认" : "选择本方非指挥官战位") : root.strictVmf ? "VMF：红方参演" : root.isRoomEmpty() ? "先选择红方指挥官" : "红方指挥官优先"; color: root.strictVmf || root.isRoomEmpty() || root.switchSeatSelection ? root.orange : root.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                    GridLayout { Layout.fillWidth: true; Layout.fillHeight: true; columns: root.strictVmf ? 1 : width > 900 ? 2 : 1; columnSpacing: 14; rowSpacing: 14
-                        Repeater { model: root.strictVmf ? ["red"] : ["red", "blue"]
+                    Text { text: root.switchSeatSelection ? (root.switchRequestPending ? "等待指挥官确认" : "选择本方非指挥官战位") : root.demoVmf ? "演示模式：红方参演" : root.strictVmf ? "兼容模式：红方参演" : root.isRoomEmpty() ? "先选择红方指挥官" : "红方指挥官优先"; color: root.singleSideVmf || root.isRoomEmpty() || root.switchSeatSelection ? root.orange : root.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                    GridLayout { Layout.fillWidth: true; Layout.fillHeight: true; columns: root.singleSideVmf ? 1 : width > 900 ? 2 : 1; columnSpacing: 14; rowSpacing: 14
+                        Repeater { model: root.singleSideVmf ? ["red"] : ["red", "blue"]
                             delegate: Rectangle { id: sidePanel; required property string modelData; Layout.fillWidth: true; Layout.fillHeight: true; color: root.panel; border.color: sidePanel.modelData === "red" ? root.danger : root.info; radius: 6
                             ColumnLayout { anchors.fill: parent; anchors.margins: 14; spacing: 8
                                 Text { text: sidePanel.modelData === "red" ? "红方战位" : "蓝方战位"; color: sidePanel.modelData === "red" ? root.danger : root.info; font.bold: true; font.pixelSize: 14 }
@@ -1813,7 +1821,7 @@ Item {
                             }
                             CommandPanel {
                                 id: commanderCommandPanel
-                                visible: !root.controller.isObserver && root.isCommander && root.controller.matchPhase === "running"
+                                visible: !root.demoVmf && !root.controller.isObserver && root.isCommander && root.controller.matchPhase === "running"
                                          && root.tacticalViewIndex === 1
                                 Layout.fillWidth: true
                                 controller: root.controller
@@ -1831,7 +1839,7 @@ Item {
                             }
                             GuidedStrikeWorkflowPanel {
                                 id: onlineGuidedStrikePanel
-                                visible: !root.controller.isObserver && root.tacticalViewIndex === 1
+                                visible: !root.demoVmf && !root.controller.isObserver && root.tacticalViewIndex === 1
                                          && (onlineGuidedStrikePanel.strictProfile
                                              || onlineGuidedStrikePanel.vmfAvailable)
                                 controller: root.controller
@@ -1840,8 +1848,15 @@ Item {
                                 Layout.preferredHeight: visible ? Math.min(370, implicitHeight) : 0
                                 Layout.maximumHeight: 370
                             }
+                            VmfDemoWorkspace {
+                                id: demoWorkspace
+                                visible: root.demoVmf && root.tacticalViewIndex === 1
+                                controller: root.controller
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: visible ? implicitHeight : 0
+                            }
                             Rectangle {
-                                visible: !root.controller.isObserver && !root.isCommander && root.controller.matchPhase === "running"
+                                visible: !root.demoVmf && !root.controller.isObserver && !root.isCommander && root.controller.matchPhase === "running"
                                          && root.tacticalViewIndex === 1
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? participantFeedColumn.implicitHeight + 18 : 0
@@ -1931,7 +1946,7 @@ Item {
                                         }
                                     }
                                     Text { visible: root.isCommander && root.pendingDeploymentSeats().length === 0; text: "本方已登录战位均已完成部署"; color: root.cyan; font.pixelSize: 10 }
-                                    Text { visible: root.isCommander; Layout.fillWidth: true; text: root.strictVmf ? ("红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + "  ·  蓝方固定靶已托管") : ("红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + "  ·  蓝方 " + (root.controller.blueReady ? "已就绪" : "未就绪")); color: root.dim; font.pixelSize: 9 }
+                                    Text { visible: root.isCommander; Layout.fillWidth: true; text: root.singleSideVmf ? ("红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + "  ·  蓝方固定靶已托管") : ("红方 " + (root.controller.redReady ? "已就绪" : "未就绪") + "  ·  蓝方 " + (root.controller.blueReady ? "已就绪" : "未就绪")); color: root.dim; font.pixelSize: 9 }
                                     Button {
                                         id: redeployButton
                                         visible: root.isCommander

@@ -207,6 +207,7 @@ qt_add_qml_module(appindex
         qml/components/BattleReportDialog.qml
         qml/components/CommandPanel.qml
         qml/components/GuidedStrikeWorkflowPanel.qml
+        qml/components/VmfDemoWorkspace.qml
     RESOURCES
         map/12/3406/1747.png
 )
@@ -381,6 +382,7 @@ if(BUILD_TESTING)
             tests/test_rules_ai.cpp
             tests/test_ollama_conversation_store.cpp
             tests/test_strict_vmf_task.cpp
+            tests/test_vmf_demo_workflow.cpp
         )
         target_link_libraries(wargame_tests PRIVATE wargame_serverlib)
 

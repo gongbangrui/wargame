@@ -539,6 +539,28 @@ bool SimulationEngine::prepareVmfMessage(const Message& input, Message* output,
     return m_vmfGateway->prepareDomainMessage(input, output, error);
 }
 
+bool SimulationEngine::prepareVmfMessageWithTrace(const Message& input, Message* output,
+                                                  QJsonObject* trace,
+                                                  QString* error) const {
+    if (!m_vmfGateway) {
+        if (error) *error = QStringLiteral("VMF profile 未启用");
+        return false;
+    }
+    return m_vmfGateway->prepareDomainMessage(input, output, error, trace);
+}
+
+bool SimulationEngine::prepareVmfXmlMessage(const QString& messageName,
+                                            const QByteArray& xml,
+                                            const Message& input, Message* output,
+                                            QJsonObject* trace,
+                                            QString* error) const {
+    if (!m_vmfGateway) {
+        if (error) *error = QStringLiteral("VMF profile 未启用");
+        return false;
+    }
+    return m_vmfGateway->prepareXmlMessage(messageName, xml, input, output, trace, error);
+}
+
 bool SimulationEngine::setScenario(const Scenario& s) {
     return applyScenario(s, false);
 }

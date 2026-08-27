@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -442,24 +443,41 @@ class Encoder {
 
 int main(int argc, char** argv) {
   try {
-    if (argc != 5) {
+    std::filesystem::path structure_path;
+    std::filesystem::path content_path;
+    std::filesystem::path message_path;
+    std::filesystem::path output_path;
+    if (argc == 1) {
+      const std::filesystem::path executable_dir =
+          std::filesystem::absolute(std::filesystem::path(argv[0])).parent_path();
+      structure_path = executable_dir / "vmf_decode_default_structure.xml";
+      content_path = executable_dir / "vmf_decode_default_content.xml";
+      message_path = executable_dir / "vmf_default_message.xml";
+      output_path = executable_dir / "vmf_encode_default.bin";
+      std::cout << "No arguments supplied; running the build-tree encode smoke test\n";
+    } else if (argc == 5) {
+      structure_path = argv[1];
+      content_path = argv[2];
+      message_path = argv[3];
+      output_path = argv[4];
+    } else {
       std::cerr << "Usage: vmf_encode <msg_structure.xml> <dic_content.xml> <msg.xml> <out.bin>\n";
       return 1;
     }
 
     XMLDocument dict_doc;
-    if (dict_doc.LoadFile(argv[1]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to load dictionary: " << argv[1] << "\n";
+    if (dict_doc.LoadFile(structure_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to load dictionary: " << structure_path << "\n";
       return 1;
     }
     XMLDocument content_doc;
-    if (content_doc.LoadFile(argv[2]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to load content dictionary: " << argv[2] << "\n";
+    if (content_doc.LoadFile(content_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to load content dictionary: " << content_path << "\n";
       return 1;
     }
     XMLDocument msg_doc;
-    if (msg_doc.LoadFile(argv[3]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to load message: " << argv[3] << "\n";
+    if (msg_doc.LoadFile(message_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to load message: " << message_path << "\n";
       return 1;
     }
 
@@ -476,9 +494,9 @@ int main(int argc, char** argv) {
     Encoder encoder(&content_dict);
     encoder.Encode(dict_message, msg_root, &writer);
 
-    FILE* fp = std::fopen(argv[4], "wb");
+    FILE* fp = std::fopen(output_path.string().c_str(), "wb");
     if (!fp) {
-      std::cerr << "Failed to open output file: " << argv[4] << "\n";
+      std::cerr << "Failed to open output file: " << output_path << "\n";
       return 1;
     }
     const auto& bytes = writer.Bytes();

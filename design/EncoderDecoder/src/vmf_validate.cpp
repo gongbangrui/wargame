@@ -2,6 +2,7 @@
 #include <cctype>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -983,24 +984,38 @@ class ContentConstraintValidator {
 
 int main(int argc, char** argv) {
   try {
-    if (argc != 4) {
+    std::filesystem::path structure_path;
+    std::filesystem::path content_path;
+    std::filesystem::path message_path;
+    if (argc == 1) {
+      const std::filesystem::path executable_dir =
+          std::filesystem::absolute(std::filesystem::path(argv[0])).parent_path();
+      structure_path = executable_dir / "vmf_decode_default_structure.xml";
+      content_path = executable_dir / "vmf_decode_default_content.xml";
+      message_path = executable_dir / "vmf_default_message.xml";
+      std::cout << "No arguments supplied; running the build-tree validation smoke test\n";
+    } else if (argc == 4) {
+      structure_path = argv[1];
+      content_path = argv[2];
+      message_path = argv[3];
+    } else {
       std::cerr << "Usage: vmf_validate <msg_structure.xml> <dic_content.xml> <msg.xml>\n";
       return 1;
     }
 
     XMLDocument dict_msg_doc;
-    if (dict_msg_doc.LoadFile(argv[1]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to load dic_msg: " << argv[1] << "\n";
+    if (dict_msg_doc.LoadFile(structure_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to load dic_msg: " << structure_path << "\n";
       return 1;
     }
     XMLDocument dict_content_doc;
-    if (dict_content_doc.LoadFile(argv[2]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to load dic_content: " << argv[2] << "\n";
+    if (dict_content_doc.LoadFile(content_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to load dic_content: " << content_path << "\n";
       return 1;
     }
     XMLDocument msg_doc;
-    if (msg_doc.LoadFile(argv[3]) != tinyxml2::XML_SUCCESS) {
-      std::cerr << "Failed to load message xml: " << argv[3] << "\n";
+    if (msg_doc.LoadFile(message_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+      std::cerr << "Failed to load message xml: " << message_path << "\n";
       return 1;
     }
 

@@ -31,7 +31,7 @@ namespace gbr {
 
 namespace {
 
-constexpr int kCheckpointSchemaVersion = 7;
+constexpr int kCheckpointSchemaVersion = 8;
 constexpr int kOldestSupportedCheckpointSchemaVersion = 2;
 constexpr int kLegacyCheckpointProtocolVersion = 4;
 constexpr int kSchemaFiveCheckpointProtocolVersion = 5;
@@ -344,15 +344,16 @@ bool aiStateFromJson(const QJsonObject& object, AiCheckpointState* state, QStrin
 }
 
 QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
-    // Native rooms remain readable by the v6/v6 checkpoint contract.  The
-    // strict VMF profile opts into the v7 storage additions (task state and
-    // protocol v8) so upgrading a room never rewrites an ordinary checkpoint
-    // merely because the server binary is newer.
+    // Native rooms remain on schema 6 and strict v1 rooms on schema 7. Demo v2
+    // alone opts into schema 8 so existing room data is not rewritten merely
+    // because the server binary is newer.
     const bool strictProfile = checkpoint.protocolProfile
         == QLatin1String("vmf-guided-strike-v1");
-    const int schemaVersion = strictProfile ? kCheckpointSchemaVersion : 6;
-    const int protocolVersion = strictProfile ? kCurrentCheckpointProtocolVersion
-                                              : kNativeCheckpointProtocolVersion;
+    const bool demoProfile = checkpoint.protocolProfile == QLatin1String("vmf-demo-v2");
+    const int schemaVersion = demoProfile ? kCheckpointSchemaVersion
+                                          : strictProfile ? 7 : 6;
+    const int protocolVersion = (strictProfile || demoProfile)
+        ? kCurrentCheckpointProtocolVersion : kNativeCheckpointProtocolVersion;
     QJsonObject object{
         {QStringLiteral("checkpointSchemaVersion"), schemaVersion},
         {QStringLiteral("protocolVersion"), protocolVersion},
@@ -372,6 +373,7 @@ QJsonObject checkpointToJson(const RoomCheckpoint& checkpoint) {
                      {QStringLiteral("scenarioId"), checkpoint.scenarioId},
                      {QStringLiteral("protocolProfile"), checkpoint.protocolProfile},
                      {QStringLiteral("strictVmfTasks"), checkpoint.strictVmfTasks},
+                     {QStringLiteral("demoState"), checkpoint.demoState},
                      {QStringLiteral("seatLimits"), checkpoint.seatLimits},
                      {QStringLiteral("seatParameters"), checkpoint.seatParameters},
                      {QStringLiteral("configVersion"),
@@ -411,7 +413,7 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
         return fail(QStringLiteral("检查点结构版本不兼容"));
     }
     const int storedProtocolVersion = object.value(QStringLiteral("protocolVersion")).toInt();
-    const bool compatibleProtocol = checkpointSchemaVersion >= kCheckpointSchemaVersion
+    const bool compatibleProtocol = checkpointSchemaVersion >= 7
         ? storedProtocolVersion == kCurrentCheckpointProtocolVersion
         : checkpointSchemaVersion >= 6
             ? storedProtocolVersion == kNativeCheckpointProtocolVersion
@@ -503,7 +505,21 @@ bool checkpointFromJson(const QJsonObject& object, RoomCheckpoint* checkpoint,
         QStringLiteral("default"));
     checkpoint->protocolProfile = room.value(QStringLiteral("protocolProfile"))
                                      .toString(QStringLiteral("native"));
+    const bool demoProfile = checkpoint->protocolProfile == QLatin1String("vmf-demo-v2");
+    const bool strictProfile = checkpoint->protocolProfile
+        == QLatin1String("vmf-guided-strike-v1");
+    if ((checkpointSchemaVersion == 8 && !demoProfile)
+        || (checkpointSchemaVersion == 7 && !strictProfile)
+        || (checkpointSchemaVersion <= 6 && (demoProfile || strictProfile))) {
+        return fail(QStringLiteral("检查点结构版本与 VMF profile 不匹配"));
+    }
     checkpoint->strictVmfTasks = room.value(QStringLiteral("strictVmfTasks")).toObject();
+    if (checkpointSchemaVersion >= 8
+        && (!room.value(QStringLiteral("demoState")).isObject()
+            || room.value(QStringLiteral("demoState")).toObject().isEmpty())) {
+        return fail(QStringLiteral("演示模式检查点状态缺失"));
+    }
+    checkpoint->demoState = room.value(QStringLiteral("demoState")).toObject();
     if (room.contains(QStringLiteral("seatLimits"))
         && !room.value(QStringLiteral("seatLimits")).isObject()) {
         return fail(QStringLiteral("检查点战位容量结构无效"));

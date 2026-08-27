@@ -40,7 +40,14 @@ public:
     /// Map a domain message to the design profile and return a fully encoded
     /// message.  MessageBus uses this callback before ACK bookkeeping.
     bool prepareDomainMessage(const Message& input, Message* output,
-                              QString* error = nullptr) const;
+                              QString* error = nullptr,
+                              QJsonObject* trace = nullptr) const;
+    /// Validate and encode operator-supplied XML with the same dictionaries and
+    /// catalog used by template-generated runtime messages.
+    bool prepareXmlMessage(const QString& messageName, const QByteArray& xml,
+                           const Message& input, Message* output,
+                           QJsonObject* trace = nullptr,
+                           QString* error = nullptr) const;
     bool decode(const Message& message, DecodedMessage* decoded,
                 QList<Diagnostic>* diagnostics = nullptr) const;
 

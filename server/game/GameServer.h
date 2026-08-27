@@ -10,6 +10,7 @@
 #include "IntelLedger.h"
 #include "FastDdsNode.h"
 #include "StrictVmfTask.h"
+#include "VmfDemoWorkflow.h"
 #include "protocol/Protocol.h"
 
 #include <QDateTime>
@@ -108,6 +109,7 @@ private:
         QString scenarioId;
         QString protocolProfile;
         QJsonObject strictVmfTasks;
+        QJsonObject demoState;
         QHash<QString, int> seatLimits;
         QHash<QString, QJsonObject> seatParameters;
         quint64 configVersion = 1;
@@ -210,6 +212,20 @@ private:
                           const QString& requestId);
     void handleVmfTaskCommand(QWebSocket* socket, const QJsonObject& payload,
                               const QString& requestId);
+    void handleDemoAction(QWebSocket* socket, const QJsonObject& payload,
+                          const QString& requestId);
+    void handleDemoControl(QWebSocket* socket, const QJsonObject& payload,
+                           const QString& requestId);
+    bool executeDemoAction(const QJsonObject& payload, const QString& actorSeatType,
+                           const QString& actorSeatId, bool automatic,
+                           QJsonObject* result, QJsonObject* trace,
+                           QString* error = nullptr);
+    bool prepareDemoMessage(const QJsonObject& payload, const QString& actorSeatId,
+                            Message* message, QJsonObject* trace,
+                            QString* error = nullptr) const;
+    void runDemoAutomation();
+    void broadcastDemoState();
+    void broadcastDemoTrace(const QJsonObject& trace, QWebSocket* initiator = nullptr);
     void handleGeneratedVmfMessage(const QJsonObject& posted);
     void sendSeatDirectory(QWebSocket* socket);
     QString normalizedRole(const ClientSession& session) const;
@@ -391,6 +407,8 @@ private:
     QSet<QString> m_vmfMessageIds;
     QStringList m_vmfMessageIdOrder;
     StrictVmfTaskSet m_strictVmfTasks;
+    VmfDemoWorkflow m_demoWorkflow;
+    double m_demoNextAutomaticAt = 0.0;
     QHash<QString, double> m_vmfAutomationRetryAfter;
     QHash<QString, int> m_vmfAutomationFailureCount;
     QString m_protocolProfile = QStringLiteral("native");

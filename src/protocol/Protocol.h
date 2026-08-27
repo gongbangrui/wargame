@@ -9,8 +9,8 @@
 
 namespace gbr::Protocol {
 
-// v8 is the strict VMF task contract. v7/v6/v4 remain valid for ordinary
-// rooms during rolling deployment and legacy client downgrade.
+// v8 carries both the VMF demo v2 and strict VMF v1 contracts. v7/v6/v4
+// remain valid for ordinary rooms during rolling deployment and downgrade.
 inline constexpr int Version = 8;
 inline constexpr int SchemaVersion = 8;
 inline constexpr int IntelVersion = 5;
@@ -135,6 +135,7 @@ struct RoomLifecycleProjection {
     bool scenarioEditable = false;
     QJsonObject vmfAutomation;
     QJsonObject vmfTasks;
+    QJsonObject demoState;
 };
 
 struct SnapshotProjection {
@@ -256,6 +257,12 @@ inline constexpr const char* VmfEventMessage = "vmfEvent";
 inline constexpr const char* VmfTaskCommandMessage = "vmfTaskCommand";
 inline constexpr const char* VmfTaskResultMessage = "vmfTaskResult";
 inline constexpr const char* VmfTraceMessage = "vmfTrace";
+inline constexpr const char* DemoActionMessage = "demoAction";
+inline constexpr const char* DemoControlMessage = "demoControl";
+inline constexpr const char* DemoStateMessage = "demoState";
+inline constexpr const char* DemoTraceMessage = "demoTrace";
+inline constexpr const char* DemoResultMessage = "demoResult";
+inline constexpr const char* DemoErrorMessage = "demoError";
 
 inline constexpr int MaxObserverTrajectoryUnits = 8;
 inline constexpr int MaxObserverTrajectoryPoints = 90;

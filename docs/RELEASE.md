@@ -97,7 +97,7 @@ Docker 演练会验证联网认证、权限、消息幂等、优雅停止最终�
 1. 记录目标 commit、`WARGAME_VERSION`、CI 链接和人工验收结果。
 2. 在 staging 使用与生产相同的 `.env` 字段和持久卷配置部署候选镜像。
 3. 对生产数据卷执行归档备份，验证归档可还原到隔离卷。
-4. 确认桌面客户端和严格 VMF 房间均已切换到 v8，再更新生产 `.env` 的 `WARGAME_VERSION` 并执行
+4. 确认桌面客户端、`vmf-demo-v2` 演示房间和 `vmf-guided-strike-v1` 兼容房间均已切换到 v8，再更新生产 `.env` 的 `WARGAME_VERSION` 并执行
    `docker compose --project-name wargame --env-file /path/to/.env -f /path/to/current/deploy/compose.yml up -d --build`。
 5. 通过管理员“服务器监控”确认 game-server 状态为 `healthy`，再执行联网冒烟验证。
 6. 出现回归时，停止服务但保留卷，将 `WARGAME_VERSION` 回退到上一已验证版本并重新部署。

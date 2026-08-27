@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -198,19 +199,30 @@ void PrintDiffs(const char* label, const std::vector<DiffItem>& diffs) {
 
 // 程序入口：读取两个 XML 文件并输出严格差异结果。
 int main(int argc, char** argv) {
-  if (argc != 3) {
+  std::filesystem::path a_path;
+  std::filesystem::path b_path;
+  if (argc == 1) {
+    const std::filesystem::path executable_dir =
+        std::filesystem::absolute(std::filesystem::path(argv[0])).parent_path();
+    a_path = executable_dir / "vmf_compare_default_a.xml";
+    b_path = executable_dir / "vmf_compare_default_b.xml";
+    std::cout << "No arguments supplied; running the build-tree comparison smoke test\n";
+  } else if (argc == 3) {
+    a_path = argv[1];
+    b_path = argv[2];
+  } else {
     std::cerr << "Usage: xml_compare <a.xml> <b.xml>\n";
     return 1;
   }
 
   XMLDocument a_doc;
-  if (a_doc.LoadFile(argv[1]) != tinyxml2::XML_SUCCESS) {
-    std::cerr << "Failed to load: " << argv[1] << "\n";
+  if (a_doc.LoadFile(a_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+    std::cerr << "Failed to load: " << a_path << "\n";
     return 3;
   }
   XMLDocument b_doc;
-  if (b_doc.LoadFile(argv[2]) != tinyxml2::XML_SUCCESS) {
-    std::cerr << "Failed to load: " << argv[2] << "\n";
+  if (b_doc.LoadFile(b_path.string().c_str()) != tinyxml2::XML_SUCCESS) {
+    std::cerr << "Failed to load: " << b_path << "\n";
     return 3;
   }
 

@@ -148,6 +148,13 @@ public:
     /// local workflows continue to post through MessageBus directly.
     bool prepareVmfMessage(const Message& input, Message* output,
                            QString* error = nullptr) const;
+    bool prepareVmfMessageWithTrace(const Message& input, Message* output,
+                                    QJsonObject* trace,
+                                    QString* error = nullptr) const;
+    bool prepareVmfXmlMessage(const QString& messageName, const QByteArray& xml,
+                              const Message& input, Message* output,
+                              QJsonObject* trace,
+                              QString* error = nullptr) const;
     bool validateVmfMessage(const Message& message, QString* error = nullptr) const;
     bool validateVmfMessageForRoles(const Message& message, const QString& senderRole,
                                     const QString& receiverRole = {},

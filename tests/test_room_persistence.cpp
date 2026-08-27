@@ -160,6 +160,47 @@ TEST(RoomPersistenceTest, StrictVmfProfileOptsIntoSchemaSevenAndProtocolEight) {
     EXPECT_EQ(loaded.strictVmfTasks, source.strictVmfTasks);
 }
 
+TEST(RoomPersistenceTest, DemoV2ProfileOptsIntoSchemaEightAndRestoresWorkflow) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    const QString checkpointPath = temporary.filePath(QStringLiteral("checkpoint.json"));
+    RoomPersistence persistence(checkpointPath,
+                                temporary.filePath(QStringLiteral("events.jsonl")));
+    RoomCheckpoint source;
+    source.scenario = ScenarioIo::defaultScenario();
+    source.runInitialScenario = source.scenario;
+    source.protocolProfile = QStringLiteral("vmf-demo-v2");
+    VmfDemoWorkflow workflow;
+    source.demoState = workflow.toJson();
+
+    QString error;
+    ASSERT_TRUE(persistence.saveCheckpoint(source, &error)) << error.toStdString();
+    QFile file(checkpointPath);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    const QJsonObject saved = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    EXPECT_EQ(saved.value(QStringLiteral("checkpointSchemaVersion")).toInt(), 8);
+    EXPECT_EQ(saved.value(QStringLiteral("protocolVersion")).toInt(), 8);
+
+    RoomCheckpoint loaded;
+    ASSERT_TRUE(persistence.loadCheckpoint(&loaded, &error)) << error.toStdString();
+    EXPECT_EQ(loaded.sourceSchemaVersion, 8);
+    EXPECT_EQ(loaded.protocolProfile, QStringLiteral("vmf-demo-v2"));
+    EXPECT_EQ(loaded.demoState, source.demoState);
+
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    QJsonObject mismatched = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    QJsonObject room = mismatched.value(QStringLiteral("roomState")).toObject();
+    room[QStringLiteral("protocolProfile")] = QStringLiteral("native");
+    mismatched[QStringLiteral("roomState")] = room;
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_GT(file.write(QJsonDocument(mismatched).toJson()), 0);
+    file.close();
+    EXPECT_FALSE(persistence.loadCheckpoint(&loaded, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("profile")));
+}
+
 TEST(RoomPersistenceTest, SchemaTwoCheckpointLoadsWithMigrationSourceVersion) {
     QTemporaryDir temporary;
     ASSERT_TRUE(temporary.isValid());
@@ -812,6 +853,168 @@ TEST(RoomPersistenceTest, StrictSeatProjectionIsRedClaimableAndAdminEditable) {
                   2, QStringLiteral("blue user"), QStringLiteral("blue_commander"),
                   QStringLiteral("commandpost")).code,
               QStringLiteral("SIDE_RESERVED_FOR_FIXED_TARGET"));
+}
+
+TEST(RoomPersistenceTest, DemoProfileUsesV2CodecIdentityAndSingleSideProjection) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    qputenv("INTERNAL_API_KEY", QByteArray(32, 'k'));
+    qputenv("AUTH_SERVICE_URL", QByteArray("http://127.0.0.1:1"));
+    qputenv("SCENARIO_PATH", temporary.filePath(QStringLiteral("scenario.json")).toUtf8());
+    qputenv("MONITOR_LOG_PATH", temporary.filePath(QStringLiteral("monitor.jsonl")).toUtf8());
+    qputenv("MONITOR_STATUS_PATH", temporary.filePath(QStringLiteral("status.json")).toUtf8());
+    qputenv("CHECKPOINT_PATH", temporary.filePath(QStringLiteral("checkpoint.json")).toUtf8());
+    qputenv("COMMAND_LOG_PATH", temporary.filePath(QStringLiteral("events.jsonl")).toUtf8());
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-demo-v2");
+    QString error;
+    ASSERT_TRUE(server.applyProtocolProfilePolicy(&error)) << error.toStdString();
+
+    const Scenario& scenario = server.m_engine.scenario();
+    EXPECT_EQ(scenario.communicationPolicy.format, QStringLiteral("vmf-design-v1"));
+    EXPECT_EQ(scenario.communicationPolicy.vmfProfile, QStringLiteral("vmf-demo-v2"));
+    EXPECT_TRUE(scenario.communicationPolicy.automaticAck);
+
+    const QJsonObject state = server.roomState();
+    EXPECT_EQ(state.value(QStringLiteral("operationMode")).toString(),
+              QStringLiteral("vmf-single-side"));
+    EXPECT_EQ(state.value(QStringLiteral("participantSide")).toString(),
+              QStringLiteral("red"));
+    EXPECT_EQ(state.value(QStringLiteral("fixedTargetSide")).toString(),
+              QStringLiteral("blue"));
+    EXPECT_EQ(state.value(QStringLiteral("demoState")).toObject()
+                  .value(QStringLiteral("profile")).toString(),
+              QStringLiteral("vmf-demo-v2"));
+}
+
+TEST(RoomPersistenceTest, DemoProfileEncodesAllTenActionsThroughServer) {
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    qputenv("INTERNAL_API_KEY", QByteArray(32, 'k'));
+    qputenv("AUTH_SERVICE_URL", QByteArray("http://127.0.0.1:1"));
+    qputenv("SCENARIO_PATH", temporary.filePath(QStringLiteral("scenario.json")).toUtf8());
+    qputenv("MONITOR_LOG_PATH", temporary.filePath(QStringLiteral("monitor.jsonl")).toUtf8());
+    qputenv("MONITOR_STATUS_PATH", temporary.filePath(QStringLiteral("status.json")).toUtf8());
+    qputenv("CHECKPOINT_PATH", temporary.filePath(QStringLiteral("checkpoint.json")).toUtf8());
+    qputenv("COMMAND_LOG_PATH", temporary.filePath(QStringLiteral("events.jsonl")).toUtf8());
+
+    GameServer server;
+    ASSERT_TRUE(server.m_recoveryError.isEmpty()) << server.m_recoveryError.toStdString();
+    server.m_protocolProfile = QStringLiteral("vmf-demo-v2");
+    QString error;
+    ASSERT_TRUE(server.applyProtocolProfilePolicy(&error)) << error.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.claimSeat(
+        1, QStringLiteral("red commander"), QStringLiteral("red_commander"),
+        QStringLiteral("commandpost")).ok);
+    ASSERT_TRUE(server.m_authoritativeRoom.setReady(1, true).ok);
+    ASSERT_TRUE(server.applyDeployedScenario(&error)) << error.toStdString();
+    ASSERT_TRUE(server.m_authoritativeRoom.start().ok);
+    server.m_phase = QStringLiteral("running");
+    server.m_roomStatus = QStringLiteral("running");
+    server.m_engine.setRunning(true);
+
+    const QList<VmfDemoWorkflow::ActionSpec> specs = VmfDemoWorkflow::actionSpecs();
+    ASSERT_EQ(specs.size(), 10);
+    const QJsonObject initialState = server.m_demoWorkflow.stateProjection(false);
+    const QJsonObject invalidTargetCommand{
+        {QStringLiteral("requestId"), QStringLiteral("invalid-target-request")},
+        {QStringLiteral("actionId"), QStringLiteral("invalid-target-action")},
+        {QStringLiteral("expectedRevision"), initialState.value(QStringLiteral("revision"))},
+        {QStringLiteral("seat"), QStringLiteral("red_recon_1")},
+        {QStringLiteral("action"), QStringLiteral("reportTarget")},
+        {QStringLiteral("phase"), initialState.value(QStringLiteral("phase"))},
+        {QStringLiteral("inputMode"), QStringLiteral("template")},
+        {QStringLiteral("payload"), QJsonObject{
+             {QStringLiteral("targetId"), QStringLiteral("missing-blue-target")}}}};
+    QJsonObject rejectedResult;
+    QJsonObject rejectedTrace;
+    const quint64 initialEventSequence = server.m_eventSequence;
+    EXPECT_FALSE(server.executeDemoAction(invalidTargetCommand, QStringLiteral("recon"),
+                                          QStringLiteral("red_recon_1"), false,
+                                          &rejectedResult, &rejectedTrace, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("有效的蓝方固定靶")));
+    EXPECT_EQ(server.m_eventSequence, initialEventSequence);
+
+    for (int index = 0; index < specs.size(); ++index) {
+        const VmfDemoWorkflow::ActionSpec& spec = specs.at(index);
+        const QString seatId = spec.seatType == QLatin1String("commander")
+            ? QStringLiteral("red_commander")
+            : QStringLiteral("red_%1_1").arg(spec.seatType);
+        const QJsonObject state = server.m_demoWorkflow.stateProjection(false);
+        const QString actionId = QStringLiteral("server-action-%1").arg(index);
+        const QJsonObject command{
+            {QStringLiteral("requestId"), actionId},
+            {QStringLiteral("actionId"), actionId},
+            {QStringLiteral("expectedRevision"), state.value(QStringLiteral("revision"))},
+            {QStringLiteral("seat"), seatId},
+            {QStringLiteral("action"), spec.action},
+            {QStringLiteral("phase"), state.value(QStringLiteral("phase"))},
+            {QStringLiteral("inputMode"), QStringLiteral("template")},
+            {QStringLiteral("payload"), QJsonObject{}}};
+        QJsonObject result;
+        QJsonObject trace;
+        const bool automatic = index != 0;
+        ASSERT_TRUE(server.executeDemoAction(command, spec.seatType, seatId, automatic,
+                                             &result, &trace, &error))
+            << spec.action.toStdString() << ": " << error.toStdString();
+        EXPECT_TRUE(trace.value(QStringLiteral("roundTripEqual")).toBool());
+        EXPECT_FALSE(trace.value(QStringLiteral("canonicalXml")).toString().isEmpty());
+        EXPECT_GT(trace.value(QStringLiteral("wireBitLength")).toInt(), 0);
+        if (index == 0) {
+            const quint64 eventSequence = server.m_eventSequence;
+            const QJsonObject workflowBefore = server.m_demoWorkflow.toJson();
+            QJsonObject duplicateCommand = command;
+            duplicateCommand[QStringLiteral("requestId")] = QStringLiteral("retry-request");
+            duplicateCommand[QStringLiteral("expectedRevision")] =
+                server.m_demoWorkflow.stateProjection(false)
+                    .value(QStringLiteral("revision"));
+            QJsonObject duplicateResult;
+            QJsonObject duplicateTrace;
+            ASSERT_TRUE(server.executeDemoAction(
+                duplicateCommand, spec.seatType, seatId, false,
+                &duplicateResult, &duplicateTrace, &error)) << error.toStdString();
+            EXPECT_EQ(duplicateResult.value(QStringLiteral("status")).toString(),
+                      QStringLiteral("duplicate"));
+            EXPECT_TRUE(duplicateTrace.isEmpty());
+            EXPECT_EQ(server.m_eventSequence, eventSequence);
+            EXPECT_EQ(server.m_demoWorkflow.toJson(), workflowBefore);
+            EXPECT_EQ(server.m_commandResults
+                          .value(QStringLiteral("demo:0:retry-request"))
+                          .value(QStringLiteral("commandId")).toString(),
+                      QStringLiteral("retry-request"));
+        }
+    }
+
+    EXPECT_EQ(server.m_demoWorkflow.stateProjection(false)
+                  .value(QStringLiteral("status")).toString(),
+              QStringLiteral("completed"));
+    ASSERT_TRUE(server.persistRoomState(&error)) << error.toStdString();
+
+    QFile checkpointFile(temporary.filePath(QStringLiteral("checkpoint.json")));
+    ASSERT_TRUE(checkpointFile.open(QIODevice::ReadOnly));
+    QJsonObject checkpoint = QJsonDocument::fromJson(checkpointFile.readAll()).object();
+    checkpointFile.close();
+    QJsonArray history = checkpoint.value(QStringLiteral("commandHistory")).toArray();
+    ASSERT_FALSE(history.isEmpty());
+    for (QJsonValueRef value : history) {
+        QJsonObject entry = value.toObject();
+        QJsonObject cached = entry.value(QStringLiteral("result")).toObject();
+        EXPECT_FALSE(cached.value(QStringLiteral("commandId")).toString().isEmpty());
+        cached.remove(QStringLiteral("commandId"));
+        entry[QStringLiteral("result")] = cached;
+        value = entry;
+    }
+    checkpoint[QStringLiteral("commandHistory")] = history;
+    ASSERT_TRUE(checkpointFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_GT(checkpointFile.write(QJsonDocument(checkpoint).toJson()), 0);
+    checkpointFile.close();
+    ASSERT_TRUE(server.restoreRoomState(&error)) << error.toStdString();
+    EXPECT_FALSE(server.m_commandResults.isEmpty());
+    for (const QJsonObject& cached : std::as_const(server.m_commandResults)) {
+        EXPECT_FALSE(cached.value(QStringLiteral("commandId")).toString().isEmpty());
+    }
 }
 
 TEST(RoomPersistenceTest, StrictSeatedSnapshotRetainsOwnedUnitWhenRuntimeRosterIsEmpty) {

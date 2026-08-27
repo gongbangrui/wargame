@@ -148,6 +148,31 @@ SimulationController::SimulationController(QObject* parent) : QObject(parent) {
                 m_remoteVmfTrace = trace;
                 emit vmfTraceChanged();
             });
+    connect(&m_networkClient, &NetworkClient::demoStateReceived, this,
+            [this](const QJsonObject& state) {
+                if (m_remoteDemoState == state) return;
+                m_remoteDemoState = state;
+                emit demoStateChanged();
+            });
+    connect(&m_networkClient, &NetworkClient::demoTraceReceived, this,
+            [this](const QJsonObject& trace) {
+                m_remoteVmfTrace = trace;
+                emit vmfTraceChanged();
+            });
+    connect(&m_networkClient, &NetworkClient::demoResultReceived, this,
+            [this](const QJsonObject& result) {
+                const QJsonObject state = result.value(QStringLiteral("state")).toObject();
+                if (!state.isEmpty() && state != m_remoteDemoState) {
+                    m_remoteDemoState = state;
+                    emit demoStateChanged();
+                }
+                emit demoCommandCompleted();
+            });
+    connect(&m_networkClient, &NetworkClient::demoErrorReceived, this,
+            [this](const QJsonObject& error) {
+                emit errorForward(error.value(QStringLiteral("message")).toString());
+                emit demoCommandCompleted();
+            });
     connect(&m_engine, &SimulationEngine::timelineChanged, this, &SimulationController::timelineForward);
     connect(&m_engine, &SimulationEngine::mapChanged, this, &SimulationController::mapInfoForward);
     connect(&m_engine, &SimulationEngine::readyForSimChanged, this, &SimulationController::readyForSimForward);
@@ -1130,6 +1155,66 @@ QVariantMap SimulationController::sendVmfTaskCommand(const QVariantMap& command)
                               QStringLiteral("严格 VMF 任务命令已发送，等待服务器回执"), requestId);
 }
 
+QVariantMap SimulationController::sendDemoAction(const QVariantMap& command) {
+    if (!isNetworked() || m_isObserver || m_currentSeatSide != QLatin1String("red")) {
+        return guidedStrikeResult(false, QStringLiteral("SEAT_REQUIRED"),
+                                  QStringLiteral("演示动作只能由红方联网战位提交"));
+    }
+    if (m_protocolProfile != QLatin1String("vmf-demo-v2")) {
+        return guidedStrikeResult(false, QStringLiteral("DEMO_PROFILE_REQUIRED"),
+                                  QStringLiteral("当前房间未启用演示模式 v2"));
+    }
+    QJsonObject payload = QJsonObject::fromVariantMap(command);
+    payload.insert(QStringLiteral("seat"), m_currentSeatId);
+    if (!payload.contains(QStringLiteral("expectedRevision"))) {
+        payload.insert(QStringLiteral("expectedRevision"),
+                       m_remoteDemoState.value(QStringLiteral("revision")));
+    }
+    if (!payload.contains(QStringLiteral("phase"))) {
+        payload.insert(QStringLiteral("phase"),
+                       m_remoteDemoState.value(QStringLiteral("phase")));
+    }
+    if (!payload.contains(QStringLiteral("inputMode"))) {
+        payload.insert(QStringLiteral("inputMode"), QStringLiteral("template"));
+    }
+    if (!payload.contains(QStringLiteral("payload"))) {
+        payload.insert(QStringLiteral("payload"), QJsonObject{});
+    }
+    if (!payload.contains(QStringLiteral("actionId"))) {
+        payload.insert(QStringLiteral("actionId"),
+                       QStringLiteral("demo-action-%1")
+                           .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    }
+    const QString requestId = m_networkClient.sendDemoAction(payload);
+    return guidedStrikeResult(!requestId.isEmpty(),
+                              requestId.isEmpty() ? QStringLiteral("NETWORK_UNAVAILABLE")
+                                                  : QStringLiteral("PENDING"),
+                              requestId.isEmpty() ? QStringLiteral("联网会话尚未建立")
+                                                  : QStringLiteral("演示动作已发送，等待服务器确认"),
+                              requestId);
+}
+
+QVariantMap SimulationController::sendDemoControl(const QString& action,
+                                                  const QVariantMap& payload) {
+    if (!isNetworked() || (m_userRole != QLatin1String("admin")
+                           && m_userRole != QLatin1String("room_admin")
+                           && m_userRole != QLatin1String("director"))) {
+        return guidedStrikeResult(false, QStringLiteral("DIRECTOR_REQUIRED"),
+                                  QStringLiteral("演示控制需要管理员或导演权限"));
+    }
+    QJsonObject command{{QStringLiteral("expectedRevision"),
+                         m_remoteDemoState.value(QStringLiteral("revision"))},
+                        {QStringLiteral("action"), action},
+                        {QStringLiteral("payload"), QJsonObject::fromVariantMap(payload)}};
+    const QString requestId = m_networkClient.sendDemoControl(command);
+    return guidedStrikeResult(!requestId.isEmpty(),
+                              requestId.isEmpty() ? QStringLiteral("NETWORK_UNAVAILABLE")
+                                                  : QStringLiteral("PENDING"),
+                              requestId.isEmpty() ? QStringLiteral("联网会话尚未建立")
+                                                  : QStringLiteral("导演控制已发送，等待服务器确认"),
+                              requestId);
+}
+
 QJsonObject SimulationController::unitsJson() const {
     return ScenarioIo::toJson(m_engine.scenario());
 }
@@ -1981,6 +2066,7 @@ void SimulationController::useLocalMode() {
     m_remoteVmfWorkflow = {};
     m_remoteVmfTasks = {};
     m_remoteVmfTrace = {};
+    m_remoteDemoState = {};
     m_protocolProfile = QStringLiteral("native");
     m_operationMode = QStringLiteral("standard");
     m_participantSide.clear();
@@ -2026,6 +2112,7 @@ void SimulationController::useLocalMode() {
     if (hadVmfWorkflow) emit vmfWorkflowChanged();
     emit vmfTasksChanged();
     emit vmfTraceChanged();
+    emit demoStateChanged();
     emit projectilesForward();
     emit chatMessagesChanged();
     emit commandStatusChanged();
@@ -2339,6 +2426,7 @@ void SimulationController::clearOnlineRoomDerivedState(bool preserveRoomId) {
     m_vmfAutomation = {};
     m_remoteVmfTasks = {};
     m_remoteVmfTrace = {};
+    m_remoteDemoState = {};
     m_onlineSeatLimits = {};
     m_onlineSeatParameters = {};
     m_remoteReadyForSim = false;
@@ -2441,6 +2529,7 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     const QVariantList previousMessages = m_remoteMessages;
     const QJsonObject previousVmfWorkflow = m_remoteVmfWorkflow;
     const QJsonObject previousVmfTasks = m_remoteVmfTasks;
+    const QJsonObject previousDemoState = m_remoteDemoState;
     const QString previousProtocolProfile = m_protocolProfile;
     const QString previousOperationMode = m_operationMode;
     const QString previousParticipantSide = m_participantSide;
@@ -2494,6 +2583,7 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     m_serverScenarioEditable = room.scenarioEditable;
     m_vmfAutomation = room.vmfAutomation;
     m_remoteVmfTasks = room.vmfTasks;
+    m_remoteDemoState = room.demoState;
     m_onlineSeatLimits = room.seatLimits;
     m_onlineSeatParameters = room.seatParameters;
     const QString projectedCommunication = payload.value(QStringLiteral("roomState"))
@@ -2650,6 +2740,7 @@ void SimulationController::applyRemoteState(const QJsonObject& payload,
     if (m_remoteMessages != previousMessages) emit messagesForward();
     if (m_remoteVmfWorkflow != previousVmfWorkflow) emit vmfWorkflowChanged();
     if (m_remoteVmfTasks != previousVmfTasks) emit vmfTasksChanged();
+    if (m_remoteDemoState != previousDemoState) emit demoStateChanged();
     if (m_onlineMapMarks != previousMapMarks) emit onlineMapMarksChanged();
     if (m_onlineSeats != previousSeats) {
         emit onlineSeatsChanged();

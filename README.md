@@ -15,6 +15,7 @@
 - 本地模式与账号认证后的联网推演模式。
 - 权威服务器、账号管理、房间生命周期、战位分配、独立视野、定向情报共享和断线重连。
 - WebSocket 权威数据面：按房间和战位隔离会话，协议和权限模型由游戏服务统一执行。
+- 联网 VMF 演示模式：红方四类战位按六阶段/十动作推进，蓝方为不反制固定靶，支持自动接管、明文消息与编码 trace 检查。
 - Fast DDS 兼容适配保留为后续安全传输实现的接口，当前默认关闭；所有登录、房间目录、状态和命令均走 WebSocket/HTTPS 权威数据面。
 - 检查点、事件日志、状态快照与增量同步。
 - 内置 GIS 瓦片资源和地图元数据。
@@ -98,7 +99,8 @@ cmake --build build/debug --target all_qmllint
 根项目服务端和 Qt 6.4 独立服务端身份；服务器一键包随后由
 `WARGAME_VERSION=2.0.0 DIST_DIR=dist ./deploy/package-one-click.sh` 生成。包内身份文件会在
 全新主机安装前校验 v8/schema 8 和源码摘要，避免客户端与两个服务端错配；普通房间仍可按
-协商结果兼容 v7/v6/v4，严格 VMF 房间只接受 v8/schema 8。
+协商结果兼容 v7/v6/v4，`vmf-demo-v2` 演示模式和 `vmf-guided-strike-v1` 兼容模式只接受
+v8/schema 8。演示模式的详细契约与验收步骤见 [`docs/VMF_DEMO_V2.md`](docs/VMF_DEMO_V2.md)。
 
 ### 下载发布包部署
 

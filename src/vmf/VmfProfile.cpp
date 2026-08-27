@@ -25,7 +25,9 @@ QStringList VmfProfile::designV1Messages() {
 std::shared_ptr<const DictionarySet> VmfProfile::load(const QString& profileId,
                                                        const QString& rootDirectory,
                                                        QList<Diagnostic>* diagnostics) {
-    if (profileId == QLatin1String(DesignV1)) return loadDesignV1(rootDirectory, diagnostics);
+    if (profileId == QLatin1String(DesignV1) || profileId == QLatin1String(DemoV2)) {
+        return loadDesignV1(rootDirectory, diagnostics);
+    }
     if (diagnostics) diagnostics->append({Diagnostic::Severity::Error,
                                           QStringLiteral("PROFILE_UNKNOWN"), profileId,
                                           QStringLiteral("未知 VMF profile")});
@@ -53,7 +55,7 @@ std::shared_ptr<const DictionarySet> VmfProfile::loadDesignV1(
 std::shared_ptr<const VmfMessageCatalog> VmfProfile::loadCatalog(
     const QString& profileId, const QString& rootDirectory,
     QList<Diagnostic>* diagnostics) {
-    if (profileId == QLatin1String(DesignV1)) {
+    if (profileId == QLatin1String(DesignV1) || profileId == QLatin1String(DemoV2)) {
         return loadCatalogDesignV1(rootDirectory, diagnostics);
     }
     if (diagnostics) diagnostics->append({Diagnostic::Severity::Error,

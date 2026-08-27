@@ -99,6 +99,7 @@ class SimulationController : public QObject {
     Q_PROPERTY(QJsonObject vmfAutomation READ vmfAutomation NOTIFY roomStateChanged)
     Q_PROPERTY(QJsonObject vmfTasks READ vmfTasks NOTIFY vmfTasksChanged)
     Q_PROPERTY(QJsonObject vmfTrace READ vmfTrace NOTIFY vmfTraceChanged)
+    Q_PROPERTY(QJsonObject demoState READ demoState NOTIFY demoStateChanged)
 public:
     explicit SimulationController(QObject* parent = nullptr);
 
@@ -206,6 +207,7 @@ public:
     QJsonObject vmfAutomation() const { return m_vmfAutomation; }
     QJsonObject vmfTasks() const { return m_remoteVmfTasks; }
     QJsonObject vmfTrace() const { return m_remoteVmfTrace; }
+    QJsonObject demoState() const { return m_remoteDemoState; }
 
     Q_INVOKABLE void loadDefault();
     Q_INVOKABLE void saveScenario(const QString& path);
@@ -234,6 +236,9 @@ public:
     Q_INVOKABLE QVariantMap withdrawGuidedStrike(const QString& attackerId,
                                                  const QVariantMap& home);
     Q_INVOKABLE QVariantMap sendVmfTaskCommand(const QVariantMap& command);
+    Q_INVOKABLE QVariantMap sendDemoAction(const QVariantMap& command);
+    Q_INVOKABLE QVariantMap sendDemoControl(const QString& action,
+                                            const QVariantMap& payload = {});
 
     Q_INVOKABLE void saveSetting(const QString& key, const QVariant& value);
     Q_INVOKABLE QVariant loadSetting(const QString& key, const QVariant& defaultValue = QVariant()) const;
@@ -360,6 +365,8 @@ signals:
     void vmfWorkflowChanged();
     void vmfTasksChanged();
     void vmfTraceChanged();
+    void demoStateChanged();
+    void demoCommandCompleted();
 
     void viewModeChanged();
     void focusedSideChanged();
@@ -451,6 +458,7 @@ private:
     QJsonObject m_remoteVmfWorkflow;
     QJsonObject m_remoteVmfTasks;
     QJsonObject m_remoteVmfTrace;
+    QJsonObject m_remoteDemoState;
     QString m_protocolProfile = QStringLiteral("native");
     QString m_operationMode = QStringLiteral("standard");
     QString m_participantSide;

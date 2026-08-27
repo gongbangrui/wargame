@@ -229,7 +229,8 @@ QJsonObject RuntimeState::toJson() const {
 
 bool RuntimeState::validate(QString* error) const {
     if (error) error->clear();
-    if (profileId != QString::fromLatin1(ProfileId)) {
+    if (profileId != QString::fromLatin1(ProfileId)
+        && profileId != QLatin1String("vmf-demo-v2")) {
         if (error) *error = QStringLiteral("VMF 运行时状态 profile 不兼容");
         return false;
     }
@@ -266,8 +267,10 @@ bool RuntimeState::fromJson(const QJsonObject& object, RuntimeState* output, QSt
         return false;
     }
     if (!object.value(QStringLiteral("profile")).isString()
-        || object.value(QStringLiteral("profile")).toString()
-               != QString::fromLatin1(ProfileId)) {
+        || (object.value(QStringLiteral("profile")).toString()
+                != QString::fromLatin1(ProfileId)
+            && object.value(QStringLiteral("profile")).toString()
+                != QLatin1String("vmf-demo-v2"))) {
         if (error) *error = QStringLiteral("VMF 运行时状态 profile 不兼容");
         return false;
     }

@@ -65,6 +65,50 @@ TEST(VmfGatewayTest, TargetReportEncodesDesignFields) {
     EXPECT_GT(valueFor(QStringLiteral("Direction")), 0U);
 }
 
+TEST(VmfGatewayTest, TemplateAndAdvancedXmlUseIdenticalCodecPath) {
+    QList<vmf::Diagnostic> diagnostics;
+    const auto dictionaries = vmf::VmfProfile::loadDesignV1(
+        designPath(QStringLiteral("design/EncoderDecoder")), &diagnostics);
+    ASSERT_TRUE(dictionaries) << vmf::Codec::diagnosticsToString(diagnostics).toStdString();
+
+    MessageBus bus;
+    vmf::VmfMessageGateway gateway(&bus, dictionaries);
+    Message input;
+    input.id = QStringLiteral("demo-template-xml-parity");
+    input.traceId = QStringLiteral("demo-template-xml-trace");
+    input.type = Message::Type::TargetReport;
+    input.sender = QStringLiteral("red_recon");
+    input.receiver = QStringLiteral("red_cp");
+    input.timestamp = QDateTime::fromString(QStringLiteral("2026-08-27T10:20:30Z"), Qt::ISODate);
+    input.payload = QJsonObject{{QStringLiteral("targetId"), QStringLiteral("blue_fixed_1")},
+                                {QStringLiteral("targetType"), QStringLiteral("facility")},
+                                {QStringLiteral("targetCount"), 1},
+                                {QStringLiteral("friendFoe"), QStringLiteral("hostile")},
+                                {QStringLiteral("x"), 1200.0},
+                                {QStringLiteral("y"), 3400.0},
+                                {QStringLiteral("status"), QStringLiteral("tracked")}};
+
+    Message templated;
+    QJsonObject templateTrace;
+    QString error;
+    ASSERT_TRUE(gateway.prepareDomainMessage(input, &templated, &error, &templateTrace))
+        << error.toStdString();
+    Message fromXml;
+    QJsonObject xmlTrace;
+    ASSERT_TRUE(gateway.prepareXmlMessage(
+        templated.vmfMessage,
+        templateTrace.value(QStringLiteral("canonicalXml")).toString().toUtf8(),
+        input, &fromXml, &xmlTrace, &error)) << error.toStdString();
+
+    EXPECT_EQ(fromXml.wireBytes, templated.wireBytes);
+    EXPECT_EQ(fromXml.wireBitLength, templated.wireBitLength);
+    EXPECT_EQ(xmlTrace.value(QStringLiteral("decodedXml")),
+              templateTrace.value(QStringLiteral("decodedXml")));
+    EXPECT_EQ(xmlTrace.value(QStringLiteral("fields")),
+              templateTrace.value(QStringLiteral("fields")));
+    EXPECT_TRUE(xmlTrace.value(QStringLiteral("roundTripEqual")).toBool());
+}
+
 TEST(VmfGatewayTest, LandRouteEncodesWaypointsAndCriticalPoints) {
     QList<vmf::Diagnostic> diagnostics;
     const auto dictionaries = vmf::VmfProfile::loadDesignV1(

@@ -31,6 +31,9 @@ Item {
     property bool tinyLayout: width < 420
     readonly property bool strictVmf: root.controller
         && root.controller.protocolProfile === "vmf-guided-strike-v1"
+    readonly property bool demoVmf: root.controller
+        && root.controller.protocolProfile === "vmf-demo-v2"
+    readonly property bool singleSideVmf: root.strictVmf || root.demoVmf
     // A two-column admin workspace needs enough width for the editor's own
     // list/canvas split.  Below this point stack the panels so the canvas is
     // never reduced to a clipped sliver.
@@ -98,7 +101,8 @@ Item {
         roomNameField.text = root.controller.roomName || ""
         roomDescriptionField.text = root.controller.roomDescription || ""
         scenarioIdField.text = root.controller.scenarioId || "default"
-        protocolProfileCombo.currentIndex = root.controller.protocolProfile === "vmf-guided-strike-v1" ? 1 : 0
+        protocolProfileCombo.currentIndex = root.controller.protocolProfile === "vmf-demo-v2" ? 1
+            : root.controller.protocolProfile === "vmf-guided-strike-v1" ? 2 : 0
         root.dirty = false
         root.configSaving = false
         root.loadingDraft = false
@@ -313,10 +317,10 @@ Item {
                 columnSpacing: 8; rowSpacing: 8
                 Repeater {
                     model: [
-                        { title: "战位", value: root.occupiedSeatCount() + " / " + root.totalCapacity(), detail: root.strictVmf ? ("红 " + root.sideOccupied("red") + " · 蓝 " + root.sideOccupied("blue")) : ("红 " + root.sideOccupied("red") + " · 蓝 " + root.sideOccupied("blue")), color: root.cyan },
+                        { title: "战位", value: root.occupiedSeatCount() + " / " + root.totalCapacity(), detail: "红 " + root.sideOccupied("red") + " · 蓝 " + root.sideOccupied("blue"), color: root.cyan },
                         { title: "场景", value: root.scenarioCount() + " 个单位", detail: root.controller.canEditScenario ? "可编辑" : "已锁定", color: root.controller.canEditScenario ? root.success : root.orange },
                         { title: "参数", value: root.parameterCount() + " 个战位", detail: "空白为默认", color: root.cyan },
-                        { title: "就绪", value: root.strictVmf ? (root.controller.redReady ? "红方已就绪" : "等待红方") : root.controller.redReady && root.controller.blueReady ? "双方已就绪" : "等待就绪", detail: root.controller.readyForSim ? "可开始" : "未满足条件", color: root.controller.readyForSim ? root.success : root.orange }
+                        { title: "就绪", value: root.singleSideVmf ? (root.controller.redReady ? "红方已就绪" : "等待红方") : root.controller.redReady && root.controller.blueReady ? "双方已就绪" : "等待就绪", detail: root.controller.readyForSim ? "可开始" : "未满足条件", color: root.controller.readyForSim ? root.success : root.orange }
                     ]
                     delegate: Rectangle {
                         id: metricCard
@@ -370,7 +374,7 @@ Item {
                         }
                         Text { visible: root.controller.roomDescription.length > 0; Layout.fillWidth: true; text: root.controller.roomDescription; color: root.dim; font.pixelSize: 10; maximumLineCount: 3; elide: Text.ElideRight; wrapMode: Text.WordWrap }
                         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.line }
-                        SectionTitle { text: root.strictVmf ? "红方参演与蓝方固定靶" : "双方战位" }
+                        SectionTitle { text: root.singleSideVmf ? "红方参演与蓝方固定靶" : "双方战位" }
                         Repeater {
                             model: ["red", "blue"]
                             delegate: Rectangle {
@@ -381,8 +385,8 @@ Item {
                                 RowLayout { anchors.fill: parent; anchors.margins: 9; spacing: 8
                                     Rectangle { Layout.preferredWidth: 5; Layout.preferredHeight: 22; color: sideSummary.modelData === "red" ? root.danger : root.cyan; radius: 2 }
                                     ColumnLayout { Layout.fillWidth: true; spacing: 1
-                                        Text { text: sideSummary.modelData === "red" ? (root.strictVmf ? "红方参演战位" : "红方") : (root.strictVmf ? "蓝方固定靶" : "蓝方"); color: root.ink; font.pixelSize: 10; font.bold: true }
-                                        Text { text: root.sideOccupied(sideSummary.modelData) + " / " + root.sideCapacity(sideSummary.modelData) + (root.strictVmf && sideSummary.modelData === "blue" ? " 个托管目标" : " 个战位"); color: root.dim; font.pixelSize: 9 }
+                                        Text { text: sideSummary.modelData === "red" ? (root.singleSideVmf ? "红方参演战位" : "红方") : (root.singleSideVmf ? "蓝方固定靶" : "蓝方"); color: root.ink; font.pixelSize: 10; font.bold: true }
+                                        Text { text: root.sideOccupied(sideSummary.modelData) + " / " + root.sideCapacity(sideSummary.modelData) + (root.singleSideVmf && sideSummary.modelData === "blue" ? " 个托管目标" : " 个战位"); color: root.dim; font.pixelSize: 9 }
                                     }
                                 }
                             }
@@ -441,8 +445,9 @@ Item {
                             id: protocolProfileCombo
                             Layout.fillWidth: true; implicitHeight: 32
                             model: [
-                                { text: "标准", value: "native" },
-                                { text: "VMF", value: "vmf-guided-strike-v1" }
+                                { text: "标准联网", value: "native" },
+                                { text: "演示模式", value: "vmf-demo-v2" },
+                                { text: "兼容模式 v1", value: "vmf-guided-strike-v1" }
                             ]
                             textRole: "text"; valueRole: "value"
                             contentItem: Text { text: protocolProfileCombo.currentText; color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; elide: Text.ElideRight; font.pixelSize: 9 }
@@ -489,8 +494,8 @@ Item {
                         }
                     }
                 }
-                SectionTitle { text: root.strictVmf ? "侦察覆盖" : "通信与侦察覆盖" }
-                Text { Layout.fillWidth: true; text: root.strictVmf ? "VMF 通信范围：无限" : "单位：米"; color: root.strictVmf ? root.cyan : root.dim; font.pixelSize: 9 }
+                SectionTitle { text: root.singleSideVmf ? "侦察覆盖" : "通信与侦察覆盖" }
+                Text { Layout.fillWidth: true; text: root.singleSideVmf ? "演示通信范围：无限" : "单位：米"; color: root.singleSideVmf ? root.cyan : root.dim; font.pixelSize: 9 }
                 GridLayout {
                     Layout.fillWidth: true; columns: root.narrowLayout ? 1 : 2; columnSpacing: 8; rowSpacing: 7
                     Repeater {
@@ -502,7 +507,7 @@ Item {
                             ColumnLayout { anchors.fill: parent; anchors.margins: 8; spacing: 5
                                 Text { text: root.seatTitle(parameterCard.modelData); color: root.ink; font.pixelSize: 10; font.bold: true }
                                 GridLayout { Layout.fillWidth: true; columns: root.tinyLayout ? 1 : 2; columnSpacing: 7; rowSpacing: 4
-                                    ColumnLayout { visible: !root.strictVmf; Layout.fillWidth: true; spacing: 2; Text { text: "通信范围"; color: root.dim; font.pixelSize: 8 }
+                                    ColumnLayout { visible: !root.singleSideVmf; Layout.fillWidth: true; spacing: 2; Text { text: "通信范围"; color: root.dim; font.pixelSize: 8 }
                                         TextField {
                                             id: communicationField
                                             Layout.fillWidth: true; implicitHeight: 28; placeholderText: "默认"

@@ -471,6 +471,15 @@ void NetworkClient::onTextMessage(const QString& text) {
         emit vmfTaskResultReceived(payload);
     } else if (type == QLatin1String("vmfTrace")) {
         emit vmfTraceReceived(payload);
+    } else if (type == QLatin1String("demoState")) {
+        emit demoStateReceived(payload);
+    } else if (type == QLatin1String("demoTrace")) {
+        emit demoTraceReceived(payload);
+    } else if (type == QLatin1String("demoResult")) {
+        emit demoResultReceived(payload);
+    } else if (type == QLatin1String("demoError")) {
+        emit demoErrorReceived(payload);
+        emit commandRejected(payload.value(QStringLiteral("message")).toString());
     } else if (type == QLatin1String("event")) {
         Protocol::TransferEventProjection transfer;
         if (Protocol::projectTransferEvent(payload, &transfer).valid) {
@@ -936,6 +945,31 @@ QString NetworkClient::sendVmfTaskCommand(const QJsonObject& command) {
     QJsonObject payload = command;
     payload.insert(QStringLiteral("requestId"), requestId);
     if (!sendEnvelope(QString::fromLatin1(Protocol::VmfTaskCommandMessage), payload, requestId)) {
+        return {};
+    }
+    return requestId;
+}
+
+QString NetworkClient::sendDemoAction(const QJsonObject& command) {
+    const QString requestId = command.value(QStringLiteral("requestId")).toString().isEmpty()
+        ? QStringLiteral("demo-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces))
+        : command.value(QStringLiteral("requestId")).toString();
+    QJsonObject payload = command;
+    payload.insert(QStringLiteral("requestId"), requestId);
+    if (!sendEnvelope(QString::fromLatin1(Protocol::DemoActionMessage), payload, requestId)) {
+        return {};
+    }
+    return requestId;
+}
+
+QString NetworkClient::sendDemoControl(const QJsonObject& command) {
+    const QString requestId = command.value(QStringLiteral("requestId")).toString().isEmpty()
+        ? QStringLiteral("demo-control-%1")
+              .arg(QUuid::createUuid().toString(QUuid::WithoutBraces))
+        : command.value(QStringLiteral("requestId")).toString();
+    QJsonObject payload = command;
+    payload.insert(QStringLiteral("requestId"), requestId);
+    if (!sendEnvelope(QString::fromLatin1(Protocol::DemoControlMessage), payload, requestId)) {
         return {};
     }
     return requestId;

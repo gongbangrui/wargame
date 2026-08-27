@@ -14,6 +14,7 @@ namespace gbr::vmf {
 class VmfProfile final {
 public:
     static constexpr const char* DesignV1 = "vmf-design-v1";
+    static constexpr const char* DemoV2 = "vmf-demo-v2";
 
     static std::shared_ptr<const DictionarySet> load(const QString& profileId,
                                                      const QString& rootDirectory,

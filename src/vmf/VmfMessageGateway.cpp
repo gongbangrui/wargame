@@ -699,7 +699,7 @@ bool VmfMessageGateway::domainMessageXml(
 }
 
 bool VmfMessageGateway::prepareDomainMessage(const Message& input, Message* output,
-                                             QString* error) const {
+                                             QString* error, QJsonObject* trace) const {
     if (error) error->clear();
     if (!output || !m_dictionaries) {
         if (error) *error = QStringLiteral("VMF 网关未初始化");
@@ -748,6 +748,95 @@ bool VmfMessageGateway::prepareDomainMessage(const Message& input, Message* outp
     mapped.payload.insert(QStringLiteral("vmfTrigger"), catalogEntry->trigger);
     mapped.payload.insert(QStringLiteral("vmfInformationValue"),
                           catalogEntry->informationValue.toJson());
+    if (trace) {
+        *trace = traceSummary(mapped, encoded);
+        trace->insert(QStringLiteral("decodedXml"),
+                      QString::fromUtf8(decoded.xml.serialize(false)));
+        trace->insert(QStringLiteral("hexPreview"),
+                      QString::fromLatin1(encoded.bytes.toHex(' ').left(1024)));
+        QString binary;
+        const int previewBits = std::min(encoded.bitLength, 512);
+        binary.reserve(previewBits + previewBits / 8);
+        for (int bit = 0; bit < previewBits; ++bit) {
+            if (bit > 0 && bit % 8 == 0) binary.append(QLatin1Char(' '));
+            const unsigned char byte = static_cast<unsigned char>(encoded.bytes.at(bit / 8));
+            binary.append((byte & (1U << (7 - bit % 8))) ? QLatin1Char('1') : QLatin1Char('0'));
+        }
+        trace->insert(QStringLiteral("binaryPreview"), binary);
+        trace->insert(QStringLiteral("requiresAck"), mapped.requiresAck);
+        trace->insert(QStringLiteral("automaticAck"), mapped.automaticAck);
+    }
+    *output = std::move(mapped);
+    return true;
+}
+
+bool VmfMessageGateway::prepareXmlMessage(const QString& messageName,
+                                          const QByteArray& xmlData,
+                                          const Message& input, Message* output,
+                                          QJsonObject* trace, QString* error) const {
+    if (error) error->clear();
+    if (!output || !m_dictionaries) {
+        if (error) *error = QStringLiteral("VMF 网关未初始化");
+        return false;
+    }
+    MessageXml xml;
+    QList<Diagnostic> diagnostics;
+    if (!MessageXml::parse(xmlData, &xml, &diagnostics)) {
+        if (error) *error = Codec::diagnosticsToString(diagnostics);
+        return false;
+    }
+    if (xml.message != messageName
+        || messageName != messageNameForType(input.type, input.payload)) {
+        if (error) *error = QStringLiteral("XML message 与演示动作消息类型不一致");
+        return false;
+    }
+    const auto entry = m_catalog
+        ? m_catalog->entryFor(Message::typeName(input.type), messageName, input.payload)
+        : std::nullopt;
+    if (!entry.has_value()) {
+        if (error) *error = QStringLiteral("VMF 消息目录没有匹配演示动作");
+        return false;
+    }
+    Codec codec(m_dictionaries);
+    EncodedMessage encoded;
+    if (!codec.encode(messageName, xml, &encoded, &diagnostics)) {
+        if (error) *error = Codec::diagnosticsToString(diagnostics);
+        return false;
+    }
+    DecodedMessage decoded;
+    if (!codec.decode(messageName, encoded.bytes, encoded.bitLength, &decoded, &diagnostics)) {
+        if (error) *error = Codec::diagnosticsToString(diagnostics);
+        return false;
+    }
+    Message mapped = input;
+    mapped.wireFormat = Message::WireFormat::VmfDesignV1;
+    mapped.vmfMessage = messageName;
+    mapped.wireBytes = encoded.bytes;
+    mapped.wireBitLength = encoded.bitLength;
+    mapped.requiresAck = entry->requiresAck;
+    mapped.automaticAck = entry->automaticAck && m_automaticAckEnabled;
+    mapped.payload.insert(QStringLiteral("vmfValidated"), true);
+    mapped.payload.insert(QStringLiteral("vmfFieldCount"), encoded.fields.size());
+    mapped.payload.insert(QStringLiteral("vmfCatalogId"), entry->catalogId);
+    mapped.payload.insert(QStringLiteral("vmfTrigger"), entry->trigger);
+    mapped.payload.insert(QStringLiteral("vmfInformationValue"), entry->informationValue.toJson());
+    if (trace) {
+        *trace = traceSummary(mapped, encoded);
+        trace->insert(QStringLiteral("decodedXml"),
+                      QString::fromUtf8(decoded.xml.serialize(false)));
+        trace->insert(QStringLiteral("hexPreview"),
+                      QString::fromLatin1(encoded.bytes.toHex(' ').left(1024)));
+        QString binary;
+        const int previewBits = std::min(encoded.bitLength, 512);
+        for (int bit = 0; bit < previewBits; ++bit) {
+            if (bit > 0 && bit % 8 == 0) binary.append(QLatin1Char(' '));
+            const unsigned char byte = static_cast<unsigned char>(encoded.bytes.at(bit / 8));
+            binary.append((byte & (1U << (7 - bit % 8))) ? QLatin1Char('1') : QLatin1Char('0'));
+        }
+        trace->insert(QStringLiteral("binaryPreview"), binary);
+        trace->insert(QStringLiteral("requiresAck"), mapped.requiresAck);
+        trace->insert(QStringLiteral("automaticAck"), mapped.automaticAck);
+    }
     *output = std::move(mapped);
     return true;
 }

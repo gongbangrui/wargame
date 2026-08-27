@@ -97,6 +97,12 @@ cmake --build build -j
 
 构建产物位于 `build/` 目录。该目录是生成目录，不应提交到版本库。
 
+注意：这些程序带参数时按下方格式处理指定文件；不带参数运行时会自动执行构建目录中的冒烟测试，适合直接点击 Qt Creator 的“运行”。`vmf_decode` 带 4 个参数时解码指定文件：
+
+```text
+msgStruct/msg0_1.xml dic_content.xml input.bin decoded.xml
+```
+
 四、核心命令说明
 
 1. 消息校验：`vmf_validate`

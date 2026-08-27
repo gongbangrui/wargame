@@ -51,6 +51,8 @@ public:
     QString requestIntelHistory(const QVariantMap& query = {});
     QString sendVmfMessage(const QJsonObject& message);
     QString sendVmfTaskCommand(const QJsonObject& command);
+    QString sendDemoAction(const QJsonObject& command);
+    QString sendDemoControl(const QJsonObject& command);
     void cancelIntelHistoryRequests();
     void sendMapMark(const QVariantMap& position, const QString& label,
                      const QStringList& recipientSeatIds = {});
@@ -80,6 +82,10 @@ signals:
     void vmfEventReceived(const QJsonObject& event);
     void vmfTaskResultReceived(const QJsonObject& result);
     void vmfTraceReceived(const QJsonObject& trace);
+    void demoStateReceived(const QJsonObject& state);
+    void demoTraceReceived(const QJsonObject& trace);
+    void demoResultReceived(const QJsonObject& result);
+    void demoErrorReceived(const QJsonObject& error);
     void transferEventReceived(const QJsonObject& event);
     void snapshotReceived(const QJsonObject& payload);
     void deltaSnapshotReceived(const QJsonObject& payload,

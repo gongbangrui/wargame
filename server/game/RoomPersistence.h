@@ -65,6 +65,7 @@ struct RoomCheckpoint {
     QString scenarioId = QStringLiteral("default");
     QString protocolProfile = QStringLiteral("native");
     QJsonObject strictVmfTasks;
+    QJsonObject demoState;
     QJsonObject seatLimits;
     QJsonObject seatParameters;
     quint64 configVersion = 1;

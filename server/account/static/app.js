@@ -480,8 +480,9 @@ function renderRooms() {
     const enabled = card.querySelector(".room-enabled");
     enabled.className = `room-enabled ${room.enabled ? "enabled" : "disabled"}`;
     setTextWithTitle(enabled, room.enabled ? "可进入" : "已关闭");
-    const strictVmf = room.protocolProfile === "vmf-guided-strike-v1";
-    const readiness = strictVmf
+    const demoVmf = room.protocolProfile === "vmf-demo-v2";
+    const singleSideVmf = demoVmf || room.protocolProfile === "vmf-guided-strike-v1";
+    const readiness = singleSideVmf
       ? `红方 ${room.redCommanderReady ? "就绪" : "未就绪"} · 蓝方固定靶`
       : `红 ${room.redCommanderReady ? "就绪" : "未就绪"} · 蓝 ${room.blueCommanderReady ? "就绪" : "未就绪"}`;
     setTextWithTitle(card.querySelector(".room-readiness"), readiness);
@@ -490,8 +491,9 @@ function renderRooms() {
     const provider = room.aiProvider === "ollama" ? "Ollama" : "规则引擎";
     const model = room.aiModel || room.aiResolvedModel;
     const aiDetail = mode === "pve" ? ` · ${provider}${model ? ` · ${model}` : ""}` : "";
-    setTextWithTitle(card.querySelector(".room-mode"), strictVmf
-      ? "VMF 单方作战 · 红方参演 · 蓝方固定靶"
+    setTextWithTitle(card.querySelector(".room-mode"), demoVmf
+      ? "演示模式 · 红方参演 · 蓝方固定靶"
+      : singleSideVmf ? "兼容模式 v1 · 红方参演"
       : mode === "pve" ? `${roomModeLabels[mode]} · ${difficulty}${aiDetail}` : roomModeLabels[mode]);
     const operationNode = card.querySelector(".room-operation");
     if (operation) {
@@ -657,14 +659,15 @@ function openRoomModal(room = null) {
 
 function updateRoomModeEditor() {
   const locked = $("roomForm").dataset.modeLocked === "true";
-  const strictVmf = $("roomProtocolProfile").value === "vmf-guided-strike-v1";
-  if (strictVmf) {
+  const profile = $("roomProtocolProfile").value;
+  const singleSideVmf = profile === "vmf-demo-v2" || profile === "vmf-guided-strike-v1";
+  if (singleSideVmf) {
     $("roomModePve").checked = false;
     $("roomModePvp").checked = true;
   }
   const mode = $("roomModePve").checked ? "pve" : "pvp";
   $("roomModePvp").disabled = locked;
-  $("roomModePve").disabled = locked || strictVmf;
+  $("roomModePve").disabled = locked || singleSideVmf;
   $("roomAiFields").classList.toggle("hidden", mode !== "pve");
   $("roomAiDifficultyField").classList.toggle("hidden", mode !== "pve");
   $("roomAiProvider").disabled = locked || mode !== "pve";
@@ -673,10 +676,11 @@ function updateRoomModeEditor() {
   $("roomIntelStale").disabled = locked;
   $("roomIntelArchive").disabled = locked;
   $("roomModeLockHint").classList.toggle("hidden", !locked);
-  $("roomProtocolHint").textContent = strictVmf
-    ? "登录用户仅可选择红方；蓝方保留场景参数并作为固定靶。"
+  $("roomProtocolHint").textContent = profile === "vmf-demo-v2"
+    ? "六步演示流程；红方人工操作，空缺战位自动接管，蓝方为固定靶。"
+    : singleSideVmf ? "兼容旧版 VMF 任务流程。"
     : "";
-  if (strictVmf) $("roomAiResolved").textContent = "缺失的红方任务环节由游戏服务器自动传递";
+  if (singleSideVmf) $("roomAiResolved").textContent = "缺失的红方任务环节由游戏服务器自动传递";
   else if (mode !== "pve") $("roomAiResolved").textContent = "PVP 房间固定使用规则引擎";
 }
 

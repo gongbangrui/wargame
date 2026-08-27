@@ -235,14 +235,36 @@ class AccountRoomLifecycleTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(stored, "vmf-guided-strike-v1")
 
-    def test_strict_vmf_rejects_pve_on_create_and_resolved_update(self) -> None:
-        with self.assertRaises(ValueError):
-            self.app.RoomBody(
-                room_id="strict-pve",
-                name="Invalid strict room",
-                protocol_profile="vmf-guided-strike-v1",
-                mode="pve",
-            )
+    def test_internal_room_config_persists_demo_v2_profile(self) -> None:
+        with self.app.database() as db:
+            db.execute("UPDATE rooms SET status='preparing' WHERE room_id='main'")
+        response = self.app.internal_room_config(
+            "main",
+            self.app.InternalRoomConfigBody(
+                expected_config_version=1,
+                name="VMF Demo Room",
+                description="six-step demonstration",
+                scenario_id="default",
+                protocol_profile="vmf-demo-v2",
+            ),
+            self.app.INTERNAL_KEY,
+        )
+
+        room = response["room"]
+        self.assertEqual(room["protocolProfile"], "vmf-demo-v2")
+        self.assertEqual(room["operationMode"], "vmf-single-side")
+        self.assertEqual(room["participantSide"], "red")
+        self.assertEqual(room["fixedTargetSide"], "blue")
+
+    def test_single_side_vmf_profiles_reject_pve(self) -> None:
+        for profile in ("vmf-guided-strike-v1", "vmf-demo-v2"):
+            with self.subTest(profile=profile), self.assertRaises(ValueError):
+                self.app.RoomBody(
+                    room_id="vmf-pve",
+                    name="Invalid VMF room",
+                    protocol_profile=profile,
+                    mode="pve",
+                )
 
         with self.app.database() as db:
             db.execute(

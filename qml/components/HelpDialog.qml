@@ -172,7 +172,7 @@ Dialog {
             anchors.fill: parent
             spacing: 4
             Repeater {
-                model: ["侦察", "派单", "引导", "授权", "攻击", "毁伤", "返航"]
+                model: ["目标报告", "航路规划", "引导命令", "地面引导", "摧毁确认", "返航"]
                 delegate: RowLayout {
                     id: flowStep
                     required property string modelData
@@ -185,7 +185,7 @@ Dialog {
                         border.color: flowStep.index === 0 ? AppContext.signal : AppContext.line
                         Text { anchors.centerIn: parent; text: flowStep.modelData; color: flowStep.index === 0 ? AppContext.signal : AppContext.textDim; font.pixelSize: 9; font.bold: flowStep.index === 0 }
                     }
-                    Icon { visible: flowStep.index < 6; name: "chevron-right"; iconColor: AppContext.muted; iconSize: 12 }
+                    Icon { visible: flowStep.index < 5; name: "chevron-right"; iconColor: AppContext.muted; iconSize: 12 }
                 }
             }
         }
@@ -298,7 +298,7 @@ Dialog {
                         visible: root.categoryIndex === 1
                         Layout.fillWidth: true; spacing: 0
                         HelpSection { heading: "登录到进入战位"; summary: "账号服务、房间大厅与战位确认"; iconName: "network"; expanded: true
-                            BodyText { text: "1. 在联网登录页填写账号服务地址、用户名和密码。\n2. 登录成功后从房间列表选择“进入房间”；运行中的 VMF 房间也允许参演者进入。\n3. 战位页先看阵营与状态。VMF 中标为“可接管”的红方自动战位可直接接管；普通房间的占用战位不能抢占。\n4. 战位只有在服务器回传确认后才算接管成功，界面随后进入部署或战斗页。" }
+                            BodyText { text: "1. 在联网登录页填写账号服务地址、用户名和密码。\n2. 登录成功后从房间列表选择“进入房间”；运行中的演示模式或兼容模式房间也允许参演者进入。\n3. 战位页先看阵营与状态。标为“可接管”的红方自动战位可直接接管；普通房间的占用战位不能抢占。\n4. 战位只有在服务器回传确认后才算接管成功，界面随后进入部署或战斗页。" }
                         }
                         HelpSection { heading: "部署与就绪"; summary: "指挥官部署，本方战位依次确认"; iconName: "locate"
                             BodyText { text: "准备阶段由指挥官在部署队列选择战位，再在地图指定位置。普通战位确认部署后提交就绪；指挥官最后确认本方就绪。VMF 的蓝方为固定靶，红方自动战位已经由服务器托管，无需人工重复部署。" }
@@ -307,7 +307,7 @@ Dialog {
                             BodyText { text: "“单位”处理本战位单位和战斗动作；“指挥”查看通信、指令、交接与部署申请；“情报”查看接触、定位、共享和人工报告。普通战位只能控制自己的单位，指挥官可通过有效指挥链控制本方单位。" }
                         }
                         HelpSection { heading: "退出与重连"; summary: "保留权威状态，避免重复提交"; iconName: "return"
-                            BodyText { text: "网络中断时客户端会自动重连并请求完整快照。界面显示“同步中”期间不要连续点击操作。主动退出房间会释放普通战位；运行中的严格 VMF 战位会由服务器自动控制接续，稍后仍可由其他用户接管。" }
+                            BodyText { text: "网络中断时客户端会自动重连并请求完整快照。界面显示“同步中”期间不要连续点击操作。主动退出房间会释放普通战位；运行中的演示模式和兼容模式战位会由服务器自动控制接续，稍后仍可由其他用户接管。" }
                         }
                     }
 
@@ -316,16 +316,16 @@ Dialog {
                         Layout.fillWidth: true; spacing: 0
                         HelpSection { heading: "VMF 演示全流程"; summary: "从接管战位到任务返航"; iconName: "command"; expanded: true
                             FlowFigure {}
-                            BodyText { text: "VMF 房间只开放红方参演，蓝方由服务器作为固定目标。红方指挥、侦察、攻击、地面战位可以由人工接管；未接管的环节由服务器自动推进。全部通信范围按无限处理，不需要调整通信距离。\n\n开始推演后，自动侦察战位会先扫描目标，超出扫描范围时会自行机动搜索。指挥官在 VMF 工作区选择已观测目标并创建任务。工作区始终只给当前战位显示一个有效的下一步动作。点击后等待任务阶段和修订号更新，再继续下一步。" }
+                            BodyText { text: "演示模式只开放红方参演，蓝方由服务器作为固定靶，不进行攻击或反制。红方指挥、侦察、攻击、地面引导战位可以由人工接管；未接管的环节由服务器按当前步骤自动推进。演示不模拟通信节点被摧毁，通信范围固定为无限。\n\n工作台按目标报告、航路规划、引导命令、地面引导、摧毁确认、返航六个阶段推进。每次只开放一个权威动作；提交后等待回执和 revision 更新，再执行下一步。兼容模式 v1 保留旧任务流程，不使用本工作台。" }
                         }
                         HelpSection { heading: "各战位怎么操作"; summary: "指挥、侦察、攻击、地面四类职责"; iconName: "unit"
-                            BodyText { text: "指挥战位：创建任务、派单、命令地面引导、下达撤离。\n侦察战位：提交目标报告，在攻击后确认目标摧毁。\n攻击战位：接受派单、身份握手、接受航路、报告攻击就绪、实施攻击、报告毁伤、报告返航。\n地面战位：确认会合与身份、发送引导包、授权攻击、确认毁伤评估。\n\n如果当前环节属于未接管战位，面板显示“自动推进”，无需替它点击。用户中途接管后，从服务器当前阶段继续。" }
+                            BodyText { text: "侦察战位：发送目标报告；攻击后确认目标摧毁。\n指挥战位：规划攻击航路、下达引导命令、下达返航命令。\n攻击战位：确认攻击航路、确认引导命令、上报毁伤结果、确认返航完成。\n地面引导战位：完成地面引导。\n\n上述职责对应十个固定顺序动作。如果当前动作属于未接管战位，服务器至少间隔一秒自动执行；用户中途接管后，从服务器当前 revision 继续。" }
                         }
                         HelpSection { heading: "任务状态与回执"; summary: "阶段、操作者、ACK 和 Codec 诊断"; iconName: "check"
-                            BodyText { text: "阶段标题表示权威任务状态；“当前操作者”指出下一步由哪个战位执行；按钮可用时才允许本战位提交。提交后先显示等待回执，收到新快照后阶段前进。诊断区默认折叠，其中 trace、bit 长度、Catalog 和往返一致性用于确认 VMF 编解码，不是日常操作步骤。" }
+                            BodyText { text: "阶段标题表示服务端权威状态；“当前操作者”指出下一步由哪个战位执行；按钮可用时才允许本战位提交。表单可用下拉项和文字补充自动生成消息，也可切换到高级 XML 输入。\n\n“消息明文”展示已确认业务内容；“编码检查”和“字段布局”展示 bit 长度、十六进制预览、往返一致性、ACK 与字段偏移。界面不展示密文，完整 trace 只随实时演示消息下发，普通快照只保留摘要。" }
                         }
                         HelpSection { heading: "演示卡住时"; summary: "按阶段、战位、目标和链路逐项检查"; iconName: "warning"
-                            BodyText { text: "先确认房间为“推演中”，再核对当前战位是否就是面板所列操作者。目标必须仍存活且已观测；任务绑定的指挥、侦察、攻击、地面单元必须存在。若显示自动推进但阶段长时间不变，查看错误弹窗中的 VMF 代码，再让网页管理员暂停并恢复；不要重复创建同一任务。" }
+                            BodyText { text: "先确认房间为“推演中”，流程未被导演暂停，再核对当前战位是否就是工作台所列操作者。场景必须包含红方四类演示战位及其单位，并至少有一个蓝方单位作为固定靶。若自动环节长时间不变，查看 DEMO 错误代码并由导演暂停后恢复；revision 未更新前不要重复提交。导演可按需跳转阶段或重置整个演示代次。" }
                         }
                     }
 
@@ -339,7 +339,7 @@ Dialog {
                             BodyText { text: "定位：选择记录并把地图移动到最后位置。\n详情：查看坐标、观测时间、备注和传播来源。\n共享：选中记录与接收战位后提交，可附短备注。\n人工报告：先在地图选点，再选报告类型并填写标题或备注。\n\n所有提交都要等待服务器确认；“已提交”不等于已经写入台账。" }
                         }
                         HelpSection { heading: "指挥通信"; summary: "实时消息、指令和通信状态"; iconName: "chat"
-                            BodyText { text: "普通战位从“指挥”页向本方指挥官发送消息；指挥官在收件箱集中查看。普通联网模式运行阶段仍受通信拓扑影响，只有双向链路可发送。严格 VMF 房间通信距离无限，但身份、任务阶段和战位权限校验仍然有效。" }
+                            BodyText { text: "普通战位从“指挥”页向本方指挥官发送消息；指挥官在收件箱集中查看。普通联网模式运行阶段仍受通信拓扑影响，只有双向链路可发送。演示模式与兼容模式的通信距离无限，但消息身份、流程 revision 和战位权限校验仍然有效。" }
                         }
                     }
 
@@ -347,13 +347,13 @@ Dialog {
                         visible: root.categoryIndex === 4
                         Layout.fillWidth: true; spacing: 0
                         HelpSection { heading: "网页端与客户端分工"; summary: "生命周期与场景编辑不要混用"; iconName: "server"; expanded: true
-                            BodyText { text: "网页管理端负责账号、房间开启/暂停/恢复/停止和运行状态；桌面房间管理员在准备阶段编辑场景、协议 profile、侦察范围等。运行中的场景禁止编辑。VMF profile 下战位编制和固定靶由服务端生成，通信范围固定为无限。" }
+                            BodyText { text: "网页管理端负责账号、房间开启/暂停/恢复/停止和运行状态；桌面房间管理员在准备阶段编辑场景、协议 profile、侦察范围等。运行中的场景禁止编辑。演示模式和兼容模式下，战位编制与固定靶由服务端生成，通信范围固定为无限。" }
                         }
                         HelpSection { heading: "修改房间配置"; summary: "只在准备阶段保存"; iconName: "edit"
                             BodyText { text: "进入房间管理后先重载当前配置，修改名称、说明、场景或协议，再保存。保存期间不要重复点击。若其他管理员已更新配置，服务器会拒绝旧版本，应重载后重新修改。场景单位决定战位容量，不要把战位数量当成独立数据源。" }
                         }
                         HelpSection { heading: "开启一局 VMF 演示"; summary: "建议顺序"; iconName: "play"
-                            BodyText { text: "1. 网页端将房间置为准备状态。\n2. 桌面房间管理选择严格 VMF profile，检查红方四类任务资源和蓝方目标。\n3. 玩家进入并接管需要的红方战位；其余红方战位保持自动控制。\n4. 红方指挥官就绪后，由网页端启动推演。\n5. 指挥官创建任务，各战位按 VMF 面板推进。\n6. 结束后由网页端停止或重置房间。" }
+                            BodyText { text: "1. 网页端将房间置为准备状态，并选择“演示模式”。\n2. 桌面房间管理确认 profile 为 vmf-demo-v2，检查红方四类演示资源和蓝方固定靶。\n3. 玩家进入并接管需要的红方战位；其余红方战位保持自动控制。\n4. 红方指挥官就绪后，由网页端启动推演。\n5. 各战位按六阶段时间线完成十个消息动作；导演可暂停、恢复、跳转或重置。\n6. 完成返航确认后，由网页端停止或重置房间。" }
                         }
                     }
 
@@ -364,13 +364,13 @@ Dialog {
                             BodyText { text: "登录失败 / 401：检查用户名、密码和账号是否启用；用户名与密码只要求非空，不会因长度被客户端拒绝。\n账号服务不可用：确认地址协议、主机和端口，检查网页管理端是否能打开。\nGAME_SERVER_UNAVAILABLE：账号服务可用，但游戏 WebSocket 未启动或地址不可达。\nSESSION_REVOKED：账号被停用、令牌过期或在别处注销，重新登录。\n同步超时：保持窗口打开，等待自动重连；持续失败时重新选择会话。" }
                         }
                         HelpSection { heading: "房间与战位"; summary: "ROOM、SEAT 和 COMMANDER 错误"; iconName: "unit"
-                            BodyText { text: "ROOM_NOT_FOUND / ROOM_CLOSED：房间已关闭或列表过期，返回房间页刷新。\nROOM_FINISHED：本局已结束，等待管理员重置。\nSEAT_OCCUPIED：普通战位被真人占用；VMF 自动战位应显示“可接管”，刷新后重试。\nCOMMANDER_PRIORITY：先由红方指挥官进入；普通模式还需蓝方指挥官。\nSEAT_LOCKED：当前阶段不能换位；严格 VMF 仅允许未入座用户接管红方自动战位。\nSIDE_RESERVED_FOR_FIXED_TARGET：VMF 蓝方是固定靶，不能接管。\nALREADY_SEATED：当前会话已有战位，使用退出或战位切换流程。" }
+                            BodyText { text: "ROOM_NOT_FOUND / ROOM_CLOSED：房间已关闭或列表过期，返回房间页刷新。\nROOM_FINISHED：本局已结束，等待管理员重置。\nSEAT_OCCUPIED：普通战位被真人占用；演示/兼容模式自动战位应显示“可接管”，刷新后重试。\nCOMMANDER_PRIORITY：先由红方指挥官进入；普通模式还需蓝方指挥官。\nSEAT_LOCKED：当前阶段不能换位；单边模式仅允许未入座用户接管红方自动战位。\nSIDE_RESERVED_FOR_FIXED_TARGET：蓝方是固定靶，不能接管。\nALREADY_SEATED：当前会话已有战位，使用退出或战位切换流程。" }
                         }
                         HelpSection { heading: "部署、命令与持久化"; summary: "权限、版本、保存和状态同步"; iconName: "save"
                             BodyText { text: "PERMISSION_DENIED：当前战位、阶段或单位不允许该动作。\nSTALE_STATE / REVISION_CONFLICT：本地状态落后，等待完整同步后重试。\nINITIAL_UNIT_MISSING：场景没有与战位匹配的初始单位，房间管理员检查单位类型和阵营。\nPERSISTENCE_FAILED：服务端未能写入检查点或事件日志，操作已回滚；检查数据目录权限和磁盘空间。\nRUNTIME_RESET_FAILED：房间权威编制与运行场景不一致，需要管理员停止并恢复房间。" }
                         }
-                        HelpSection { heading: "VMF 错误"; summary: "任务顺序、角色、目标与编码"; iconName: "warning"
-                            BodyText { text: "VMF_ROLE_FORBIDDEN：当前战位不是该阶段操作者。\nVMF_SEQUENCE_INVALID：动作与当前任务阶段不符，等待最新快照。\nTASK_NOT_FOUND：任务尚未同步或已清理，重新选择任务。\nTARGET_NOT_OBSERVED：指挥侧还没有该目标情报，等待侦察记录。\nTARGET_NOT_DESTROYED：权威仿真仍判定目标存活，不能提前确认。\nVMF_MESSAGE_INVALID：消息身份、任务关联或通信链校验失败。\nVMF_CODEC_FAILED / VMF_CANONICAL_MISMATCH：客户端与服务器 VMF 字典或编码结果不一致，确认三端版本相同。\nDUPLICATE_MESSAGE：同一 trace 已处理，不要重复提交。\nRESOURCE_BUSY：同一资源已绑定到另一未完成任务。" }
+                        HelpSection { heading: "VMF 与演示错误"; summary: "流程版本、角色、场景与编码"; iconName: "warning"
+                            BodyText { text: "DEMO_REVISION_MISMATCH / DEMO_PHASE_MISMATCH：流程已前进，等待最新状态后重试。\nDEMO_ROLE_FORBIDDEN / DEMO_SEAT_REQUIRED：当前红方战位不是该动作操作者。\nDEMO_SEQUENCE_INVALID：动作不符合十步固定顺序。\nDEMO_PAUSED / DEMO_COMPLETED：由导演恢复或重置演示。\nDEMO_TRACE_REQUIRED / VMF_CODEC_FAILED：消息未通过 VMF 编解码与往返校验。\nDIRECTOR_REQUIRED：暂停、恢复、跳转和重置仅限房间管理员或导演。\n\nVMF_ROLE_FORBIDDEN、VMF_SEQUENCE_INVALID、TASK_NOT_FOUND、TARGET_NOT_OBSERVED、TARGET_NOT_DESTROYED、VMF_MESSAGE_INVALID、VMF_CANONICAL_MISMATCH、DUPLICATE_MESSAGE 和 RESOURCE_BUSY 属于兼容模式 v1。" }
                         }
                     }
                     Item { Layout.fillWidth: true; Layout.preferredHeight: 20 }
