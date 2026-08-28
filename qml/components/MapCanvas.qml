@@ -68,6 +68,7 @@ Item {
     signal guideSourceChanged(string unitId)
     signal guideCancelled()
     signal mapMarkerClicked(var marker)
+    signal intelClicked(var intel)
     signal doubleClickedUnit(string unitId)
     signal doubleClickedMap(var logicalPos)
 
@@ -539,6 +540,21 @@ Item {
     function focusAt(lx, ly) {
         root.followSuspended = false
         centerOn(lx, ly)
+    }
+    function intelAtPixel(px, py) {
+        var records = root.intelRecords || []
+        for (var i = 0; i < records.length; ++i) {
+            var record = records[i] || ({})
+            if (String(record.freshness || "") === "archived") continue
+            var position = record.lastPosition || ({})
+            var x = Number(position.x), y = Number(position.y)
+            if (!isFinite(x) || !isFinite(y)) continue
+            var projected = root.toPixel(x, y)
+            var radius = String(record.type || "") === "manualReport" ? 12 : 15
+            if (Math.pow(px - projected.x, 2) + Math.pow(py - projected.y, 2) <= radius * radius)
+                return record
+        }
+        return null
     }
 
     // GIS tile map background (uses C++ MapTileRenderer)
@@ -1642,6 +1658,12 @@ Item {
                             root.mapMarkerClicked(markerHit)
                             return
                         }
+                        var intelHit = root.intelAtPixel(mouse.x, mouse.y)
+                        if (intelHit) {
+                            _dragJustEnded = true
+                            root.intelClicked(intelHit)
+                            return
+                        }
                     }
                     var hit = root.unitAtPixel(mouse.x, mouse.y, false)
                     if (hit) {
@@ -1727,7 +1749,9 @@ Item {
                         else root.rightClickedMap(lp)
                     }
                 } else {
-                    if (hit) root.unitClicked(hit.id, "left", mouse.modifiers)
+                    var intelHit = root.intelAtPixel(mouse.x, mouse.y)
+                    if (intelHit) root.intelClicked(intelHit)
+                    else if (hit) root.unitClicked(hit.id, "left", mouse.modifiers)
                     else root.clickedMap(lp)
                 }
             }

@@ -109,7 +109,8 @@ std::shared_ptr<VmfMessageCatalog> fallbackCatalog() {
                 {QStringLiteral("targetId"), QStringLiteral("position"), QStringLiteral("status")});
     addFallback(&entries, QStringLiteral("47005"), {QStringLiteral("EngagementReport")},
                 QStringLiteral("Target Report"), {QStringLiteral("attack")},
-                {QStringLiteral("commander")}, QStringLiteral("engagementReported"), {}, true,
+                {QStringLiteral("commander"), QStringLiteral("ground")},
+                QStringLiteral("engagementReported"), {}, true,
                 QStringLiteral("medium"), 70, {QStringLiteral("targetId"), QStringLiteral("outcome")});
     addFallback(&entries, QStringLiteral("47006"), {QStringLiteral("StrikePlan"), QStringLiteral("FlightPlan")},
                 QStringLiteral("Land Route"), {QStringLiteral("commander"), QStringLiteral("ground")},

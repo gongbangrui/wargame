@@ -14,6 +14,10 @@ QJsonObject demoCommand(const VmfDemoWorkflow& workflow, const QString& action,
                        {QStringLiteral("actionId"), actionId},
                        {QStringLiteral("expectedRevision"),
                         state.value(QStringLiteral("revision"))},
+                       {QStringLiteral("workflowSchemaVersion"),
+                        VmfDemoWorkflow::SchemaVersion},
+                       {QStringLiteral("generation"),
+                        state.value(QStringLiteral("generation"))},
                        {QStringLiteral("seat"), QStringLiteral("red-seat")},
                        {QStringLiteral("action"), action},
                        {QStringLiteral("phase"), state.value(QStringLiteral("phase"))},
@@ -35,7 +39,7 @@ QJsonObject demoTrace(const QString& actionId) {
 TEST(VmfDemoWorkflowTest, EnforcesOrderedSeatActionsAndCompletes) {
     VmfDemoWorkflow workflow;
     const QList<VmfDemoWorkflow::ActionSpec> specs = VmfDemoWorkflow::actionSpecs();
-    ASSERT_EQ(specs.size(), 10);
+    ASSERT_EQ(specs.size(), 17);
 
     const auto wrongSeat = workflow.applyAction(
         demoCommand(workflow, specs.first().action, QStringLiteral("wrong-seat")),
@@ -54,8 +58,8 @@ TEST(VmfDemoWorkflowTest, EnforcesOrderedSeatActionsAndCompletes) {
 
     const QJsonObject state = workflow.stateProjection(true);
     EXPECT_EQ(state.value(QStringLiteral("status")).toString(), QStringLiteral("completed"));
-    EXPECT_EQ(state.value(QStringLiteral("traceCount")).toInt(), 10);
-    EXPECT_EQ(state.value(QStringLiteral("traces")).toArray().size(), 10);
+    EXPECT_EQ(state.value(QStringLiteral("traceCount")).toInt(), 17);
+    EXPECT_EQ(state.value(QStringLiteral("traces")).toArray().size(), 17);
 }
 
 TEST(VmfDemoWorkflowTest, DuplicateActionIsIdempotentAndStateRestores) {
@@ -166,6 +170,31 @@ TEST(VmfDemoWorkflowTest, RejectsInconsistentCheckpointState) {
     EXPECT_FALSE(workflow.restore(invalid, &error));
 }
 
+TEST(VmfDemoWorkflowTest, CancellationArchivesGenerationAndReturnsToTargetReport) {
+    VmfDemoWorkflow workflow;
+    const quint64 generation = static_cast<quint64>(
+        workflow.stateProjection(false).value(QStringLiteral("generation")).toInteger());
+    ASSERT_TRUE(workflow.applyControl(
+        QStringLiteral("cancel"), QJsonObject{{QStringLiteral("cancelUntilMs"), 1000}},
+        1.0).ok);
+    const QJsonObject cancelled = workflow.stateProjection(false);
+    EXPECT_EQ(cancelled.value(QStringLiteral("status")).toString(),
+              QStringLiteral("cancelled"));
+    EXPECT_EQ(cancelled.value(QStringLiteral("phase")).toString(),
+              QStringLiteral("target-report"));
+    EXPECT_TRUE(cancelled.value(QStringLiteral("expectedAction")).toString().isEmpty());
+    EXPECT_FALSE(workflow.advanceCancellation(999));
+    ASSERT_TRUE(workflow.advanceCancellation(1000));
+    const QJsonObject state = workflow.stateProjection(false);
+    EXPECT_EQ(state.value(QStringLiteral("status")).toString(), QStringLiteral("active"));
+    EXPECT_EQ(state.value(QStringLiteral("phase")).toString(), QStringLiteral("target-report"));
+    EXPECT_EQ(state.value(QStringLiteral("generation")).toInteger(),
+              static_cast<qint64>(generation + 1));
+    ASSERT_EQ(state.value(QStringLiteral("archive")).toArray().size(), 1);
+    EXPECT_EQ(state.value(QStringLiteral("archive")).toArray().first().toObject()
+                  .value(QStringLiteral("status")).toString(), QStringLiteral("cancelled"));
+}
+
 TEST(VmfDemoProtocolTest, AcceptsV2ActionControlStateAndTrace) {
     VmfDemoWorkflow workflow;
     const QJsonObject action = demoCommand(workflow, QStringLiteral("reportTarget"),
@@ -175,6 +204,9 @@ TEST(VmfDemoProtocolTest, AcceptsV2ActionControlStateAndTrace) {
         action)).valid);
 
     const QJsonObject control{{QStringLiteral("requestId"), QStringLiteral("demo-control")},
+                              {QStringLiteral("workflowSchemaVersion"),
+                               VmfDemoWorkflow::SchemaVersion},
+                              {QStringLiteral("generation"), 1},
                               {QStringLiteral("expectedRevision"), 1},
                               {QStringLiteral("action"), QStringLiteral("pause")},
                               {QStringLiteral("payload"), QJsonObject{}}};

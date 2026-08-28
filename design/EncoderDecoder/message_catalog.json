@@ -64,7 +64,7 @@
       "domainTypes": ["EngagementReport"],
       "vmfMessage": "Target Report",
       "senderRoles": ["attack"],
-      "receiverRoles": ["commander"],
+      "receiverRoles": ["commander", "ground"],
       "trigger": "engagementReported",
       "preconditions": ["attackerId and targetId match correlation"],
       "nextStages": [],

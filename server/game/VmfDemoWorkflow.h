@@ -11,7 +11,7 @@ namespace gbr {
 
 class VmfDemoWorkflow final {
 public:
-    static constexpr int SchemaVersion = 1;
+    static constexpr int SchemaVersion = 2;
     static constexpr const char* ProfileId = "vmf-demo-v2";
     static constexpr qsizetype TraceLimit = 200;
     static constexpr qsizetype ActionHistoryLimit = 4096;
@@ -45,6 +45,8 @@ public:
     std::optional<Result> duplicateActionResult(const QJsonObject& command,
                                                 const QString& actorSeatType) const;
     Result applyControl(const QString& action, const QJsonObject& payload, double now);
+    bool advanceCancellation(qint64 nowEpochMs);
+    qint64 cancelUntilMs() const { return m_cancelUntilMs; }
 
     const ActionSpec* currentAction() const;
     QString currentSeatType() const;
@@ -58,6 +60,9 @@ private:
     static QJsonObject normalizedScript(const QJsonObject& script);
     void rebuildTargetStateForCurrentPhase();
     void applyScriptForCurrentPhase();
+    void appendReport(const QJsonObject& report);
+    void archiveGeneration(const QString& status);
+    void clearTaskState();
     Result failure(const QString& code, const QString& message) const;
     Result success(const QString& status = QStringLiteral("accepted")) const;
 
@@ -68,6 +73,11 @@ private:
     QJsonObject m_targetScript;
     int m_scriptCursor = 0;
     QJsonObject m_targetState;
+    QJsonObject m_task;
+    QJsonArray m_reports;
+    QJsonArray m_archivedGenerations;
+    qint64 m_cancelUntilMs = 0;
+    quint64 m_cancelledGeneration = 0;
     QJsonArray m_traces;
     QJsonArray m_actionHistory;
     QSet<QString> m_seenActionIds;

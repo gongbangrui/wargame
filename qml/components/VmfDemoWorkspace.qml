@@ -2,10 +2,12 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
+import "."
 
 Item {
     id: root
     property var controller: null
+    property var mapCanvas: null
     property var demoState: controller ? controller.demoState : ({})
     property var trace: controller ? controller.vmfTrace : ({})
     property bool lightTheme: false
@@ -15,6 +17,11 @@ Item {
     property int pendingRevision: 0
     property bool scriptEditorOpen: false
     property string notice: ""
+    property var selectedTarget: null
+    property var selectedPosition: null
+    property bool targetPicking: false
+    property int seenReportCount: 0
+    property real lastGeneration: 0
     readonly property bool compact: width < 420
 
     readonly property color surface: lightTheme ? "#f7f9fa" : AppContext.panel
@@ -36,6 +43,7 @@ Item {
         && controller.currentSeatType === String(demoState.activeSeat || "")
         && controller.matchPhase === "running" && demoState.status === "active"
         && String(demoState.expectedAction || "").length > 0
+        && String(demoState.expectedAction || "") !== "planRoute"
         && !requestPending
         && (!advancedXml || xmlEditor.text.trim().length > 0)
 
@@ -48,25 +56,115 @@ Item {
     }
 
     function actionLabel(value) {
-        return ({ reportTarget: "发送目标报告", planRoute: "提交攻击航路",
+        return ({ reportTarget: "发送目标报告", planRoute: "编辑攻击航路",
                   acceptRoute: "确认攻击航路", issueGuidance: "下达引导命令",
                   acknowledgeGuidance: "确认引导命令",
-                  confirmGroundGuidance: "完成地面引导", reportDamage: "上报毁伤结果",
-                  confirmDestroyed: "确认目标摧毁", orderReturn: "下达返航命令",
+                  identityHello: "发送身份报告", identityConfirm: "确认身份",
+                  sendGuidancePackage: "发送引导包", acceptGuidance: "确认引导包",
+                  reportAttackReady: "报告攻击准备就绪", authorizeAttack: "授权攻击",
+                  simulateAttack: "执行模拟攻击", reportBattleDamage: "报告模拟战果",
+                  confirmDamageAssessment: "确认毁伤评估",
+                  confirmTargetDestroyed: "确认目标摧毁", withdraw: "下达返航命令",
                   confirmReturned: "确认返航完成" })[String(value || "")] || "流程已完成"
     }
 
-    function fieldPayload() {
-        var payload = {
-            targetId: targetIdField.text.trim(),
-            targetType: targetTypeBox.currentValue || "fixed-ground-target",
-            reportText: reportText.text.trim(),
-            damage: Number(damageSpin.value)
+    function taskTarget() { return (demoState.task || ({})).target || ({}) }
+    function pointOf(value) {
+        var position = value && value.position
+        if (position && position.length >= 2)
+            return { x: Number(position[0]), y: Number(position[1]) }
+        if (position && position.x !== undefined)
+            return { x: Number(position.x), y: Number(position.y) }
+        if (value && value.x !== undefined && value.y !== undefined)
+            return { x: Number(value.x), y: Number(value.y) }
+        return null
+    }
+    function demoSeatUnit(seatId) {
+        if (!controller) return ({})
+        var seats = controller.onlineSeats || []
+        for (var i = 0; i < seats.length; ++i) {
+            var seat = seats[i] || ({})
+            if (String(seat.seatId || "") === String(seatId || ""))
+                return controller.unitAt(String(seat.unitId || "")) || ({})
         }
-        var x = Number(routeX.text)
-        var y = Number(routeY.text)
-        if (isFinite(x) && isFinite(y) && routeX.text.length > 0 && routeY.text.length > 0)
-            payload.waypoints = [{ x: x, y: y }]
+        return ({})
+    }
+    function reportList() {
+        var source = demoState.reports || []
+        var result = []
+        for (var i = source.length - 1; i >= 0; --i) result.push(source[i])
+        return result
+    }
+    function selectTarget(target) {
+        if (!target) return
+        root.selectedTarget = target
+        root.selectedPosition = null
+        root.targetPicking = false
+        if (targetIdField) targetIdField.text = String(target.targetId || target.id || "")
+        var targetPoint = root.pointOf(target)
+        if (targetPoint && routeX && routeY) {
+            routeX.text = String(targetPoint.x)
+            routeY.text = String(targetPoint.y)
+        }
+        if (targetTypeBox) {
+            var kind = String(target.targetType || "")
+            var wanted = kind === "groundtarget" ? "fixed-ground-target"
+                : kind === "position" ? "position" : kind === "vehicle" ? "vehicle" : "facility"
+            for (var i = 0; i < targetTypeBox.model.length; ++i) {
+                if (targetTypeBox.model[i].value === wanted) { targetTypeBox.currentIndex = i; break }
+            }
+        }
+        root.notice = "已选择目标 · " + String(target.targetId || target.id || "")
+    }
+    function selectPosition(point) {
+        if (!point) return
+        root.selectedTarget = null
+        root.selectedPosition = { x: Number(point.x), y: Number(point.y) }
+        root.targetPicking = false
+        if (targetTypeBox) targetTypeBox.currentIndex = targetTypeBox.model.length - 1
+        if (routeX && routeY) {
+            routeX.text = String(root.selectedPosition.x)
+            routeY.text = String(root.selectedPosition.y)
+        }
+        root.notice = "已选择位置目标 · " + Math.round(point.x) + ", " + Math.round(point.y)
+    }
+    function beginTargetPick() {
+        root.targetPicking = true
+        root.notice = "请在地图上单击敌方侦察目标，或单击空白处提交位置目标"
+    }
+    function clearTargetSelection() {
+        root.selectedTarget = null
+        root.selectedPosition = null
+        root.targetPicking = false
+        if (targetIdField) targetIdField.clear()
+        if (routeX) routeX.clear()
+        if (routeY) routeY.clear()
+    }
+
+    function fieldPayload() {
+        var action = String(demoState.expectedAction || "")
+        var payload = { reportText: reportText.text.trim(), damage: Number(damageSpin.value) }
+        if (action === "reportTarget") {
+            if (root.selectedPosition) {
+                payload.targetKind = "position"
+                payload.position = root.selectedPosition
+            } else {
+                var selected = root.selectedTarget || ({})
+                payload.targetId = String(selected.targetId || selected.id || targetIdField.text.trim())
+                payload.intelId = String(selected.intelId || "")
+            }
+            payload.targetType = targetTypeBox.currentValue || "fixed-ground-target"
+        } else if (action === "reportBattleDamage") {
+            payload.targetId = String(root.taskTarget().targetId || "")
+        } else {
+            payload.targetId = String(root.taskTarget().targetId || "")
+        }
+        if (action === "reportTarget") {
+            var x = Number(routeX.text)
+            var y = Number(routeY.text)
+            if (isFinite(x) && isFinite(y) && routeX.text.length > 0 && routeY.text.length > 0)
+                payload.waypoints = [{ x: x, y: y }]
+        }
         return payload
     }
 
@@ -85,6 +183,17 @@ Item {
         root.notice = result.accepted
             ? "消息已发送，等待服务器确认"
             : String(result.message || "消息发送失败")
+    }
+
+    function submitRoute(points) {
+        var result = controller.sendDemoAction({
+            action: "planRoute", inputMode: "template",
+            payload: { targetId: String(root.taskTarget().targetId || ""), route: { points: points } }
+        })
+        root.requestPending = Boolean(result.accepted)
+        root.pendingRevision = Number(root.demoState.revision || 0)
+        if (root.requestPending) requestTimeout.restart()
+        root.notice = result.accepted ? "航路已提交，等待服务器确认" : String(result.message || "航路提交失败")
     }
 
     function control(action, payload) {
@@ -110,6 +219,11 @@ Item {
     Connections {
         target: root.controller
         function onDemoStateChanged() {
+            var generation = Number(root.demoState.generation || 0)
+            if (generation !== root.lastGeneration) {
+                root.lastGeneration = generation
+                root.clearTargetSelection()
+            }
             if (!root.requestPending) return
             if (Number(root.demoState.revision || 0) !== root.pendingRevision) {
                 root.requestPending = false
@@ -155,20 +269,59 @@ Item {
                 font.pixelSize: 15
                 font.bold: true
             }
+            Item { Layout.fillWidth: true }
+            Button {
+                id: reportButton
+                visible: (root.demoState.reports || []).length > 0
+                text: "报告"
+                onClicked: reportDrawer.open()
+                contentItem: Text { text: reportButton.text; color: root.ink; font.pixelSize: 9; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
+                Rectangle {
+                    visible: root.controller && root.controller.unreadDemoReports > 0
+                    width: 8; height: 8; radius: 4; color: root.danger
+                    anchors.right: parent.right; anchors.top: parent.top; anchors.rightMargin: -2; anchors.topMargin: -2
+                }
+            }
+            Button {
+                id: commanderCancelButton
+                visible: root.controller && root.controller.currentSeatType === "commander"
+                    && root.demoState.status !== "completed"
+                    && root.demoState.status !== "cancelled"
+                enabled: !root.requestPending
+                text: "终止任务"
+                onClicked: root.control("cancel", ({}))
+                contentItem: Text { text: commanderCancelButton.text; color: root.danger; font.pixelSize: 9; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { color: Qt.alpha(root.danger, 0.12); border.color: root.danger; radius: 4 }
+            }
+            Button {
+                id: commanderStartButton
+                visible: root.controller && root.controller.currentSeatType === "commander"
+                    && root.demoState.status === "completed"
+                enabled: !root.requestPending
+                text: "开始新任务"
+                onClicked: root.control("start", ({}))
+                contentItem: Text { text: commanderStartButton.text; color: root.accent; font.pixelSize: 9; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { color: Qt.alpha(root.accent, 0.12); border.color: root.accent; radius: 4 }
+            }
             Rectangle {
                 Layout.preferredWidth: statusText.implicitWidth + 14
                 Layout.preferredHeight: 24
                 radius: 4
                 color: root.demoState.status === "completed" ? Qt.alpha(root.accent, 0.16)
+                    : root.demoState.status === "cancelled" ? Qt.alpha(root.danger, 0.16)
                     : root.demoState.status === "paused" ? Qt.alpha(root.warning, 0.16)
                     : root.page
-                border.color: root.demoState.status === "paused" ? root.warning : root.line
+                border.color: root.demoState.status === "cancelled" ? root.danger
+                    : root.demoState.status === "paused" ? root.warning : root.line
                 Text {
                     id: statusText
                     anchors.centerIn: parent
                     text: root.demoState.status === "completed" ? "已完成"
+                        : root.demoState.status === "cancelled" ? "任务已取消"
                         : root.demoState.status === "paused" ? "已暂停" : "进行中"
-                    color: root.demoState.status === "paused" ? root.warning : root.accent
+                    color: root.demoState.status === "cancelled" ? root.danger
+                        : root.demoState.status === "paused" ? root.warning : root.accent
                     font.pixelSize: 9
                     font.bold: true
                 }
@@ -262,6 +415,8 @@ Item {
                     }
                 }
                 GridLayout {
+                    visible: root.demoState.expectedAction === "reportTarget"
+                    Layout.preferredHeight: visible ? implicitHeight : 0
                     Layout.fillWidth: true
                     columns: root.compact ? 1 : 2
                     columnSpacing: 6
@@ -269,7 +424,7 @@ Item {
                     TextField {
                         id: targetIdField
                         Layout.fillWidth: true
-                        placeholderText: "固定靶 ID（留空自动选择）"
+                        placeholderText: "地图选择后自动填充目标 ID"
                         color: root.ink
                         selectByMouse: true
                         background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
@@ -282,6 +437,7 @@ Item {
                             { text: "固定地面目标", value: "fixed-ground-target" },
                             { text: "设施目标", value: "facility" },
                             { text: "车辆目标", value: "vehicle" }
+                            ,{ text: "位置目标", value: "position" }
                         ]
                         textRole: "text"
                         valueRole: "value"
@@ -290,6 +446,8 @@ Item {
                     }
                 }
                 GridLayout {
+                    visible: root.demoState.expectedAction === "reportTarget"
+                    Layout.preferredHeight: visible ? implicitHeight : 0
                     Layout.fillWidth: true
                     columns: root.compact ? 2 : 3
                     columnSpacing: 6
@@ -326,6 +484,7 @@ Item {
                 }
                 TextArea {
                     id: reportText
+                    visible: root.demoState.expectedAction === "reportTarget"
                     Layout.fillWidth: true
                     Layout.preferredHeight: 58
                     placeholderText: "报告内容（可选择后补充明文说明）"
@@ -336,6 +495,7 @@ Item {
                 }
                 CheckBox {
                     id: advancedXmlCheck
+                    visible: root.demoState.expectedAction === "reportTarget"
                     text: "高级 XML 输入"
                     checked: root.advancedXml
                     onToggled: root.advancedXml = checked
@@ -343,7 +503,7 @@ Item {
                 }
                 TextArea {
                     id: xmlEditor
-                    visible: root.advancedXml
+                    visible: root.advancedXml && root.demoState.expectedAction === "reportTarget"
                     Layout.fillWidth: true
                     Layout.preferredHeight: visible ? 112 : 0
                     placeholderText: "粘贴与当前消息类型匹配的 VMF XML"
@@ -356,6 +516,7 @@ Item {
                 }
                 Button {
                     id: submitButton
+                    visible: root.demoState.expectedAction !== "planRoute"
                     Layout.fillWidth: true
                     enabled: root.canSubmit
                     text: root.requestPending ? "等待服务器确认"
@@ -367,6 +528,25 @@ Item {
                     background: Rectangle { color: submitButton.enabled ? root.accent : root.line; radius: 4 }
                 }
                 Text { visible: root.notice.length > 0; Layout.fillWidth: true; text: root.notice; color: root.warning; wrapMode: Text.WordWrap; font.pixelSize: 9 }
+                Button {
+                    id: pickTargetButton
+                    visible: root.demoState.expectedAction === "reportTarget"
+                    Layout.fillWidth: true
+                    text: root.targetPicking ? "等待地图选择…" : (root.selectedTarget || root.selectedPosition ? "重新选择目标" : "从地图选择目标")
+                    enabled: !root.requestPending
+                    onClicked: root.beginTargetPick()
+                }
+                Button {
+                    id: routeButton
+                    visible: root.demoState.expectedAction === "planRoute"
+                    Layout.fillWidth: true
+                    enabled: !root.requestPending && root.controller.currentSeatType === "commander"
+                    text: "打开航路编辑器"
+                    onClicked: {
+                        var attack = root.demoSeatUnit("red_attack_1")
+                        routeDialog.begin(attack, root.taskTarget())
+                    }
+                }
             }
         }
 
@@ -397,6 +577,8 @@ Item {
                     Button { enabled: !root.requestPending; text: "跳转"; onClicked: root.control("jump", { phase: jumpPhase.currentValue }) }
                     Button { enabled: !root.requestPending; Layout.fillWidth: root.compact; text: root.demoState.status === "paused" ? "继续" : "暂停"; onClicked: root.control(root.demoState.status === "paused" ? "resume" : "pause", ({})) }
                     Button { enabled: !root.requestPending; Layout.fillWidth: root.compact; text: "重置"; onClicked: root.control("reset", ({})) }
+                    Button { visible: root.demoState.status !== "completed" && root.demoState.status !== "cancelled" && root.controller.currentSeatType !== "commander"; enabled: !root.requestPending; text: "终止任务"; onClicked: root.control("cancel", ({})) }
+                    Button { visible: root.demoState.status === "completed" && root.controller.currentSeatType !== "commander"; enabled: !root.requestPending; text: "开始新任务"; onClicked: root.control("start", ({})) }
                 }
                 RowLayout {
                     Layout.fillWidth: true
@@ -520,5 +702,21 @@ Item {
                 }
             }
         }
+    }
+
+    VmfDemoReportDrawer {
+        id: reportDrawer
+        reports: root.reportList()
+        ink: root.ink; muted: root.dim; panel: root.raised; line: root.line; accent: root.accent
+        onOpened: {
+            root.seenReportCount = (root.demoState.reports || []).length
+            if (root.controller) root.controller.markDemoReportsRead()
+        }
+    }
+    VmfDemoRouteDialog {
+        id: routeDialog
+        controller: root.controller
+        ink: root.ink; muted: root.dim; panel: root.raised; line: root.line; accent: root.accent
+        onRouteAccepted: function(points) { root.submitRoute(points) }
     }
 }

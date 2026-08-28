@@ -889,7 +889,7 @@ TEST(RoomPersistenceTest, DemoProfileUsesV2CodecIdentityAndSingleSideProjection)
               QStringLiteral("vmf-demo-v2"));
 }
 
-TEST(RoomPersistenceTest, DemoProfileEncodesAllTenActionsThroughServer) {
+TEST(RoomPersistenceTest, DemoProfileEncodesAllSeventeenActionsThroughServer) {
     QTemporaryDir temporary;
     ASSERT_TRUE(temporary.isValid());
     qputenv("INTERNAL_API_KEY", QByteArray(32, 'k'));
@@ -916,7 +916,7 @@ TEST(RoomPersistenceTest, DemoProfileEncodesAllTenActionsThroughServer) {
     server.m_engine.setRunning(true);
 
     const QList<VmfDemoWorkflow::ActionSpec> specs = VmfDemoWorkflow::actionSpecs();
-    ASSERT_EQ(specs.size(), 10);
+    ASSERT_EQ(specs.size(), 17);
     const QJsonObject initialState = server.m_demoWorkflow.stateProjection(false);
     const QJsonObject invalidTargetCommand{
         {QStringLiteral("requestId"), QStringLiteral("invalid-target-request")},

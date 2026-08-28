@@ -71,6 +71,23 @@ Item {
     readonly property bool singleSideVmf: root.strictVmf || root.demoVmf
     onDemoVmfChanged: if (demoVmf) tacticalViewIndex = 1
 
+    function demoTarget() {
+        return root.controller && root.controller.demoState
+            ? (root.controller.demoState.task || ({})).target || ({}) : ({})
+    }
+    function demoRoutes() {
+        if (!root.demoVmf || !root.controller) return []
+        var route = (root.controller.demoState.task || ({})).route || ({})
+        var points = route.points || []
+        if (!points || points.length < 2) return []
+        var normalized = []
+        for (var i = 0; i < points.length; ++i) {
+            var point = points[i] || ({})
+            normalized.push({ x: Number(point.x), y: Number(point.y), time: Number(point.time || 0) })
+        }
+        return [{ points: normalized, color: root.cyan, pendingColor: root.orange }]
+    }
+
     onAttackTargetIdChanged: root.syncAttackTargetBox()
     onSelectedUnitIdChanged: root.queueSelectedUnitCenter()
     onDeployUnitIdChanged: root.queueSelectedUnitCenter()
@@ -1368,10 +1385,12 @@ Item {
             Item {
                     GridLayout { id: battleLayout; anchors.fill: parent; columns: root.compactLayout ? 1 : 2; columnSpacing: 12; rowSpacing: 12
                     Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 420; Layout.preferredWidth: root.compactLayout ? -1 : Math.max(420, battleLayout.width - 368); Layout.minimumHeight: root.compactLayout ? 250 : 0; Layout.preferredHeight: root.compactLayout ? battleLayout.height : -1; color: root.panel; border.color: root.line; radius: 6
-                            MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.onlineMapVisibleUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); intelRecords: root.controller.isObserver ? [] : root.controller.onlineIntelRecords; showIntelLive: root.showIntelLive; showIntelStale: root.showIntelStale; showIntelManual: root.showIntelManual; showIntelUncertainty: root.showIntelUncertainty; selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId
+                            MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.onlineMapVisibleUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); intelRecords: root.controller.isObserver ? [] : root.controller.onlineIntelRecords; showIntelLive: root.showIntelLive; showIntelStale: root.showIntelStale; showIntelManual: root.showIntelManual; showIntelUncertainty: root.showIntelUncertainty; selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId; routes: root.demoRoutes()
                             onClickedMap: function(point) {
                                 if (root.controller.isObserver) return
-                                if (root.canDeploy) {
+                                if (root.demoVmf && root.controller.demoState.expectedAction === "reportTarget") {
+                                    demoWorkspace.selectPosition(point)
+                                } else if (root.canDeploy) {
                                     root.controller.deployOnlineUnit(root.deployUnitId, point)
                                     root.deploymentState = "submitting"
                                     root.deploymentNotice = "部署位置已提交，等待服务器确认"
@@ -1409,6 +1428,22 @@ Item {
                             onUnitClicked: function(unitId, button) {
                                 var unit = root.controller.unitAt(unitId)
                                 if (!unit) return
+                                if (root.demoVmf && root.controller.demoState.expectedAction === "reportTarget"
+                                        && unit.side !== root.controller.currentSeatSide) {
+                                    var selected = { targetId: unit.id, id: unit.id, targetKind: "entity",
+                                        position: unit.position, targetType: unit.kind }
+                                    var intel = root.controller.onlineIntelRecords || []
+                                    for (var ii = 0; ii < intel.length; ++ii) {
+                                        if (intel[ii] && intel[ii].targetId === unit.id) {
+                                            selected.intelId = intel[ii].intelId
+                                            selected.position = intel[ii].lastPosition || selected.position
+                                            selected.knownAttributes = intel[ii].knownAttributes
+                                            break
+                                        }
+                                    }
+                                    demoWorkspace.selectTarget(selected)
+                                    return
+                                }
                                 if (root.intelReportPicking && button === "right"
                                         && unit.position && unit.position.length >= 2) {
                                     root.intelReportPosition = {
@@ -1435,6 +1470,12 @@ Item {
                                 if (root.controller.isObserver) return
                                 var unit = root.controller.unitAt(unitId)
                                 if (unit) root.selectUnit(unit)
+                            }
+                            onIntelClicked: function(intel) {
+                                if (!root.demoVmf || root.controller.demoState.expectedAction !== "reportTarget") return
+                                demoWorkspace.selectTarget({ targetId: intel.targetId || "", intelId: intel.intelId || "",
+                                    targetKind: "entity", position: intel.lastPosition || ({}),
+                                    targetType: (intel.knownAttributes || ({})).kind || "unknown" })
                             }
                             onGuidePointPicked: function(point) {
                                 if (root.controller.isObserver) return
@@ -1487,6 +1528,16 @@ Item {
                                         background: Rectangle { color: root.panel; border.color: root.line; radius: 4 }
                                     }
                                 }
+                            }
+                            Rectangle {
+                                visible: root.demoVmf && root.controller.currentSeatType === "attack"
+                                    && (root.controller.demoState.task || ({})).route
+                                    && ((root.controller.demoState.task || ({})).route.points || []).length > 1
+                                anchors.left: parent.left; anchors.top: parent.top
+                                anchors.leftMargin: 12; anchors.topMargin: 12
+                                width: routeReceiptText.implicitWidth + 22; height: 28
+                                color: Qt.alpha(root.cyan, 0.88); radius: 4
+                                Text { id: routeReceiptText; anchors.centerIn: parent; text: "收到航路"; color: root.page; font.pixelSize: 10; font.bold: true }
                             }
                         }
                         Button {
@@ -1852,6 +1903,7 @@ Item {
                                 id: demoWorkspace
                                 visible: root.demoVmf && root.tacticalViewIndex === 1
                                 controller: root.controller
+                                mapCanvas: onlineCanvas
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: visible ? implicitHeight : 0
                             }

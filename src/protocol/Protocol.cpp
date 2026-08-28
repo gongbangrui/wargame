@@ -989,8 +989,9 @@ bool validDemoState(const QJsonValue& value) {
         QStringLiteral("guidance-command"), QStringLiteral("ground-guidance"),
         QStringLiteral("destruction-confirmation"), QStringLiteral("return")};
     static const QSet<QString> statuses{
-        QStringLiteral("active"), QStringLiteral("paused"), QStringLiteral("completed")};
-    if (state.value(QStringLiteral("schemaVersion")).toInt() != 1
+        QStringLiteral("active"), QStringLiteral("paused"), QStringLiteral("completed"),
+        QStringLiteral("cancelled")};
+    if (state.value(QStringLiteral("schemaVersion")).toInt() != 2
         || state.value(QStringLiteral("profile")).toString()
             != QLatin1String("vmf-demo-v2")
         || !validNonNegativeInteger(state.value(QStringLiteral("generation")))
@@ -1004,7 +1005,46 @@ bool validDemoState(const QJsonValue& value) {
         || !validOptionalString(state, QStringLiteral("expectedAction"), MaxActionLength)
         || !state.value(QStringLiteral("phases")).isArray()
         || state.value(QStringLiteral("phases")).toArray().size() != 6
-        || !state.value(QStringLiteral("targetState")).isObject()) {
+        || !state.value(QStringLiteral("targetState")).isObject()
+        || !state.value(QStringLiteral("task")).isObject()
+        || !state.value(QStringLiteral("reports")).isArray()
+        || !state.value(QStringLiteral("archive")).isArray()
+        || state.value(QStringLiteral("reports")).toArray().size() > 128
+        || state.value(QStringLiteral("archive")).toArray().size() > 20
+        || !validNonNegativeInteger(state.value(QStringLiteral("cancelUntilMs")))
+        || !validNonNegativeInteger(state.value(QStringLiteral("cancelledGeneration")))) {
+        return false;
+    }
+    static const QSet<QString> actions{
+        QStringLiteral("reportTarget"), QStringLiteral("planRoute"),
+        QStringLiteral("acceptRoute"), QStringLiteral("issueGuidance"),
+        QStringLiteral("acknowledgeGuidance"), QStringLiteral("identityHello"),
+        QStringLiteral("identityConfirm"), QStringLiteral("sendGuidancePackage"),
+        QStringLiteral("acceptGuidance"), QStringLiteral("reportAttackReady"),
+        QStringLiteral("authorizeAttack"), QStringLiteral("simulateAttack"),
+        QStringLiteral("reportBattleDamage"), QStringLiteral("confirmDamageAssessment"),
+        QStringLiteral("confirmTargetDestroyed"), QStringLiteral("withdraw"),
+        QStringLiteral("confirmReturned")};
+    if (state.value(QStringLiteral("expectedAction")).toString().isEmpty()
+        && state.value(QStringLiteral("status")).toString() == QLatin1String("active")) {
+        return false;
+    }
+    for (const QJsonValue& value : state.value(QStringLiteral("archive")).toArray()) {
+        if (!value.isObject()) return false;
+        const QJsonObject archive = value.toObject();
+        if (archive.contains(QStringLiteral("reportCount"))
+            && (!validNonNegativeInteger(archive.value(QStringLiteral("reportCount")))
+                || archive.value(QStringLiteral("reportCount")).toInteger() > 128)) {
+            return false;
+        }
+        if (archive.contains(QStringLiteral("reports"))
+            && (!archive.value(QStringLiteral("reports")).isArray()
+                || archive.value(QStringLiteral("reports")).toArray().size() > 128)) {
+            return false;
+        }
+    }
+    if (!state.value(QStringLiteral("expectedAction")).toString().isEmpty()
+        && !actions.contains(state.value(QStringLiteral("expectedAction")).toString())) {
         return false;
     }
     return !state.contains(QStringLiteral("traces"))
@@ -1966,23 +2006,31 @@ ValidationResult validateClientPayloadForVersion(const QString& type,
     } else if (type == QLatin1String("demoAction")) {
         static const QSet<QString> fields{
             QStringLiteral("requestId"), QStringLiteral("actionId"),
+            QStringLiteral("workflowSchemaVersion"), QStringLiteral("generation"),
             QStringLiteral("expectedRevision"), QStringLiteral("seat"),
             QStringLiteral("action"), QStringLiteral("phase"),
             QStringLiteral("inputMode"), QStringLiteral("payload")};
         static const QSet<QString> actions{
             QStringLiteral("reportTarget"), QStringLiteral("planRoute"),
             QStringLiteral("acceptRoute"), QStringLiteral("issueGuidance"),
-            QStringLiteral("acknowledgeGuidance"), QStringLiteral("confirmGroundGuidance"),
-            QStringLiteral("reportDamage"), QStringLiteral("confirmDestroyed"),
-            QStringLiteral("orderReturn"), QStringLiteral("confirmReturned")};
+            QStringLiteral("acknowledgeGuidance"), QStringLiteral("identityHello"),
+            QStringLiteral("identityConfirm"), QStringLiteral("sendGuidancePackage"),
+            QStringLiteral("acceptGuidance"), QStringLiteral("reportAttackReady"),
+            QStringLiteral("authorizeAttack"), QStringLiteral("simulateAttack"),
+            QStringLiteral("reportBattleDamage"), QStringLiteral("confirmDamageAssessment"),
+            QStringLiteral("confirmTargetDestroyed"), QStringLiteral("withdraw"),
+            QStringLiteral("confirmReturned")};
         const QString inputMode = payload.value(QStringLiteral("inputMode")).toString();
         const QJsonObject data = payload.value(QStringLiteral("payload")).toObject();
         if (!hasOnlyFields(payload, fields)
             || !validIdentifier(payload.value(QStringLiteral("requestId")))
             || !validIdentifier(payload.value(QStringLiteral("actionId")))
+            || payload.value(QStringLiteral("workflowSchemaVersion")).toInt() != 2
+            || !validNonNegativeInteger(payload.value(QStringLiteral("generation")))
+            || payload.value(QStringLiteral("generation")).toInteger() <= 0
             || !validNonNegativeInteger(payload.value(QStringLiteral("expectedRevision")))
             || payload.value(QStringLiteral("expectedRevision")).toInteger() <= 0
-            || !validOptionalString(payload, QStringLiteral("seat"), MaxSeatIdLength)
+            || !validIdentifier(payload.value(QStringLiteral("seat")))
             || !actions.contains(payload.value(QStringLiteral("action")).toString())
             || !validString(payload.value(QStringLiteral("phase")), MaxIdentifierLength)
             || (inputMode != QLatin1String("template") && inputMode != QLatin1String("xml"))
@@ -1993,14 +2041,20 @@ ValidationResult validateClientPayloadForVersion(const QString& type,
         }
     } else if (type == QLatin1String("demoControl")) {
         static const QSet<QString> fields{QStringLiteral("requestId"),
+                                          QStringLiteral("workflowSchemaVersion"),
+                                          QStringLiteral("generation"),
                                           QStringLiteral("expectedRevision"),
                                           QStringLiteral("action"),
                                           QStringLiteral("payload")};
         static const QSet<QString> actions{QStringLiteral("reset"), QStringLiteral("jump"),
                                            QStringLiteral("pause"), QStringLiteral("resume"),
-                                           QStringLiteral("setTargetScript")};
+                                           QStringLiteral("setTargetScript"),
+                                           QStringLiteral("cancel"), QStringLiteral("start")};
         if (!hasOnlyFields(payload, fields)
             || !validIdentifier(payload.value(QStringLiteral("requestId")))
+            || payload.value(QStringLiteral("workflowSchemaVersion")).toInt() != 2
+            || !validNonNegativeInteger(payload.value(QStringLiteral("generation")))
+            || payload.value(QStringLiteral("generation")).toInteger() <= 0
             || !validNonNegativeInteger(payload.value(QStringLiteral("expectedRevision")))
             || payload.value(QStringLiteral("expectedRevision")).toInteger() <= 0
             || !actions.contains(payload.value(QStringLiteral("action")).toString())
@@ -2183,7 +2237,8 @@ ValidationResult validateServerPayloadForVersion(const QString& type,
         const QString status = payload.value(QStringLiteral("status")).toString();
         if (!validIdentifier(payload.value(QStringLiteral("requestId")))
             || (status != QLatin1String("accepted") && status != QLatin1String("duplicate")
-                && status != QLatin1String("paused"))
+                && status != QLatin1String("paused") && status != QLatin1String("cancelled")
+                && status != QLatin1String("started"))
             || !validString(payload.value(QStringLiteral("code")), MaxIdentifierLength)
             || !validNonNegativeInteger(payload.value(QStringLiteral("revision")))
             || !validDemoState(payload.value(QStringLiteral("state")))) {

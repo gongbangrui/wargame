@@ -100,6 +100,8 @@ class SimulationController : public QObject {
     Q_PROPERTY(QJsonObject vmfTasks READ vmfTasks NOTIFY vmfTasksChanged)
     Q_PROPERTY(QJsonObject vmfTrace READ vmfTrace NOTIFY vmfTraceChanged)
     Q_PROPERTY(QJsonObject demoState READ demoState NOTIFY demoStateChanged)
+    Q_PROPERTY(QJsonArray demoReports READ demoReports NOTIFY demoStateChanged)
+    Q_PROPERTY(int unreadDemoReports READ unreadDemoReports NOTIFY demoStateChanged)
 public:
     explicit SimulationController(QObject* parent = nullptr);
 
@@ -239,6 +241,15 @@ public:
     Q_INVOKABLE QVariantMap sendDemoAction(const QVariantMap& command);
     Q_INVOKABLE QVariantMap sendDemoControl(const QString& action,
                                             const QVariantMap& payload = {});
+    Q_INVOKABLE QJsonArray demoReports() const;
+    Q_INVOKABLE int unreadDemoReports() const;
+    Q_INVOKABLE void markDemoReportsRead();
+    Q_INVOKABLE QVariantMap reportDemoEntity(const QString& targetId,
+                                             const QString& intelId = QString());
+    Q_INVOKABLE QVariantMap reportDemoPosition(const QVariantMap& position);
+    Q_INVOKABLE QVariantMap submitDemoRoute(const QVariantList& points);
+    Q_INVOKABLE QVariantMap cancelDemoTask();
+    Q_INVOKABLE QVariantMap startDemoTask();
 
     Q_INVOKABLE void saveSetting(const QString& key, const QVariant& value);
     Q_INVOKABLE QVariant loadSetting(const QString& key, const QVariant& defaultValue = QVariant()) const;
@@ -459,6 +470,7 @@ private:
     QJsonObject m_remoteVmfTasks;
     QJsonObject m_remoteVmfTrace;
     QJsonObject m_remoteDemoState;
+    int m_demoReadReports = 0;
     QString m_protocolProfile = QStringLiteral("native");
     QString m_operationMode = QStringLiteral("standard");
     QString m_participantSide;

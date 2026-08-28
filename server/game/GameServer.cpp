@@ -1022,6 +1022,13 @@ GameServer::GameServer(QObject* parent)
                                     ? snapshotIntervalMs : 200);
     connect(&m_snapshotTimer, &QTimer::timeout, this,
             [this]() {
+                if (m_demoWorkflow.advanceCancellation(QDateTime::currentMSecsSinceEpoch())) {
+                    ++m_stateRevision;
+                    m_demoNextAutomaticAt = m_engine.simTime() + 1.0;
+                    broadcastDemoState();
+                    broadcastSnapshots(true);
+                    persistRoomState();
+                }
                 if (m_phase != QLatin1String("running") || !m_engine.running()) return;
                 runStrictVmfAutomation();
                 completeStrictReturns();
@@ -4831,18 +4838,39 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
         type = Message::Type::GroundGuideOrder;
         receiverSeatId = QStringLiteral("red_ground_1");
     } else if (action == QLatin1String("acknowledgeGuidance")) {
+        type = Message::Type::Ack;
+        receiverSeatId = QStringLiteral("red_commander");
+    } else if (action == QLatin1String("identityHello")) {
+        type = Message::Type::IdentityReport;
+        receiverSeatId = QStringLiteral("red_ground_1");
+    } else if (action == QLatin1String("identityConfirm")) {
+        type = Message::Type::Ack;
+        receiverSeatId = QStringLiteral("red_attack_1");
+    } else if (action == QLatin1String("sendGuidancePackage")) {
+        type = Message::Type::GroundTargetReport;
+        receiverSeatId = QStringLiteral("red_attack_1");
+    } else if (action == QLatin1String("acceptGuidance")) {
         type = Message::Type::RouteAcceptance;
         receiverSeatId = QStringLiteral("red_ground_1");
-    } else if (action == QLatin1String("confirmGroundGuidance")) {
-        type = Message::Type::GroundAttackConfirm;
+    } else if (action == QLatin1String("reportAttackReady")) {
+        type = Message::Type::AttackReadyReport;
+        receiverSeatId = QStringLiteral("red_ground_1");
+    } else if (action == QLatin1String("authorizeAttack")) {
+        type = Message::Type::AttackAuthorization;
         receiverSeatId = QStringLiteral("red_attack_1");
-    } else if (action == QLatin1String("reportDamage")) {
+    } else if (action == QLatin1String("simulateAttack")) {
+        type = Message::Type::EngagementReport;
+        receiverSeatId = QStringLiteral("red_ground_1");
+    } else if (action == QLatin1String("reportBattleDamage")) {
         type = Message::Type::BattleDamageReport;
         receiverSeatId = QStringLiteral("red_ground_1");
-    } else if (action == QLatin1String("confirmDestroyed")) {
+    } else if (action == QLatin1String("confirmDamageAssessment")) {
+        type = Message::Type::DamageAssessmentConfirm;
+        receiverSeatId = QStringLiteral("red_attack_1");
+    } else if (action == QLatin1String("confirmTargetDestroyed")) {
         type = Message::Type::TargetDestroyed;
         receiverSeatId = QStringLiteral("red_commander");
-    } else if (action == QLatin1String("orderReturn")) {
+    } else if (action == QLatin1String("withdraw")) {
         type = Message::Type::WithdrawOrder;
         receiverSeatId = QStringLiteral("red_attack_1");
     } else if (action == QLatin1String("confirmReturned")) {
@@ -4868,13 +4896,59 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
 
     QJsonObject data = payload.value(QStringLiteral("payload")).toObject();
     data.remove(QStringLiteral("xml"));
+    const QJsonObject task = m_demoWorkflow.stateProjection(false)
+                                 .value(QStringLiteral("task")).toObject();
+    const QJsonObject taskTarget = task.value(QStringLiteral("target")).toObject();
     QString targetId = data.value(QStringLiteral("targetId")).toString();
-    const UnitBase* target = targetId.isEmpty() ? nullptr : m_engine.unit(targetId);
-    if (!targetId.isEmpty() && (!target || target->sideStr() != QLatin1String("blue"))) {
-        if (error) *error = QStringLiteral("指定的演示目标不是有效的蓝方固定靶");
-        return false;
+    const QString requestedIntelId = data.value(QStringLiteral("intelId")).toString();
+    const bool positionTarget = action == QLatin1String("reportTarget")
+        && data.value(QStringLiteral("targetKind")).toString() == QLatin1String("position");
+    const UnitBase* target = nullptr;
+    const Protocol::IntelContact* contact = nullptr;
+    if (action == QLatin1String("reportTarget") && !positionTarget) {
+        const Protocol::IntelState intel = m_intelLedger.state(actorSeatId);
+        for (const Protocol::IntelContact& candidate : intel.records) {
+            if ((candidate.intelId == requestedIntelId || candidate.intelId == targetId
+                 || candidate.targetId == targetId)
+                && candidate.type == QLatin1String("sensorContact")
+                && candidate.freshness == QLatin1String("live")
+                && candidate.actionable) {
+                const UnitBase* resolved = m_engine.unit(candidate.targetId);
+                if (resolved && resolved->alive() && resolved->sideStr() == QLatin1String("blue")) {
+                    contact = &candidate;
+                    target = resolved;
+                    targetId = candidate.targetId;
+                    break;
+                }
+            }
+        }
+        if (!target && !targetId.isEmpty()) {
+            if (error) *error = QStringLiteral(
+                "指定目标不是当前侦察席可用的实时敌方情报或有效的蓝方固定靶");
+            return false;
+        }
+    } else if (!positionTarget && !targetId.isEmpty()) {
+        target = m_engine.unit(targetId);
+        if (!target || target->sideStr() != QLatin1String("blue") || !target->alive()) {
+            if (error) *error = QStringLiteral("指定的演示目标不是有效的蓝方固定靶");
+            return false;
+        }
     }
-    if (!target) {
+    if (action != QLatin1String("reportTarget")) {
+        const QJsonObject authoritativeTarget = m_demoWorkflow.stateProjection(false)
+                                                    .value(QStringLiteral("task")).toObject()
+                                                    .value(QStringLiteral("target")).toObject();
+        if (!authoritativeTarget.isEmpty()) {
+            targetId = authoritativeTarget.value(QStringLiteral("targetId")).toString();
+            if (authoritativeTarget.value(QStringLiteral("targetKind")).toString()
+                    != QLatin1String("position")) {
+                target = m_engine.unit(targetId);
+            } else {
+                target = nullptr;
+            }
+        }
+    }
+    if (action == QLatin1String("reportTarget") && !target && !positionTarget) {
         QStringList ids = m_engine.unitIds();
         ids.sort();
         target = nullptr;
@@ -4895,49 +4969,187 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
         if (!target) target = groundFallback ? groundFallback : sideFallback;
         if (target) targetId = target->id();
     }
-    if (!target) {
+    const bool hasAuthoritativeTarget = !taskTarget.isEmpty();
+    if (!target && !positionTarget && !hasAuthoritativeTarget) {
         if (error) *error = QStringLiteral("演示场景缺少蓝方固定靶");
         return false;
     }
 
     const double now = m_engine.simTime();
-    data.insert(QStringLiteral("taskId"), QStringLiteral("demo-%1")
-        .arg(m_demoWorkflow.stateProjection(false)
-                 .value(QStringLiteral("generation")).toInteger()));
+    const quint64 generation = static_cast<quint64>(m_demoWorkflow.stateProjection(false)
+                                                         .value(QStringLiteral("generation"))
+                                                         .toInteger());
+    data.insert(QStringLiteral("taskId"), QStringLiteral("demo-%1").arg(generation));
+    if (action == QLatin1String("reportTarget")) {
+        QJsonObject canonicalTarget;
+        if (positionTarget) {
+            const QJsonObject position = data.value(QStringLiteral("position")).toObject();
+            const double x = position.value(QStringLiteral("x")).toDouble(qQNaN());
+            const double y = position.value(QStringLiteral("y")).toDouble(qQNaN());
+            const ScenarioMap& map = m_engine.scenario().map;
+            if (!std::isfinite(x) || !std::isfinite(y) || x < 0.0 || y < 0.0
+                || x > map.widthMeters || y > map.heightMeters) {
+                if (error) *error = QStringLiteral("位置目标超出地图边界");
+                return false;
+            }
+            QString stableId = QStringLiteral("demo-position-%1-%2")
+                                   .arg(generation)
+                                   .arg(payload.value(QStringLiteral("actionId")).toString());
+            if (stableId.size() > 64) stableId = stableId.left(64);
+            targetId = stableId;
+            canonicalTarget = QJsonObject{
+                {QStringLiteral("targetId"), targetId},
+                {QStringLiteral("targetKind"), QStringLiteral("position")},
+                {QStringLiteral("targetType"), QStringLiteral("position")},
+                {QStringLiteral("targetTypeCode"), 6},
+                {QStringLiteral("targetCount"), 1},
+                {QStringLiteral("friendFoe"), QStringLiteral("enemy")},
+                {QStringLiteral("status"), QStringLiteral("tracked")},
+                {QStringLiteral("position"), position}};
+        } else {
+            if (!target) {
+                if (error) *error = QStringLiteral("目标报告缺少可验证的侦察目标");
+                return false;
+            }
+            QJsonObject position = contact ? contact->lastPosition : QJsonObject{};
+            if (position.isEmpty()) {
+                position = QJsonObject{{QStringLiteral("x"), target->pos().x},
+                                       {QStringLiteral("y"), target->pos().y},
+                                       {QStringLiteral("alt"), target->pos().alt}};
+            }
+            canonicalTarget = QJsonObject{
+                {QStringLiteral("targetId"), targetId},
+                {QStringLiteral("targetKind"), QStringLiteral("entity")},
+                {QStringLiteral("targetType"), target->kindStr()},
+                {QStringLiteral("targetTypeCode"), target->kind() == UnitKind::GroundTarget ? 1 : 7},
+                {QStringLiteral("targetCount"), 1},
+                {QStringLiteral("friendFoe"), QStringLiteral("enemy")},
+                {QStringLiteral("status"), QStringLiteral("tracked")},
+                {QStringLiteral("position"), position}};
+            if (contact) {
+                canonicalTarget.insert(QStringLiteral("intelId"), contact->intelId);
+                canonicalTarget.insert(QStringLiteral("confidence"), contact->confidence);
+                canonicalTarget.insert(QStringLiteral("observedAt"), contact->lastObservedAt);
+                canonicalTarget.insert(QStringLiteral("knownAttributes"), contact->knownAttributes);
+            }
+        }
+        data.insert(QStringLiteral("target"), canonicalTarget);
+        data.insert(QStringLiteral("targetId"), targetId);
+        data.insert(QStringLiteral("targetKind"), canonicalTarget.value(QStringLiteral("targetKind")));
+        data.insert(QStringLiteral("position"), canonicalTarget.value(QStringLiteral("position")));
+        trace->insert(QStringLiteral("canonicalTarget"), canonicalTarget);
+    }
+    if (action != QLatin1String("reportTarget") && !taskTarget.isEmpty()) {
+        // Every follow-up message uses the target selected in the authoritative
+        // report.  This preserves position targets and the observed snapshot
+        // even if a live unit moves after the report was accepted.
+        data.insert(QStringLiteral("target"), taskTarget);
+        data.insert(QStringLiteral("targetKind"), taskTarget.value(QStringLiteral("targetKind")));
+        data.insert(QStringLiteral("targetType"), taskTarget.value(QStringLiteral("targetType")));
+        data.insert(QStringLiteral("targetTypeCode"), taskTarget.value(QStringLiteral("targetTypeCode")));
+        data.insert(QStringLiteral("position"), taskTarget.value(QStringLiteral("position")));
+    }
+    const QJsonObject routeInput = data.value(QStringLiteral("route")).toObject();
+    if (action == QLatin1String("planRoute")) {
+        QJsonArray points = routeInput.value(QStringLiteral("points")).toArray();
+        if (points.isEmpty()) points = data.value(QStringLiteral("waypoints")).toArray();
+        const AuthoritativeRoom::Seat attackSeat = m_authoritativeRoom.seat(
+            QStringLiteral("red_attack_1"));
+        const UnitBase* attack = m_engine.unit(attackSeat.unitId);
+        const QJsonObject endPosition = taskTarget.value(QStringLiteral("position")).toObject();
+        const double startX = attack ? attack->pos().x : 0.0;
+        const double startY = attack ? attack->pos().y : 0.0;
+        const double endX = endPosition.value(QStringLiteral("x")).toDouble(qQNaN());
+        const double endY = endPosition.value(QStringLiteral("y")).toDouble(qQNaN());
+        const ScenarioMap& map = m_engine.scenario().map;
+        if (points.isEmpty() && payload.value(QStringLiteral("_automatic")).toBool()
+            && attack && std::isfinite(endX) && std::isfinite(endY)) {
+            points = QJsonArray{
+                QJsonObject{{QStringLiteral("x"), startX}, {QStringLiteral("y"), startY},
+                            {QStringLiteral("time"), 0.0}},
+                QJsonObject{{QStringLiteral("x"), endX}, {QStringLiteral("y"), endY},
+                            {QStringLiteral("time"), 60.0}}};
+        }
+        if (!attack || !std::isfinite(endX) || !std::isfinite(endY)
+            || points.size() < 2 || points.size() > 32) {
+            if (error) *error = QStringLiteral("航路必须包含攻击机起点和目标终点");
+            return false;
+        }
+        const auto pointValid = [&map](const QJsonValue& value) {
+            if (!value.isObject()) return false;
+            const QJsonObject point = value.toObject();
+            const double x = point.value(QStringLiteral("x")).toDouble(qQNaN());
+            const double y = point.value(QStringLiteral("y")).toDouble(qQNaN());
+            return std::isfinite(x) && std::isfinite(y) && x >= 0.0 && y >= 0.0
+                && x <= map.widthMeters && y <= map.heightMeters;
+        };
+        if (!std::all_of(points.cbegin(), points.cend(), pointValid)) {
+            if (error) *error = QStringLiteral("航路点超出地图边界");
+            return false;
+        }
+        const QJsonObject first = points.first().toObject();
+        const QJsonObject last = points.last().toObject();
+        if (std::hypot(first.value(QStringLiteral("x")).toDouble() - startX,
+                       first.value(QStringLiteral("y")).toDouble() - startY) > 1e-3
+            || std::hypot(last.value(QStringLiteral("x")).toDouble() - endX,
+                          last.value(QStringLiteral("y")).toDouble() - endY) > 1e-3) {
+            if (error) *error = QStringLiteral("航路起点和终点由服务器锁定，不能修改");
+            return false;
+        }
+        QJsonObject route{{QStringLiteral("start"), first},
+                          {QStringLiteral("end"), last},
+                          {QStringLiteral("points"), points},
+                          {QStringLiteral("lockedEndpoints"), true}};
+        data.insert(QStringLiteral("route"), route);
+        data.insert(QStringLiteral("waypoints"), points);
+        trace->insert(QStringLiteral("canonicalRoute"), route);
+    }
     data.insert(QStringLiteral("targetId"), targetId);
-    data.insert(QStringLiteral("x"), target->pos().x);
-    data.insert(QStringLiteral("y"), target->pos().y);
-    data.insert(QStringLiteral("position"), QJsonObject{
-        {QStringLiteral("x"), target->pos().x}, {QStringLiteral("y"), target->pos().y}});
+    data.insert(QStringLiteral("x"), target ? target->pos().x : data.value(QStringLiteral("position")).toObject().value(QStringLiteral("x")));
+    data.insert(QStringLiteral("y"), target ? target->pos().y : data.value(QStringLiteral("position")).toObject().value(QStringLiteral("y")));
     data.insert(QStringLiteral("status"),
-                action == QLatin1String("confirmDestroyed")
+                action == QLatin1String("confirmTargetDestroyed")
                     ? QStringLiteral("destroyed") : QStringLiteral("tracked"));
     data.insert(QStringLiteral("destroyed"),
-                action == QLatin1String("confirmDestroyed"));
+                action == QLatin1String("confirmTargetDestroyed"));
     data.insert(QStringLiteral("damage"),
                 data.value(QStringLiteral("damage")).toDouble(
-                    action == QLatin1String("reportDamage") ? 100.0 : 0.0));
+                    action == QLatin1String("reportBattleDamage") ? 100.0 : 0.0));
+    QJsonObject reportPosition = data.value(QStringLiteral("position")).toObject();
+    if (reportPosition.isEmpty() && target) {
+        reportPosition = QJsonObject{{QStringLiteral("x"), target->pos().x},
+                                     {QStringLiteral("y"), target->pos().y}};
+    }
     data.insert(QStringLiteral("time"), now);
     data.insert(QStringLiteral("targets"), QJsonArray{QJsonObject{
         {QStringLiteral("targetId"), targetId},
-        {QStringLiteral("targetType"), data.value(QStringLiteral("targetType")).toString(
-             QStringLiteral("fixed-ground-target"))},
+        {QStringLiteral("targetType"), data.value(QStringLiteral("targetKind")).toString()
+             == QLatin1String("position")
+                 ? QStringLiteral("position")
+                 : data.value(QStringLiteral("targetType")).toString(
+                       QStringLiteral("fixed-ground-target"))},
         {QStringLiteral("targetCount"), data.value(QStringLiteral("targetCount")).toInt(1)},
         {QStringLiteral("friendFoe"), QStringLiteral("hostile")},
-        {QStringLiteral("x"), target->pos().x}, {QStringLiteral("y"), target->pos().y},
+        {QStringLiteral("x"), reportPosition.value(QStringLiteral("x"))},
+        {QStringLiteral("y"), reportPosition.value(QStringLiteral("y"))},
         {QStringLiteral("status"), data.value(QStringLiteral("status"))},
         {QStringLiteral("time"), now}}});
+    const QJsonArray taskRoutePoints = task.value(QStringLiteral("route"))
+                                           .toObject()
+                                           .value(QStringLiteral("points")).toArray();
+    if (!taskRoutePoints.isEmpty() && action != QLatin1String("withdraw")) {
+        data.insert(QStringLiteral("waypoints"), taskRoutePoints);
+    }
     if (!data.value(QStringLiteral("waypoints")).isArray()
         || data.value(QStringLiteral("waypoints")).toArray().isEmpty()) {
         QJsonArray route;
-        if (action == QLatin1String("orderReturn")) {
+        if (action == QLatin1String("withdraw")) {
             route.append(QJsonObject{{QStringLiteral("x"), receiver->pos().x},
                                      {QStringLiteral("y"), receiver->pos().y}});
         } else {
             route.append(QJsonObject{{QStringLiteral("x"), sender->pos().x},
                                      {QStringLiteral("y"), sender->pos().y}});
-            route.append(QJsonObject{{QStringLiteral("x"), target->pos().x},
-                                     {QStringLiteral("y"), target->pos().y}});
+            route.append(reportPosition);
         }
         data.insert(QStringLiteral("waypoints"), route);
     }
@@ -4970,6 +5182,17 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
         if (error) *error = encodeError.isEmpty()
             ? QStringLiteral("演示 VMF 编解码失败") : encodeError;
         return false;
+    }
+    // The gateway replaces the trace with its codec summary.  Re-attach the
+    // server-authoritative semantic objects after encoding so the workflow
+    // stores the canonical target and route, not a placeholder.
+    if (action == QLatin1String("reportTarget")
+        && data.value(QStringLiteral("target")).isObject()) {
+        trace->insert(QStringLiteral("canonicalTarget"), data.value(QStringLiteral("target")));
+    }
+    if (action == QLatin1String("planRoute")
+        && data.value(QStringLiteral("route")).isObject()) {
+        trace->insert(QStringLiteral("canonicalRoute"), data.value(QStringLiteral("route")));
     }
     trace->insert(QStringLiteral("plainText"), QJsonObject{
         {QStringLiteral("action"), action},
@@ -5030,14 +5253,31 @@ bool GameServer::executeDemoAction(const QJsonObject& payload,
         if (resultObject) *resultObject = response;
         return true;
     }
+    QJsonObject messagePayload = payload;
+    messagePayload.insert(QStringLiteral("_automatic"), automatic);
     Message message;
     QJsonObject validatedTrace;
-    if (!prepareDemoMessage(payload, actorSeatId, &message, &validatedTrace, error)) {
+    if (!prepareDemoMessage(messagePayload, actorSeatId, &message, &validatedTrace, error)) {
         return false;
     }
+    QJsonObject workflowCommand = payload;
+    QJsonObject workflowPayload = payload.value(QStringLiteral("payload")).toObject();
+    if (validatedTrace.contains(QStringLiteral("canonicalTarget"))) {
+        workflowPayload.insert(QStringLiteral("target"),
+                               validatedTrace.value(QStringLiteral("canonicalTarget")));
+    }
+    if (validatedTrace.contains(QStringLiteral("canonicalRoute"))) {
+        workflowPayload.insert(QStringLiteral("route"),
+                               validatedTrace.value(QStringLiteral("canonicalRoute")));
+    }
+    workflowCommand.insert(QStringLiteral("payload"), workflowPayload);
+    workflowCommand.insert(QStringLiteral("workflowSchemaVersion"),
+                           VmfDemoWorkflow::SchemaVersion);
+    workflowCommand.insert(QStringLiteral("generation"),
+                           m_demoWorkflow.stateProjection(false).value(QStringLiteral("generation")));
     VmfDemoWorkflow candidate = m_demoWorkflow;
     const VmfDemoWorkflow::Result result = candidate.applyAction(
-        payload, actionActor, validatedTrace, m_engine.simTime());
+        workflowCommand, actionActor, validatedTrace, m_engine.simTime());
     if (!result.ok) {
         if (error) *error = result.message;
         if (resultObject) {
@@ -5066,13 +5306,9 @@ bool GameServer::executeDemoAction(const QJsonObject& payload,
     m_demoWorkflow = candidate;
     m_demoNextAutomaticAt = m_engine.simTime() + 1.0;
     cacheResult(response);
-    QString postError;
-    if (!m_engine.postVmfMessage(message, &postError)) {
-        audit(QStringLiteral("demo"), QJsonObject{
-            {QStringLiteral("event"), QStringLiteral("messageDeliveryFailed")},
-            {QStringLiteral("actionId"), payload.value(QStringLiteral("actionId"))},
-            {QStringLiteral("message"), postError}});
-    }
+    // Demo actions are intentionally side-effect free. Encoding and decoding
+    // prove the VMF contract; posting to MessageBus would mutate the real
+    // simulation (movement, projectiles, fuel or combat state).
     ++m_stateRevision;
     validatedTrace.insert(QStringLiteral("actionId"),
                           payload.value(QStringLiteral("actionId")));
@@ -5110,10 +5346,33 @@ void GameServer::handleDemoAction(QWebSocket* socket, const QJsonObject& payload
         return;
     }
     const QJsonObject state = m_demoWorkflow.stateProjection(false);
+    if (payload.value(QStringLiteral("workflowSchemaVersion")).toInt()
+            != VmfDemoWorkflow::SchemaVersion
+        || payload.value(QStringLiteral("generation")).toInteger()
+            != state.value(QStringLiteral("generation")).toInteger()) {
+        reject(QStringLiteral("DEMO_GENERATION_MISMATCH"),
+               QStringLiteral("演示任务代次已变化，请刷新后重试"));
+        return;
+    }
     if (payload.value(QStringLiteral("phase")) != state.value(QStringLiteral("phase"))) {
         reject(QStringLiteral("DEMO_PHASE_MISMATCH"),
                QStringLiteral("演示步骤已变化，请刷新后重试"));
         return;
+    }
+    if (payload.value(QStringLiteral("action")).toString() == QLatin1String("reportTarget")) {
+        const QJsonObject reportPayload = payload.value(QStringLiteral("payload")).toObject();
+        const bool position = reportPayload.value(QStringLiteral("targetKind")).toString()
+            == QLatin1String("position");
+        if (!position && reportPayload.value(QStringLiteral("targetId")).toString().isEmpty()
+            && reportPayload.value(QStringLiteral("intelId")).toString().isEmpty()) {
+            reject(QStringLiteral("TARGET_SELECTION_REQUIRED"),
+                   QStringLiteral("目标报告必须选择侦察目标或地图位置"));
+            return;
+        }
+        if (position && !reportPayload.value(QStringLiteral("position")).isObject()) {
+            reject(QStringLiteral("POSITION_REQUIRED"), QStringLiteral("位置目标缺少地图坐标"));
+            return;
+        }
     }
     QJsonObject result;
     QJsonObject trace;
@@ -5145,12 +5404,17 @@ void GameServer::handleDemoControl(QWebSocket* socket, const QJsonObject& payloa
                                  {QStringLiteral("code"), code},
                                  {QStringLiteral("message"), message}});
     };
+    const QString action = payload.value(QStringLiteral("action")).toString();
     const bool director = session.authenticated && session.roomId == m_roomId
         && (session.accountRole == QLatin1String("room_admin")
             || session.role == QLatin1String("director"));
-    if (!isDemoProfile(m_protocolProfile) || !director) {
+    const bool commanderControl = session.authenticated && session.roomId == m_roomId
+        && !session.observer && session.side == QLatin1String("red")
+        && session.seatType == QLatin1String("commander")
+        && (action == QLatin1String("cancel") || action == QLatin1String("start"));
+    if (!isDemoProfile(m_protocolProfile) || (!director && !commanderControl)) {
         reject(QStringLiteral("DIRECTOR_REQUIRED"),
-               QStringLiteral("演示控制需要本房间管理员或导演权限"));
+               QStringLiteral("演示控制需要管理员、导演或红方指挥席权限"));
         return;
     }
     if (payload.value(QStringLiteral("expectedRevision")).toInteger()
@@ -5158,6 +5422,15 @@ void GameServer::handleDemoControl(QWebSocket* socket, const QJsonObject& payloa
                .value(QStringLiteral("revision")).toInteger()) {
         reject(QStringLiteral("DEMO_REVISION_MISMATCH"),
                QStringLiteral("演示流程版本已变化，请刷新后重试"));
+        return;
+    }
+    if (payload.value(QStringLiteral("workflowSchemaVersion")).toInt()
+            != VmfDemoWorkflow::SchemaVersion
+        || payload.value(QStringLiteral("generation")).toInteger()
+            != m_demoWorkflow.stateProjection(false)
+                   .value(QStringLiteral("generation")).toInteger()) {
+        reject(QStringLiteral("DEMO_GENERATION_MISMATCH"),
+               QStringLiteral("演示任务代次已变化，请刷新后重试"));
         return;
     }
     VmfDemoWorkflow candidate = m_demoWorkflow;
@@ -5214,8 +5487,8 @@ void GameServer::runDemoAutomation() {
         ? QStringLiteral("red_commander")
         : QStringLiteral("red_%1_1").arg(spec->seatType);
     const AuthoritativeRoom::Seat seat = m_authoritativeRoom.seat(seatId);
-    if (seat.seatId.isEmpty() || (seat.controllerType == QLatin1String("human")
-                                  && seat.userId > 0 && seat.connected)) return;
+    if (seat.seatId.isEmpty()
+        || (seat.controlMode != QLatin1String("vmf-auto") && seat.userId > 0)) return;
     const QJsonObject state = m_demoWorkflow.stateProjection(false);
     const QString actionId = QStringLiteral("auto-%1-%2")
         .arg(state.value(QStringLiteral("generation")).toInteger())

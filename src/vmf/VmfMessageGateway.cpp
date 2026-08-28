@@ -102,6 +102,7 @@ quint64 enumValue(const QJsonObject& object, std::initializer_list<const char*> 
 
 quint64 targetTypeCode(const QJsonObject& target) {
     static const QHash<QString, quint64> values{
+        {QStringLiteral("position"), 6}, {QStringLiteral("location"), 6},
         {QStringLiteral("aircraft"), 0}, {QStringLiteral("plane"), 0},
         {QStringLiteral("uav"), 0}, {QStringLiteral("reconuav"), 0},
         {QStringLiteral("attackuav"), 0}, {QStringLiteral("armored"), 1},

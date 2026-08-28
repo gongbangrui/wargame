@@ -1,6 +1,7 @@
 #include "VmfDemoWorkflow.h"
 
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QJsonDocument>
 
 #include <algorithm>
@@ -81,16 +82,30 @@ QList<VmfDemoWorkflow::ActionSpec> VmfDemoWorkflow::actionSpecs() {
          QStringLiteral("acceptRoute"), QStringLiteral("攻击席位确认航路")},
         {QStringLiteral("issueGuidance"), QStringLiteral("commander"), 2,
          QStringLiteral("issueGuidance"), QStringLiteral("下达引导命令")},
-        {QStringLiteral("acknowledgeGuidance"), QStringLiteral("attack"), 2,
-         QStringLiteral("acknowledgeGuidance"), QStringLiteral("攻击席位确认引导")},
-        {QStringLiteral("confirmGroundGuidance"), QStringLiteral("ground"), 3,
-         QStringLiteral("confirmGroundGuidance"), QStringLiteral("地面席位完成引导")},
-        {QStringLiteral("reportDamage"), QStringLiteral("attack"), 4,
-         QStringLiteral("reportDamage"), QStringLiteral("上报战果")},
-        {QStringLiteral("confirmDestroyed"), QStringLiteral("recon"), 4,
-         QStringLiteral("confirmDestroyed"), QStringLiteral("确认目标摧毁")},
-        {QStringLiteral("orderReturn"), QStringLiteral("commander"), 5,
-         QStringLiteral("orderReturn"), QStringLiteral("下达返航命令")},
+        {QStringLiteral("acknowledgeGuidance"), QStringLiteral("ground"), 2,
+         QStringLiteral("acknowledgeGuidance"), QStringLiteral("地面席位确认引导命令")},
+        {QStringLiteral("identityHello"), QStringLiteral("attack"), 3,
+         QStringLiteral("identityHello"), QStringLiteral("攻击席位发送身份报告")},
+        {QStringLiteral("identityConfirm"), QStringLiteral("ground"), 3,
+         QStringLiteral("identityConfirm"), QStringLiteral("地面席位确认身份")},
+        {QStringLiteral("sendGuidancePackage"), QStringLiteral("ground"), 3,
+         QStringLiteral("sendGuidancePackage"), QStringLiteral("发送目标和引导航路")},
+        {QStringLiteral("acceptGuidance"), QStringLiteral("attack"), 3,
+         QStringLiteral("acceptGuidance"), QStringLiteral("攻击席位确认引导包")},
+        {QStringLiteral("reportAttackReady"), QStringLiteral("attack"), 3,
+         QStringLiteral("reportAttackReady"), QStringLiteral("报告进入攻击航线")},
+        {QStringLiteral("authorizeAttack"), QStringLiteral("ground"), 3,
+         QStringLiteral("authorizeAttack"), QStringLiteral("地面席位授权攻击")},
+        {QStringLiteral("simulateAttack"), QStringLiteral("attack"), 3,
+         QStringLiteral("simulateAttack"), QStringLiteral("执行模拟攻击")},
+        {QStringLiteral("reportBattleDamage"), QStringLiteral("attack"), 3,
+         QStringLiteral("reportBattleDamage"), QStringLiteral("报告模拟战果")},
+        {QStringLiteral("confirmDamageAssessment"), QStringLiteral("ground"), 3,
+         QStringLiteral("confirmDamageAssessment"), QStringLiteral("确认毁伤评估")},
+        {QStringLiteral("confirmTargetDestroyed"), QStringLiteral("recon"), 4,
+         QStringLiteral("confirmTargetDestroyed"), QStringLiteral("确认目标效果")},
+        {QStringLiteral("withdraw"), QStringLiteral("commander"), 5,
+         QStringLiteral("withdraw"), QStringLiteral("下达返航命令")},
         {QStringLiteral("confirmReturned"), QStringLiteral("attack"), 5,
          QStringLiteral("confirmReturned"), QStringLiteral("确认返航完成")},
     };
@@ -171,11 +186,41 @@ void VmfDemoWorkflow::reset(double now) {
     Q_UNUSED(now);
     m_actionIndex = 0;
     m_status = QStringLiteral("active");
+    m_cancelUntilMs = 0;
+    m_cancelledGeneration = 0;
     m_traces = {};
     m_actionHistory = {};
     m_seenActionIds.clear();
+    clearTaskState();
     if (m_targetScript.isEmpty()) m_targetScript = normalizedScript({});
     rebuildTargetStateForCurrentPhase();
+}
+
+void VmfDemoWorkflow::clearTaskState() {
+    m_task = QJsonObject{
+        {QStringLiteral("taskId"), QStringLiteral("demo-%1").arg(m_generation)},
+        {QStringLiteral("generation"), static_cast<qint64>(m_generation)},
+        {QStringLiteral("target"), QJsonObject{}},
+        {QStringLiteral("route"), QJsonObject{}},
+        {QStringLiteral("guidance"), QJsonObject{}},
+        {QStringLiteral("effect"), QJsonObject{}}};
+    m_reports = {};
+}
+
+void VmfDemoWorkflow::appendReport(const QJsonObject& report) {
+    if (report.isEmpty()) return;
+    m_reports.append(report);
+    while (m_reports.size() > 128) m_reports.removeFirst();
+}
+
+void VmfDemoWorkflow::archiveGeneration(const QString& status) {
+    m_archivedGenerations.append(QJsonObject{
+        {QStringLiteral("generation"), static_cast<qint64>(m_generation)},
+        {QStringLiteral("taskId"), m_task.value(QStringLiteral("taskId"))},
+        {QStringLiteral("reportCount"), m_reports.size()},
+        {QStringLiteral("reports"), m_reports},
+        {QStringLiteral("status"), status}});
+    while (m_archivedGenerations.size() > 20) m_archivedGenerations.removeFirst();
 }
 
 void VmfDemoWorkflow::rebuildTargetStateForCurrentPhase() {
@@ -266,6 +311,9 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyAction(
     if (m_status == QLatin1String("paused")) {
         return failure(QStringLiteral("DEMO_PAUSED"), QStringLiteral("演示流程已暂停"));
     }
+    if (m_status == QLatin1String("cancelled")) {
+        return failure(QStringLiteral("DEMO_CANCELLED"), QStringLiteral("当前演示任务已取消"));
+    }
     if (m_status == QLatin1String("completed") || !currentAction()) {
         return failure(QStringLiteral("DEMO_COMPLETED"), QStringLiteral("演示流程已经完成"));
     }
@@ -282,6 +330,89 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyAction(
         return failure(QStringLiteral("DEMO_TRACE_REQUIRED"),
                        QStringLiteral("演示动作缺少经过校验的 VMF trace"));
     }
+
+    const QJsonObject payload = command.value(QStringLiteral("payload")).toObject();
+    const QString taskId = m_task.value(QStringLiteral("taskId")).toString(
+        QStringLiteral("demo-%1").arg(m_generation));
+    if (spec.action == QLatin1String("reportTarget")) {
+        QJsonObject target = payload.value(QStringLiteral("target")).toObject();
+        // The server always supplies a canonical target.  Keep a harmless
+        // placeholder for direct workflow users and legacy tests; it is
+        // never accepted as a network command without server validation.
+        if (target.isEmpty()) {
+            target = QJsonObject{{QStringLiteral("targetId"), QStringLiteral("demo-target")},
+                                 {QStringLiteral("targetKind"), QStringLiteral("entity")},
+                                 {QStringLiteral("targetType"), QStringLiteral("unknown")},
+                                 {QStringLiteral("targetTypeCode"), 7},
+                                 {QStringLiteral("targetCount"), 1},
+                                 {QStringLiteral("friendFoe"), QStringLiteral("enemy")},
+                                 {QStringLiteral("status"), QStringLiteral("tracked")}};
+        }
+        m_task.insert(QStringLiteral("target"), target);
+        m_task.insert(QStringLiteral("taskId"), taskId);
+        m_task.insert(QStringLiteral("generation"), static_cast<qint64>(m_generation));
+    } else if (spec.action == QLatin1String("planRoute")) {
+        const QJsonObject route = payload.value(QStringLiteral("route")).toObject();
+        QJsonObject normalizedRoute = route;
+        if (!normalizedRoute.value(QStringLiteral("points")).isArray()
+            || normalizedRoute.value(QStringLiteral("points")).toArray().size() < 2) {
+            normalizedRoute = QJsonObject{{QStringLiteral("points"), QJsonArray{
+                QJsonObject{{QStringLiteral("x"), 0.0}, {QStringLiteral("y"), 0.0}},
+                QJsonObject{{QStringLiteral("x"), 1.0}, {QStringLiteral("y"), 1.0}}}}};
+        }
+        m_task.insert(QStringLiteral("route"), normalizedRoute);
+    } else if (spec.action == QLatin1String("sendGuidancePackage")) {
+        QJsonObject guidance = m_task.value(QStringLiteral("guidance")).toObject();
+        guidance.insert(QStringLiteral("packageId"),
+                        payload.value(QStringLiteral("packageId")).toString(
+                            QStringLiteral("package-%1").arg(m_generation)));
+        guidance.insert(QStringLiteral("sent"), true);
+        m_task.insert(QStringLiteral("guidance"), guidance);
+    } else if (spec.action == QLatin1String("simulateAttack")) {
+        const QJsonObject target = m_task.value(QStringLiteral("target")).toObject();
+        const bool positionTarget = target.value(QStringLiteral("targetKind")).toString()
+            == QLatin1String("position");
+        m_task.insert(QStringLiteral("effect"), QJsonObject{
+            {QStringLiteral("mode"), QStringLiteral("simulation")},
+            {QStringLiteral("outcome"), positionTarget ? QStringLiteral("effect-applied")
+                                                          : QStringLiteral("destroyed")},
+            {QStringLiteral("damagePercent"), 100.0},
+            {QStringLiteral("destroyed"), !positionTarget},
+            {QStringLiteral("engineStateUntouched"), true},
+            {QStringLiteral("createdAt"), now}});
+    } else if (spec.action == QLatin1String("reportBattleDamage")) {
+        QJsonObject effect = m_task.value(QStringLiteral("effect")).toObject();
+        effect.insert(QStringLiteral("reported"), true);
+        m_task.insert(QStringLiteral("effect"), effect);
+    } else if (spec.action == QLatin1String("confirmDamageAssessment")) {
+        QJsonObject effect = m_task.value(QStringLiteral("effect")).toObject();
+        effect.insert(QStringLiteral("assessed"), true);
+        m_task.insert(QStringLiteral("effect"), effect);
+    } else if (spec.action == QLatin1String("confirmTargetDestroyed")) {
+        QJsonObject effect = m_task.value(QStringLiteral("effect")).toObject();
+        effect.insert(QStringLiteral("confirmed"), true);
+        m_task.insert(QStringLiteral("effect"), effect);
+    } else if (spec.action == QLatin1String("withdraw")) {
+        QJsonObject route = m_task.value(QStringLiteral("route")).toObject();
+        route.insert(QStringLiteral("return"), true);
+        m_task.insert(QStringLiteral("route"), route);
+    }
+
+    QJsonObject report{{QStringLiteral("reportId"),
+                        QStringLiteral("report-%1-%2").arg(m_generation).arg(m_revision)},
+                       {QStringLiteral("generation"), static_cast<qint64>(m_generation)},
+                       {QStringLiteral("taskId"), taskId},
+                       {QStringLiteral("action"), spec.action},
+                       {QStringLiteral("seatType"), actorSeatType},
+                       {QStringLiteral("createdAt"), now},
+                       {QStringLiteral("details"), payload}};
+    if (trace.contains(QStringLiteral("messageId"))) {
+        report.insert(QStringLiteral("messageId"), trace.value(QStringLiteral("messageId")));
+    }
+    if (trace.contains(QStringLiteral("traceId"))) {
+        report.insert(QStringLiteral("traceId"), trace.value(QStringLiteral("traceId")));
+    }
+    appendReport(report);
 
     QJsonObject storedTrace = trace;
     storedTrace.insert(QStringLiteral("actionId"), actionId);
@@ -302,6 +433,8 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyAction(
     m_actionHistory.append(QJsonObject{{QStringLiteral("actionId"), actionId},
                                        {QStringLiteral("action"), spec.action},
                                        {QStringLiteral("actorSeatType"), actorSeatType},
+                                       {QStringLiteral("generation"),
+                                        static_cast<qint64>(m_generation)},
                                        {QStringLiteral("time"), now}});
     while (m_actionHistory.size() > ActionHistoryLimit) {
         const QString expiredId = m_actionHistory.first().toObject()
@@ -318,6 +451,28 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyAction(
 
 VmfDemoWorkflow::Result VmfDemoWorkflow::applyControl(
     const QString& action, const QJsonObject& payload, double now) {
+    if (action == QLatin1String("cancel")) {
+        if (m_status == QLatin1String("completed")) {
+            return failure(QStringLiteral("DEMO_COMPLETED"), QStringLiteral("已完成任务请开始新任务"));
+        }
+        m_status = QStringLiteral("cancelled");
+        m_cancelledGeneration = m_generation;
+        m_cancelUntilMs = payload.value(QStringLiteral("cancelUntilMs")).toInteger();
+        if (m_cancelUntilMs <= 0) m_cancelUntilMs = QDateTime::currentMSecsSinceEpoch() + 3000;
+        ++m_revision;
+        return success(QStringLiteral("cancelled"));
+    }
+    if (action == QLatin1String("start")) {
+        if (m_status != QLatin1String("completed")) {
+            return failure(QStringLiteral("DEMO_NOT_COMPLETED"),
+                           QStringLiteral("当前任务尚未完成，不能开始新任务"));
+        }
+        archiveGeneration(QStringLiteral("completed"));
+        ++m_generation;
+        ++m_revision;
+        reset(now);
+        return success(QStringLiteral("started"));
+    }
     if (action == QLatin1String("reset")) {
         ++m_generation;
         ++m_revision;
@@ -367,15 +522,29 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyControl(
                    QStringLiteral("未知演示控制操作"));
 }
 
+bool VmfDemoWorkflow::advanceCancellation(qint64 nowEpochMs) {
+    if (m_status != QLatin1String("cancelled") || m_cancelUntilMs <= 0) return false;
+    if (nowEpochMs < m_cancelUntilMs) return false;
+    archiveGeneration(QStringLiteral("cancelled"));
+    ++m_generation;
+    ++m_revision;
+    reset();
+    return true;
+}
+
 QJsonObject VmfDemoWorkflow::stateProjection(bool includeTechnicalTrace) const {
-    const ActionSpec* action = currentAction();
-    const int phase = action ? action->phase : phaseIds().size() - 1;
+    const ActionSpec* current = currentAction();
+    const ActionSpec* action = m_status == QLatin1String("cancelled") ? nullptr : current;
+    const int phase = current ? current->phase : phaseIds().size() - 1;
     QJsonArray phases;
     for (int index = 0; index < phaseIds().size(); ++index) {
         QString status = index < phase ? QStringLiteral("completed")
             : index == phase && m_status != QLatin1String("completed") ? m_status
                                                                        : QStringLiteral("pending");
         if (m_status == QLatin1String("completed")) status = QStringLiteral("completed");
+        if (m_status == QLatin1String("cancelled") && index == phase) {
+            status = QStringLiteral("cancelled");
+        }
         phases.append(QJsonObject{{QStringLiteral("id"), phaseIds().at(index)},
                                   {QStringLiteral("title"), phaseTitles().at(index)},
                                   {QStringLiteral("status"), status}});
@@ -386,14 +555,24 @@ QJsonObject VmfDemoWorkflow::stateProjection(bool includeTechnicalTrace) const {
                        {QStringLiteral("revision"), static_cast<qint64>(m_revision)},
                        {QStringLiteral("phase"), phaseIds().value(phase)},
                        {QStringLiteral("phaseTitle"), phaseTitles().value(phase)},
-                       {QStringLiteral("substep"), action ? action->substep : QStringLiteral("completed")},
+                       {QStringLiteral("substep"), action ? action->substep
+                           : m_status == QLatin1String("cancelled")
+                               ? QStringLiteral("cancelled") : QStringLiteral("completed")},
                        {QStringLiteral("status"), m_status},
                        {QStringLiteral("activeSeat"), action ? action->seatType : QString{}},
                        {QStringLiteral("expectedAction"), action ? action->action : QString{}},
-                       {QStringLiteral("actionTitle"), action ? action->title : QStringLiteral("演示完成")},
+                       {QStringLiteral("actionTitle"), action ? action->title
+                           : m_status == QLatin1String("cancelled")
+                               ? QStringLiteral("任务已取消") : QStringLiteral("演示完成")},
                        {QStringLiteral("phases"), phases},
                        {QStringLiteral("scriptCursor"), m_scriptCursor},
                        {QStringLiteral("targetState"), m_targetState},
+                       {QStringLiteral("task"), m_task},
+                       {QStringLiteral("reports"), m_reports},
+                       {QStringLiteral("archive"), m_archivedGenerations},
+                       {QStringLiteral("cancelUntilMs"), m_cancelUntilMs},
+                       {QStringLiteral("cancelledGeneration"),
+                        static_cast<qint64>(m_cancelledGeneration)},
                        {QStringLiteral("traceCount"), m_traces.size()}};
     const QByteArray scriptJson = QJsonDocument(m_targetScript).toJson(QJsonDocument::Compact);
     result.insert(QStringLiteral("targetScriptHash"), QString::fromLatin1(
@@ -426,6 +605,12 @@ QJsonObject VmfDemoWorkflow::toJson() const {
                        {QStringLiteral("targetScript"), m_targetScript},
                        {QStringLiteral("scriptCursor"), m_scriptCursor},
                        {QStringLiteral("targetState"), m_targetState},
+                       {QStringLiteral("task"), m_task},
+                       {QStringLiteral("reports"), m_reports},
+                       {QStringLiteral("archive"), m_archivedGenerations},
+                       {QStringLiteral("cancelUntilMs"), m_cancelUntilMs},
+                       {QStringLiteral("cancelledGeneration"),
+                        static_cast<qint64>(m_cancelledGeneration)},
                        {QStringLiteral("traces"), m_traces},
                        {QStringLiteral("actionHistory"), m_actionHistory},
                        {QStringLiteral("seenActionIds"), seen}};
@@ -437,18 +622,38 @@ bool VmfDemoWorkflow::restore(const QJsonObject& object, QString* error) {
         if (error) *error = message;
         return false;
     };
+    const int storedSchema = object.value(QStringLiteral("schemaVersion")).toInt();
+    if (storedSchema == 1) {
+        const QJsonObject legacyScript = object.value(QStringLiteral("targetScript")).toObject();
+        QString scriptError;
+        if (!validateTargetScript(legacyScript, &scriptError)) return fail(scriptError);
+        m_targetScript = normalizedScript(legacyScript);
+        const qint64 legacyGeneration = object.value(QStringLiteral("generation")).toInteger();
+        const qint64 legacyRevision = object.value(QStringLiteral("revision")).toInteger();
+        if (legacyGeneration <= 0 || legacyRevision <= 0) {
+            return fail(QStringLiteral("旧演示流程代次或版本无效"));
+        }
+        m_archivedGenerations = QJsonArray{QJsonObject{
+            {QStringLiteral("generation"), legacyGeneration},
+            {QStringLiteral("status"), QStringLiteral("migrated")},
+            {QStringLiteral("migration"), QStringLiteral("schema1-to-schema2")}}};
+        m_generation = static_cast<quint64>(legacyGeneration + 1);
+        m_revision = static_cast<quint64>(legacyRevision + 1);
+        reset();
+        return true;
+    }
     const qint64 generation = object.value(QStringLiteral("generation")).toInteger();
     const qint64 revision = object.value(QStringLiteral("revision")).toInteger();
     const int actionIndex = object.value(QStringLiteral("actionIndex")).toInt(-1);
     const QString status = object.value(QStringLiteral("status")).toString();
     const int actionCount = actionSpecs().size();
-    if (object.value(QStringLiteral("schemaVersion")).toInt() != SchemaVersion
+    if (storedSchema != SchemaVersion
         || object.value(QStringLiteral("profile")).toString() != QLatin1String(ProfileId)
         || generation <= 0 || revision <= 0 || actionIndex < 0
         || actionIndex > actionCount
         || (status != QLatin1String("active") && status != QLatin1String("paused")
-            && status != QLatin1String("completed"))
-        || (status == QLatin1String("completed")) != (actionIndex == actionCount)) {
+            && status != QLatin1String("completed") && status != QLatin1String("cancelled"))
+        || (status == QLatin1String("completed") && actionIndex != actionCount)) {
         return fail(QStringLiteral("演示流程检查点头部无效"));
     }
     const QJsonObject script = object.value(QStringLiteral("targetScript")).toObject();
@@ -463,6 +668,24 @@ bool VmfDemoWorkflow::restore(const QJsonObject& object, QString* error) {
         || scriptCursor > script.value(QStringLiteral("timeline")).toArray().size()
         || !object.value(QStringLiteral("targetState")).isObject()) {
         return fail(QStringLiteral("演示流程检查点内容无效"));
+    }
+    if (object.contains(QStringLiteral("task")) && !object.value(QStringLiteral("task")).isObject()) {
+        return fail(QStringLiteral("演示任务状态结构无效"));
+    }
+    if (object.contains(QStringLiteral("reports")) && !object.value(QStringLiteral("reports")).isArray()) {
+        return fail(QStringLiteral("演示报告历史结构无效"));
+    }
+    if (object.contains(QStringLiteral("archive")) && !object.value(QStringLiteral("archive")).isArray()) {
+        return fail(QStringLiteral("演示报告归档结构无效"));
+    }
+    for (const QJsonValue& value : object.value(QStringLiteral("archive")).toArray()) {
+        if (!value.isObject()) return fail(QStringLiteral("演示报告归档项无效"));
+        const QJsonObject archive = value.toObject();
+        if (archive.contains(QStringLiteral("reports"))
+            && (!archive.value(QStringLiteral("reports")).isArray()
+                || archive.value(QStringLiteral("reports")).toArray().size() > 128)) {
+            return fail(QStringLiteral("演示报告归档明细无效"));
+        }
     }
     QSet<QString> ids;
     for (const QJsonValue& value : seen) {
@@ -516,6 +739,13 @@ bool VmfDemoWorkflow::restore(const QJsonObject& object, QString* error) {
     m_targetScript = script;
     m_scriptCursor = scriptCursor;
     m_targetState = targetState;
+    m_task = object.value(QStringLiteral("task")).toObject();
+    if (m_task.isEmpty()) clearTaskState();
+    m_reports = object.value(QStringLiteral("reports")).toArray();
+    m_archivedGenerations = object.value(QStringLiteral("archive")).toArray();
+    m_cancelUntilMs = object.value(QStringLiteral("cancelUntilMs")).toInteger();
+    m_cancelledGeneration = static_cast<quint64>(
+        object.value(QStringLiteral("cancelledGeneration")).toInteger());
     m_traces = traces;
     m_actionHistory = history;
     m_seenActionIds = ids;
