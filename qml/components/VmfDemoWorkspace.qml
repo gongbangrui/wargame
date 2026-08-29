@@ -20,6 +20,7 @@ Item {
     property var selectedTarget: null
     property var selectedPosition: null
     property bool targetPicking: false
+    property var highlightedUnitIds: []
     property int seenReportCount: 0
     property real lastGeneration: 0
     readonly property bool compact: width < 420
@@ -45,6 +46,7 @@ Item {
         && String(demoState.expectedAction || "").length > 0
         && String(demoState.expectedAction || "") !== "planRoute"
         && !requestPending
+        && root.actionFormValid()
         && (!advancedXml || xmlEditor.text.trim().length > 0)
 
     visible: demoProfile
@@ -69,6 +71,7 @@ Item {
     }
 
     function taskTarget() { return (demoState.task || ({})).target || ({}) }
+    function targetEffect() { return (demoState.task || ({})).effect || ({}) }
     function pointOf(value) {
         var position = value && value.position
         if (position && position.length >= 2)
@@ -78,6 +81,53 @@ Item {
         if (value && value.x !== undefined && value.y !== undefined)
             return { x: Number(value.x), y: Number(value.y) }
         return null
+    }
+    function targetOverlayUnit() {
+        var target = root.taskTarget()
+        var taskTargetId = String(target.targetId || target.id || "")
+        if (!taskTargetId && root.selectedTarget) target = root.selectedTarget
+        var point = root.pointOf(target)
+        var targetId = String(target.targetId || target.id || "")
+        if (!targetId || !point || !isFinite(point.x) || !isFinite(point.y)) return null
+        var effect = targetId === taskTargetId ? root.targetEffect() : ({})
+        var destroyed = effect.destroyed === true || effect.outcome === "destroyed"
+        var damageState = String(effect.damageState || "")
+        return {
+            id: targetId,
+            targetId: targetId,
+            callsign: String(target.callsign || target.label || targetId),
+            kind: "groundtarget",
+            targetType: String(target.targetType || "fixed-ground-target"),
+            side: "blue",
+            position: [point.x, point.y, Number((target.position || {}).alt || 0)],
+            alive: !destroyed,
+            hp: destroyed ? 0 : damageState === "damaged" ? 50 : 100,
+            maxHp: 100,
+            movable: false,
+            collisionRadius: Number(target.collisionRadius || 50),
+            demoTarget: true,
+            targetSnapshot: true
+        }
+    }
+    function targetOverlayUnits() {
+        var proxy = root.targetOverlayUnit()
+        return proxy ? [proxy] : []
+    }
+    function targetSelectionForId(unitId) {
+        var target = root.taskTarget()
+        var targetId = String(target.targetId || target.id || "")
+        if (!targetId && root.selectedTarget) {
+            target = root.selectedTarget
+            targetId = String(target.targetId || target.id || "")
+        }
+        if (!targetId || String(unitId || "") !== targetId) return null
+        var selected = ({})
+        for (var key in target) selected[key] = target[key]
+        selected.id = targetId
+        selected.targetId = targetId
+        selected.targetKind = target.targetKind || "entity"
+        selected.targetType = target.targetType || "fixed-ground-target"
+        return selected
     }
     function demoSeatUnit(seatId) {
         if (!controller) return ({})
@@ -98,9 +148,11 @@ Item {
     function selectTarget(target) {
         if (!target) return
         root.selectedTarget = target
+        var selectedId = String(target.targetId || target.id || "")
+        root.highlightedUnitIds = selectedId.length > 0 ? [selectedId] : []
         root.selectedPosition = null
         root.targetPicking = false
-        if (targetIdField) targetIdField.text = String(target.targetId || target.id || "")
+        if (targetIdField) targetIdField.text = selectedId
         var targetPoint = root.pointOf(target)
         if (targetPoint && routeX && routeY) {
             routeX.text = String(targetPoint.x)
@@ -119,6 +171,7 @@ Item {
     function selectPosition(point) {
         if (!point) return
         root.selectedTarget = null
+        root.highlightedUnitIds = []
         root.selectedPosition = { x: Number(point.x), y: Number(point.y) }
         root.targetPicking = false
         if (targetTypeBox) targetTypeBox.currentIndex = targetTypeBox.model.length - 1
@@ -135,15 +188,29 @@ Item {
     function clearTargetSelection() {
         root.selectedTarget = null
         root.selectedPosition = null
+        root.highlightedUnitIds = []
         root.targetPicking = false
         if (targetIdField) targetIdField.clear()
         if (routeX) routeX.clear()
         if (routeY) routeY.clear()
     }
 
+    function actionFormValid() {
+        var action = String(demoState.expectedAction || "")
+        if (action === "reportTarget") {
+            return Boolean(root.selectedTarget || root.selectedPosition
+                           || (targetIdField && targetIdField.text.trim().length > 0))
+        }
+        if (action === "confirmTargetDestroyed")
+            return Boolean(reportForm && reportForm.valid())
+        return true
+    }
+
     function fieldPayload() {
         var action = String(demoState.expectedAction || "")
-        var payload = { reportText: reportText.text.trim(), damage: Number(damageSpin.value) }
+        var report = reportForm ? reportForm.details() : ({})
+        var payload = { reportDetails: report }
+        if (report.reportText !== undefined) payload.reportText = report.reportText
         if (action === "reportTarget") {
             if (root.selectedPosition) {
                 payload.targetKind = "position"
@@ -156,6 +223,13 @@ Item {
             payload.targetType = targetTypeBox.currentValue || "fixed-ground-target"
         } else if (action === "reportBattleDamage") {
             payload.targetId = String(root.taskTarget().targetId || "")
+        } else if (action === "confirmTargetDestroyed") {
+            payload.targetId = String(root.taskTarget().targetId || "")
+            payload.outcome = report.outcome || "destroyed"
+            payload.damageState = report.damageState || "unknown"
+            if (report.confidence !== undefined) payload.confidence = report.confidence
+            if (report.evidence !== undefined) payload.evidence = report.evidence
+            if (report.notes !== undefined) payload.notes = report.notes
         } else {
             payload.targetId = String(root.taskTarget().targetId || "")
         }
@@ -405,7 +479,16 @@ Item {
                         Layout.fillWidth: true
                         spacing: 2
                         Text { Layout.fillWidth: true; text: root.actionLabel(root.demoState.expectedAction); color: root.ink; font.pixelSize: 12; font.bold: true; elide: Text.ElideRight }
-                        Text { Layout.fillWidth: true; text: root.seatLabel(root.demoState.activeSeat) + " · 版本 " + Number(root.demoState.revision || 0); color: root.dim; font.pixelSize: 9; elide: Text.ElideRight }
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.seatLabel(root.demoState.activeSeat)
+                                + (root.demoState.task && root.demoState.task.strikeAttempt > 0
+                                   ? " · 第 " + Number(root.demoState.task.strikeAttempt) + " 次攻击"
+                                   : "")
+                            color: root.dim
+                            font.pixelSize: 9
+                            elide: Text.ElideRight
+                        }
                     }
                     Text {
                         text: root.canSubmit ? "由我执行" : root.demoState.activeSeat === root.controller.currentSeatType ? "等待开始" : "自动/他席"
@@ -431,31 +514,30 @@ Item {
                     }
                     ComboBox {
                         id: targetTypeBox
-                        Layout.fillWidth: root.compact
-                        Layout.preferredWidth: root.compact ? -1 : 126
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: root.compact ? -1 : 150
                         model: [
                             { text: "固定地面目标", value: "fixed-ground-target" },
                             { text: "设施目标", value: "facility" },
-                            { text: "车辆目标", value: "vehicle" }
-                            ,{ text: "位置目标", value: "position" }
+                            { text: "车辆目标", value: "vehicle" },
+                            { text: "位置目标", value: "position" }
                         ]
                         textRole: "text"
                         valueRole: "value"
                         background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
-                        contentItem: Text { text: targetTypeBox.currentText; color: root.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 6; elide: Text.ElideRight; font.pixelSize: 9 }
+                        contentItem: Text {
+                            text: targetTypeBox.currentText
+                            color: root.ink
+                            verticalAlignment: Text.AlignVCenter
+                            leftPadding: 7
+                            elide: Text.ElideRight
+                            font.pixelSize: 9
+                        }
                     }
-                }
-                GridLayout {
-                    visible: root.demoState.expectedAction === "reportTarget"
-                    Layout.preferredHeight: visible ? implicitHeight : 0
-                    Layout.fillWidth: true
-                    columns: root.compact ? 2 : 3
-                    columnSpacing: 6
-                    rowSpacing: 6
                     TextField {
                         id: routeX
                         Layout.fillWidth: true
-                        placeholderText: "航点 X"
+                        placeholderText: "位置 X"
                         validator: DoubleValidator {}
                         color: root.ink
                         background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
@@ -463,36 +545,23 @@ Item {
                     TextField {
                         id: routeY
                         Layout.fillWidth: true
-                        placeholderText: "航点 Y"
+                        placeholderText: "位置 Y"
                         validator: DoubleValidator {}
                         color: root.ink
                         background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
                     }
-                    SpinBox {
-                        id: damageSpin
-                        from: 0
-                        to: 100
-                        value: 100
-                        editable: true
-                        Layout.columnSpan: root.compact ? 2 : 1
-                        Layout.fillWidth: root.compact
-                        Layout.preferredWidth: root.compact ? -1 : 86
-                        Accessible.name: "毁伤百分比"
-                        textFromValue: function(value, locale) { return Number(value).toLocaleString(locale, 'f', 0) + "%" }
-                        valueFromText: function(text, locale) { return Number.fromLocaleString(locale, text.replace("%", "")) }
-                    }
                 }
-                TextArea {
-                    id: reportText
-                    visible: root.demoState.expectedAction === "reportTarget"
+
+                VmfDemoReportForm {
+                    id: reportForm
+                    visible: root.demoState.expectedAction !== "planRoute"
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 58
-                    placeholderText: "报告内容（可选择后补充明文说明）"
-                    wrapMode: TextEdit.Wrap
-                    color: root.ink
-                    selectByMouse: true
-                    background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
+                    action: String(root.demoState.expectedAction || "")
+                    compact: root.compact
+                    ink: root.ink; muted: root.dim; panel: root.raised; page: root.page
+                    line: root.line; accent: root.accent; warning: root.warning; danger: root.danger
                 }
+
                 CheckBox {
                     id: advancedXmlCheck
                     visible: root.demoState.expectedAction === "reportTarget"
@@ -636,19 +705,30 @@ Item {
             }
         }
 
-        TextArea {
+        ScrollView {
+            id: plainTextScroll
             visible: root.inspectorTab === 0
             Layout.fillWidth: true
-            Layout.preferredHeight: visible ? 150 : 0
-            readOnly: true
-            text: root.trace && root.trace.plainText
-                ? JSON.stringify(root.trace.plainText, null, 2) : "尚无已确认消息"
-            color: root.ink
-            wrapMode: TextEdit.WrapAnywhere
-            font.family: "monospace"
-            font.pixelSize: 9
-            selectByMouse: true
-            background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
+            Layout.preferredHeight: visible ? 170 : 0
+            clip: true
+            contentWidth: availableWidth
+            contentHeight: plainTextArea.contentHeight + 16
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AsNeeded }
+            TextArea {
+                id: plainTextArea
+                width: plainTextScroll.availableWidth
+                height: Math.max(plainTextScroll.height, plainTextArea.contentHeight + 16)
+                readOnly: true
+                text: root.trace && root.trace.plainText
+                    ? JSON.stringify(root.trace.plainText, null, 2) : "尚无已确认消息"
+                color: root.ink
+                wrapMode: TextEdit.WrapAnywhere
+                font.family: "monospace"
+                font.pixelSize: 9
+                selectByMouse: true
+                background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
+            }
         }
         ColumnLayout {
             visible: root.inspectorTab === 1
@@ -660,17 +740,24 @@ Item {
                 Text { text: Number(root.trace.wireBitLength || 0) + " bit"; color: root.dim; font.pixelSize: 9 }
                 Text { text: root.trace.roundTripEqual === true ? "往返一致" : "未校验"; color: root.trace.roundTripEqual === true ? root.accent : root.warning; font.pixelSize: 9; font.bold: true }
             }
-            TextArea {
+            ScrollView {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 90
-                readOnly: true
-                text: String(root.trace.hexPreview || "")
-                color: root.ink
-                wrapMode: TextEdit.WrapAnywhere
-                font.family: "monospace"
-                font.pixelSize: 9
-                selectByMouse: true
-                background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
+                Layout.preferredHeight: 110
+                clip: true
+                contentWidth: availableWidth
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                TextArea {
+                    width: parent.availableWidth
+                    height: Math.max(parent.height, contentHeight + 16)
+                    readOnly: true
+                    text: String(root.trace.hexPreview || "")
+                    color: root.ink
+                    wrapMode: TextEdit.WrapAnywhere
+                    font.family: "monospace"
+                    font.pixelSize: 9
+                    selectByMouse: true
+                    background: Rectangle { color: root.page; border.color: root.line; radius: 4 }
+                }
             }
             RowLayout {
                 Layout.fillWidth: true

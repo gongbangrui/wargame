@@ -208,6 +208,7 @@ qt_add_qml_module(appindex
         qml/components/CommandPanel.qml
         qml/components/GuidedStrikeWorkflowPanel.qml
         qml/components/VmfDemoWorkspace.qml
+        qml/components/VmfDemoReportForm.qml
         qml/components/VmfDemoRouteDialog.qml
         qml/components/VmfDemoReportDrawer.qml
     RESOURCES

@@ -4825,6 +4825,15 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
     const QString action = payload.value(QStringLiteral("action")).toString();
     Message::Type type = Message::Type::Ack;
     QString receiverSeatId;
+    const QJsonObject requestedPayload = payload.value(QStringLiteral("payload")).toObject();
+    const QString destructionOutcome = requestedPayload.value(QStringLiteral("outcome")).toString(
+        QStringLiteral("destroyed"));
+    if (action == QLatin1String("confirmTargetDestroyed")
+        && destructionOutcome != QLatin1String("destroyed")
+        && destructionOutcome != QLatin1String("notDestroyed")) {
+        if (error) *error = QStringLiteral("目标效果必须选择已摧毁或未摧毁");
+        return false;
+    }
     if (action == QLatin1String("reportTarget")) {
         type = Message::Type::TargetReport;
         receiverSeatId = QStringLiteral("red_commander");
@@ -4868,7 +4877,8 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
         type = Message::Type::DamageAssessmentConfirm;
         receiverSeatId = QStringLiteral("red_attack_1");
     } else if (action == QLatin1String("confirmTargetDestroyed")) {
-        type = Message::Type::TargetDestroyed;
+        type = destructionOutcome == QLatin1String("notDestroyed")
+            ? Message::Type::TargetReport : Message::Type::TargetDestroyed;
         receiverSeatId = QStringLiteral("red_commander");
     } else if (action == QLatin1String("withdraw")) {
         type = Message::Type::WithdrawOrder;
@@ -4894,8 +4904,9 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
         return false;
     }
 
-    QJsonObject data = payload.value(QStringLiteral("payload")).toObject();
+    QJsonObject data = requestedPayload;
     data.remove(QStringLiteral("xml"));
+    const QJsonObject reportDetails = data.take(QStringLiteral("reportDetails")).toObject();
     const QJsonObject task = m_demoWorkflow.stateProjection(false)
                                  .value(QStringLiteral("task")).toObject();
     const QJsonObject taskTarget = task.value(QStringLiteral("target")).toObject();
@@ -5105,20 +5116,32 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
         trace->insert(QStringLiteral("canonicalRoute"), route);
     }
     data.insert(QStringLiteral("targetId"), targetId);
-    data.insert(QStringLiteral("x"), target ? target->pos().x : data.value(QStringLiteral("position")).toObject().value(QStringLiteral("x")));
-    data.insert(QStringLiteral("y"), target ? target->pos().y : data.value(QStringLiteral("position")).toObject().value(QStringLiteral("y")));
-    data.insert(QStringLiteral("status"),
-                action == QLatin1String("confirmTargetDestroyed")
-                    ? QStringLiteral("destroyed") : QStringLiteral("tracked"));
-    data.insert(QStringLiteral("destroyed"),
-                action == QLatin1String("confirmTargetDestroyed"));
+    const QJsonObject reportPosition = data.value(QStringLiteral("position")).toObject();
+    data.insert(QStringLiteral("x"), reportPosition.contains(QStringLiteral("x"))
+                   ? reportPosition.value(QStringLiteral("x"))
+                   : QJsonValue(target ? target->pos().x : 0.0));
+    data.insert(QStringLiteral("y"), reportPosition.contains(QStringLiteral("y"))
+                   ? reportPosition.value(QStringLiteral("y"))
+                   : QJsonValue(target ? target->pos().y : 0.0));
+    const bool confirmedDestroyed = action == QLatin1String("confirmTargetDestroyed")
+        && destructionOutcome == QLatin1String("destroyed");
+    const QString confirmedDamageState = data.value(QStringLiteral("damageState")).toString(
+        confirmedDestroyed ? QStringLiteral("destroyed") : QStringLiteral("unknown"));
+    data.insert(QStringLiteral("status"), action == QLatin1String("confirmTargetDestroyed")
+                   ? confirmedDamageState : QStringLiteral("tracked"));
+    data.insert(QStringLiteral("destroyed"), confirmedDestroyed);
+    data.insert(QStringLiteral("alive"), action == QLatin1String("confirmTargetDestroyed")
+                    ? !confirmedDestroyed : true);
+    data.insert(QStringLiteral("damaged"), confirmedDamageState == QLatin1String("damaged"));
+    if (action == QLatin1String("confirmTargetDestroyed"))
+        data.insert(QStringLiteral("outcome"), destructionOutcome);
     data.insert(QStringLiteral("damage"),
                 data.value(QStringLiteral("damage")).toDouble(
                     action == QLatin1String("reportBattleDamage") ? 100.0 : 0.0));
-    QJsonObject reportPosition = data.value(QStringLiteral("position")).toObject();
-    if (reportPosition.isEmpty() && target) {
-        reportPosition = QJsonObject{{QStringLiteral("x"), target->pos().x},
-                                     {QStringLiteral("y"), target->pos().y}};
+    QJsonObject targetReportPosition = data.value(QStringLiteral("position")).toObject();
+    if (targetReportPosition.isEmpty() && target) {
+        targetReportPosition = QJsonObject{{QStringLiteral("x"), target->pos().x},
+                                           {QStringLiteral("y"), target->pos().y}};
     }
     data.insert(QStringLiteral("time"), now);
     data.insert(QStringLiteral("targets"), QJsonArray{QJsonObject{
@@ -5130,8 +5153,8 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
                        QStringLiteral("fixed-ground-target"))},
         {QStringLiteral("targetCount"), data.value(QStringLiteral("targetCount")).toInt(1)},
         {QStringLiteral("friendFoe"), QStringLiteral("hostile")},
-        {QStringLiteral("x"), reportPosition.value(QStringLiteral("x"))},
-        {QStringLiteral("y"), reportPosition.value(QStringLiteral("y"))},
+        {QStringLiteral("x"), targetReportPosition.value(QStringLiteral("x"))},
+        {QStringLiteral("y"), targetReportPosition.value(QStringLiteral("y"))},
         {QStringLiteral("status"), data.value(QStringLiteral("status"))},
         {QStringLiteral("time"), now}}});
     const QJsonArray taskRoutePoints = task.value(QStringLiteral("route"))
@@ -5194,6 +5217,7 @@ bool GameServer::prepareDemoMessage(const QJsonObject& payload,
         && data.value(QStringLiteral("route")).isObject()) {
         trace->insert(QStringLiteral("canonicalRoute"), data.value(QStringLiteral("route")));
     }
+    trace->insert(QStringLiteral("reportDetails"), reportDetails);
     trace->insert(QStringLiteral("plainText"), QJsonObject{
         {QStringLiteral("action"), action},
         {QStringLiteral("sender"), sender->id()},

@@ -86,10 +86,11 @@ Item {
             var labels = { commander: "指挥官", attack: "攻击机", recon: "侦察机",
                            ground: "地面单位", jammer: "干扰机" }
             var slot = seat.slot && seat.seatType !== "commander" ? " #" + seat.slot : ""
-            return (seat.side === "red" ? "红方 · " : "蓝方 · ")
-                + (labels[seat.seatType] || seat.seatId) + slot
+            var side = seat.side === "red" ? "红方" : seat.side === "blue" ? "蓝方" : ""
+            return (side ? side + " · " : "")
+                + (labels[seat.seatType] || "战位") + slot
         }
-        return String(seatId || "")
+        return "未知战位"
     }
 
     function toggleRecipient(id) {

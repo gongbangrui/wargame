@@ -48,8 +48,24 @@ Item {
         if (!identity) identity = "未登录"
         var role = root.controller.isRoomAdmin
             ? "房间管理员"
-            : root.controller.currentSeatId || "房间大厅"
+            : root.onlineSeatLabel(root.controller.currentSeatId,
+                                   root.controller.currentSeatSide,
+                                   root.controller.currentSeatType)
         return identity + " · " + role
+    }
+
+    function onlineSeatLabel(seatId, side, seatType) {
+        var id = String(seatId || "")
+        var parts = id.split("_")
+        var resolvedSide = String(side || parts[0] || "")
+        var resolvedType = String(seatType || parts[1] || "")
+        if (!id || (!resolvedSide && !resolvedType)) return "房间大厅"
+        var labels = { commander: "指挥席", attack: "攻击席", recon: "侦察席",
+                       ground: "地面引导席", jammer: "干扰席" }
+        var sideLabel = resolvedSide === "red" ? "红方" : resolvedSide === "blue" ? "蓝方" : ""
+        var typeLabel = labels[resolvedType] || "战位"
+        var slot = parts.length > 2 && resolvedType !== "commander" ? " #" + parts[2] : ""
+        return (sideLabel ? sideLabel + " · " : "") + typeLabel + slot
     }
 
     function activeCanvas() {
@@ -403,15 +419,23 @@ Item {
 
             Rectangle {
                 visible: root.controller.networked
-                Layout.preferredHeight: 26; Layout.preferredWidth: Math.min(root.compactTopBar ? 104 : 220, onlineIdentity.implicitWidth + 22)
+                Layout.preferredHeight: 26
+                Layout.preferredWidth: root.compactTopBar ? 116 : 214
+                Layout.minimumWidth: root.compactTopBar ? 96 : 150
+                Layout.maximumWidth: root.compactTopBar ? 116 : 214
                 radius: 5; color: root.controller.currentSeatSide === "red" ? "#3c2028" : root.controller.currentSeatSide === "blue" ? "#173248" : "#183632"
                 border.color: root.controller.currentSeatSide === "red" ? theme.red : root.controller.currentSeatSide === "blue" ? theme.blue : theme.success
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: 180 } }
                 Text {
-                    id: onlineIdentity; anchors.centerIn: parent
+                    id: onlineIdentity
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.leftMargin: 10; anchors.rightMargin: 10
+                    anchors.verticalCenter: parent.verticalCenter
                     text: root.onlineIdentityLabel()
                     elide: Text.ElideRight
+                    maximumLineCount: 1
+                    horizontalAlignment: Text.AlignHCenter
                     color: theme.textStrong; font.pixelSize: 11; font.bold: true
                 }
             }

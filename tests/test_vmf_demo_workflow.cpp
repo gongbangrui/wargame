@@ -96,6 +96,86 @@ TEST(VmfDemoWorkflowTest, DuplicateActionIsIdempotentAndStateRestores) {
     EXPECT_EQ(restored.toJson(), workflow.toJson());
 }
 
+TEST(VmfDemoWorkflowTest, NotDestroyedConfirmationReopensGuidanceAndKeepsTaskHistory) {
+    VmfDemoWorkflow workflow;
+    const QList<VmfDemoWorkflow::ActionSpec> specs = VmfDemoWorkflow::actionSpecs();
+    ASSERT_EQ(specs.size(), 17);
+
+    // Advance through the first simulated strike, leaving confirmation as the
+    // current action and one recorded attack attempt on the task.
+    for (int index = 0; index < 14; ++index) {
+        const QString actionId = QStringLiteral("retry-action-%1").arg(index);
+        const auto result = workflow.applyAction(
+            demoCommand(workflow, specs.at(index).action, actionId),
+            specs.at(index).seatType, demoTrace(actionId), index + 1.0);
+        ASSERT_TRUE(result.ok) << result.message.toStdString();
+    }
+
+    const QJsonObject before = workflow.stateProjection(false);
+    const QJsonObject beforeTask = before.value(QStringLiteral("task")).toObject();
+    ASSERT_EQ(before.value(QStringLiteral("expectedAction")).toString(),
+              QStringLiteral("confirmTargetDestroyed"));
+    EXPECT_EQ(beforeTask.value(QStringLiteral("strikeAttempt")).toInt(), 1);
+
+    QJsonObject confirmation = demoCommand(
+        workflow, QStringLiteral("confirmTargetDestroyed"), QStringLiteral("retry-confirm"));
+    confirmation[QStringLiteral("payload")] = QJsonObject{
+        {QStringLiteral("outcome"), QStringLiteral("notDestroyed")},
+        {QStringLiteral("damageState"), QStringLiteral("damaged")},
+        {QStringLiteral("confidence"), 0.72},
+        {QStringLiteral("evidence"), QStringLiteral("secondary plume")},
+        {QStringLiteral("reportDetails"), QJsonObject{
+             {QStringLiteral("observationQuality"), QStringLiteral("limited")}}}};
+    const auto result = workflow.applyAction(
+        confirmation, QStringLiteral("recon"), demoTrace(QStringLiteral("retry-confirm")), 20.0);
+    ASSERT_TRUE(result.ok) << result.message.toStdString();
+
+    const QJsonObject after = workflow.stateProjection(false);
+    const QJsonObject task = after.value(QStringLiteral("task")).toObject();
+    EXPECT_EQ(after.value(QStringLiteral("expectedAction")).toString(),
+              QStringLiteral("identityHello"));
+    EXPECT_EQ(after.value(QStringLiteral("phase")).toString(),
+              QStringLiteral("ground-guidance"));
+    EXPECT_EQ(task.value(QStringLiteral("strikeAttempt")).toInt(), 1);
+    EXPECT_EQ(task.value(QStringLiteral("lastOutcome")).toString(),
+              QStringLiteral("notDestroyed"));
+    EXPECT_EQ(task.value(QStringLiteral("effect")).toObject()
+                  .value(QStringLiteral("alive")).toBool(), true);
+    EXPECT_EQ(task.value(QStringLiteral("effect")).toObject()
+                  .value(QStringLiteral("damaged")).toBool(), true);
+    EXPECT_FALSE(task.value(QStringLiteral("target")).toObject().isEmpty());
+    EXPECT_FALSE(task.value(QStringLiteral("route")).toObject().isEmpty());
+    ASSERT_EQ(after.value(QStringLiteral("reports")).toArray().size(), 15);
+    EXPECT_EQ(after.value(QStringLiteral("reports")).toArray().last().toObject()
+                  .value(QStringLiteral("details")).toObject()
+                  .value(QStringLiteral("outcome")).toString(),
+              QStringLiteral("notDestroyed"));
+
+    VmfDemoWorkflow restored;
+    QString error;
+    ASSERT_TRUE(restored.restore(workflow.toJson(), &error)) << error.toStdString();
+    EXPECT_EQ(restored.toJson(), workflow.toJson());
+}
+
+TEST(VmfDemoWorkflowTest, RejectsUnknownDestructionOutcome) {
+    VmfDemoWorkflow workflow;
+    const QList<VmfDemoWorkflow::ActionSpec> specs = VmfDemoWorkflow::actionSpecs();
+    for (int index = 0; index < 14; ++index) {
+        const QString actionId = QStringLiteral("invalid-outcome-action-%1").arg(index);
+        ASSERT_TRUE(workflow.applyAction(
+            demoCommand(workflow, specs.at(index).action, actionId),
+            specs.at(index).seatType, demoTrace(actionId), index + 1.0).ok);
+    }
+    QJsonObject command = demoCommand(workflow, QStringLiteral("confirmTargetDestroyed"),
+                                      QStringLiteral("invalid-outcome"));
+    command[QStringLiteral("payload")] = QJsonObject{
+        {QStringLiteral("outcome"), QStringLiteral("maybe")}};
+    const auto result = workflow.applyAction(
+        command, QStringLiteral("recon"), demoTrace(QStringLiteral("invalid-outcome")), 20.0);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.code, QStringLiteral("INVALID_DESTRUCTION_OUTCOME"));
+}
+
 TEST(VmfDemoWorkflowTest, DirectorControlsPauseJumpResetAndTargetScript) {
     VmfDemoWorkflow workflow;
     EXPECT_TRUE(workflow.applyControl(QStringLiteral("pause"), {}, 1.0).ok);

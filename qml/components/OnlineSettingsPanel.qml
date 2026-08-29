@@ -42,6 +42,21 @@ Dialog {
     ]
     function read(key, fallback) { return root.controller ? root.controller.loadSetting(key, fallback) : fallback }
     function save(key, value) { if (root.controller) root.controller.saveSetting(key, value) }
+    function currentSeatLabel() {
+        var id = root.controller ? String(root.controller.currentSeatId || "") : ""
+        var seats = root.controller ? root.controller.onlineSeats || [] : []
+        for (var i = 0; i < seats.length; ++i) {
+            if (String(seats[i].seatId || "") === id) {
+                var seat = seats[i]
+                var labels = { commander: "指挥席", attack: "攻击席", recon: "侦察席",
+                               ground: "地面引导席", jammer: "干扰席" }
+                var side = seat.side === "red" ? "红方" : seat.side === "blue" ? "蓝方" : ""
+                var slot = seat.slot && seat.seatType !== "commander" ? " #" + seat.slot : ""
+                return (side ? side + " · " : "") + (labels[seat.seatType] || "战位") + slot
+            }
+        }
+        return id ? "当前战位" : "未选战位"
+    }
     function load() {
         live.checked = read("online/intel/showLive", true)
         stale.checked = read("online/intel/showStale", true)
@@ -100,7 +115,7 @@ Dialog {
                     Label { text: "服务器"; color: AppContext.muted }
                     Label { text: root.controller ? root.controller.serverAddress : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
                     Label { text: "房间 / 战位"; color: AppContext.muted }
-                    Label { text: root.controller ? (root.controller.currentRoomId + " / " + root.controller.currentSeatId) : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Label { text: root.controller ? (root.controller.currentRoomId + " / " + root.currentSeatLabel()) : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
                     Label { text: "连接"; color: AppContext.muted }
                     Label { text: root.controller ? root.controller.networkStatus : ""; color: AppContext.text; elide: Text.ElideRight; Layout.fillWidth: true }
                     Label { text: "延迟"; color: AppContext.muted }

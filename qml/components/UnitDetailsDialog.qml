@@ -325,19 +325,6 @@ Dialog {
                             font.family: "Consolas"
                         }
                     }
-                    ColumnLayout {
-                        visible: !dlg.narrow
-                        Layout.preferredWidth: 76
-                        spacing: 2
-                        Text { text: "版本"; color: AppContext.muted; font.pixelSize: 9 }
-                        Text {
-                            text: dlg.controller && dlg.controller.networked ? String(dlg.controller.unitStateRevision) : "LOCAL"
-                            color: AppContext.signal
-                            font.pixelSize: 11
-                            font.bold: true
-                            font.family: "Consolas"
-                        }
-                    }
                 }
 
                 RowLayout {
@@ -355,18 +342,6 @@ Dialog {
                             text: dlg.snap.speed !== undefined ? Math.round(Number(dlg.snap.speed)) + " m/s" : "-"
                             color: AppContext.textStrong
                             font.pixelSize: 12
-                            font.bold: true
-                            font.family: "Consolas"
-                        }
-                    }
-                    ColumnLayout {
-                        Layout.preferredWidth: 76
-                        spacing: 1
-                        Text { text: "版本"; color: AppContext.muted; font.pixelSize: 9 }
-                        Text {
-                            text: dlg.controller && dlg.controller.networked ? String(dlg.controller.unitStateRevision) : "LOCAL"
-                            color: AppContext.signal
-                            font.pixelSize: 10
                             font.bold: true
                             font.family: "Consolas"
                         }

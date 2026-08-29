@@ -111,7 +111,8 @@ Item {
         if (actor.controlMode === "fixed-target") return "固定目标无需操作"
         if (String(actor.seatId) === String(root.controller.currentSeatId || ""))
             return "轮到本战位操作"
-        return "等待 " + String(actor.displayName || actor.seatId)
+        var roleLabels = { commander: "指挥席", recon: "侦察席", attack: "攻击席", ground: "地面引导席" }
+        return "等待 " + (roleLabels[String(actor.seatType || "")] || "其他战位")
     }
 
     function strictActionLabel(action) {
@@ -498,7 +499,6 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         Text { Layout.fillWidth: true; text: root.stageLabel(root.strictTask().stage); color: root.stageColor(root.strictTask().stage); font.pixelSize: 12; font.bold: true; elide: Text.ElideRight }
-                        Text { text: root.strictTask().taskId ? ("rev " + Number(root.strictTask().taskRevision || 0)) : ""; color: root.dim; font.pixelSize: 8 }
                     }
                     Text {
                         Layout.fillWidth: true

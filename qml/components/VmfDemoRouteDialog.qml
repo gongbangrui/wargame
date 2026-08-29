@@ -5,146 +5,432 @@ import QtQuick.Layouts
 
 Dialog {
     id: root
+
     property var controller: null
     property var attacker: ({})
     property var target: ({})
+    property var targetOverlayUnit: ({})
     property var points: []
+    property int selectedIndex: -1
+    property real mapZoom: 0.05
+    property var mapCenter: ({x: 10000, y: 7500})
     property color ink: "#eef4f5"
     property color muted: "#91a4a8"
     property color panel: "#162329"
+    property color page: "#0c171b"
     property color line: "#2e464c"
     property color accent: "#48d6b0"
+    property color warning: "#e5a54a"
+    property bool compact: width < 760
+
     modal: true
     title: "攻击航路编辑"
-    width: Math.min(920, parent ? parent.width - 20 : 920)
-    height: Math.min(600, parent ? parent.height - 20 : 600)
-    anchors.centerIn: parent
+    parent: Overlay.overlay
+    width: Overlay.overlay ? Math.max(340, Math.min(1080, Overlay.overlay.width - 28)) : 960
+    height: Overlay.overlay ? Math.max(420, Math.min(760, Overlay.overlay.height - 28)) : 680
+    anchors.centerIn: Overlay.overlay
     standardButtons: Dialog.NoButton
-    background: Rectangle { color: root.panel; border.color: root.line; radius: 6 }
+    closePolicy: Popup.CloseOnEscape
+    background: Rectangle {
+        color: root.panel
+        border.color: root.accent
+        border.width: 1
+        radius: 8
+    }
 
     function positionOf(value) {
-        var p = value && value.position
+        var p = value && (value.lockedPosition || value.position)
         if (p && p.length >= 2) return { x: Number(p[0]), y: Number(p[1]) }
         if (p && p.x !== undefined) return { x: Number(p.x), y: Number(p.y) }
         return { x: Number(value && value.x || 0), y: Number(value && value.y || 0) }
     }
+
     function begin(attackerValue, targetValue) {
         root.attacker = attackerValue || ({})
         root.target = targetValue || ({})
         var a = root.positionOf(root.attacker)
         var t = root.positionOf(root.target)
-        root.points = [{ x: a.x, y: a.y, time: 0, locked: true },
-                       { x: t.x, y: t.y, time: 60, locked: true }]
+        var targetId = String(root.target.targetId || root.target.id || "")
+        root.targetOverlayUnit = targetId && isFinite(t.x) && isFinite(t.y) ? {
+            id: targetId,
+            targetId: targetId,
+            callsign: String(root.target.callsign || root.target.label || targetId),
+            kind: "groundtarget",
+            side: "blue",
+            position: [t.x, t.y, Number((root.target.position || {}).alt || 0)],
+            alive: true,
+            hp: 100,
+            maxHp: 100,
+            movable: false,
+            collisionRadius: Number(root.target.collisionRadius || 50),
+            demoTarget: true,
+            targetSnapshot: true
+        } : ({})
+        root.points = [
+            { x: a.x, y: a.y, time: 0, locked: true, kind: "start" },
+            { x: t.x, y: t.y, time: 60, locked: true, kind: "target" }
+        ]
+        root.selectedIndex = -1
+        root.fitRoute()
         open()
         Qt.callLater(function() {
-            if (!routeMap) return
-            routeMap.refresh()
-            routeMap.focusAt((a.x + t.x) / 2, (a.y + t.y) / 2)
+            root.fitRoute()
+            if (routeMap) routeMap.refresh()
         })
     }
+
     function editablePoints() {
         var result = []
         for (var i = 0; i < root.points.length; ++i) result.push(root.points[i])
         return result
     }
+
+    function fitRoute() {
+        if (!routeMap || root.points.length < 2) return
+        var minX = Number.POSITIVE_INFINITY, minY = Number.POSITIVE_INFINITY
+        var maxX = Number.NEGATIVE_INFINITY, maxY = Number.NEGATIVE_INFINITY
+        for (var i = 0; i < root.points.length; ++i) {
+            var point = root.points[i] || ({})
+            var x = Number(point.x), y = Number(point.y)
+            if (!isFinite(x) || !isFinite(y)) continue
+            minX = Math.min(minX, x); minY = Math.min(minY, y)
+            maxX = Math.max(maxX, x); maxY = Math.max(maxY, y)
+        }
+        if (!isFinite(minX) || !isFinite(minY)) return
+        var spanX = Math.max(500, maxX - minX)
+        var spanY = Math.max(500, maxY - minY)
+        var usableWidth = Math.max(160, routeMap.width - 80)
+        var usableHeight = Math.max(160, routeMap.height - 80)
+        root.mapZoom = Math.max(0.02, Math.min(4.0,
+            Math.min(usableWidth / spanX, usableHeight / spanY)))
+        root.mapCenter = ({x: (minX + maxX) / 2, y: (minY + maxY) / 2})
+    }
+
     function addPoint(point) {
         if (!point || root.points.length < 2) return
-        var copy = editablePoints()
+        var copy = root.editablePoints()
         var end = copy.pop()
-        copy.push({ x: Number(point.x), y: Number(point.y), time: copy.length * 30 })
+        copy.push({ x: Number(point.x), y: Number(point.y), time: copy.length * 30,
+                    locked: false, kind: "waypoint" })
         copy.push(end)
         root.points = copy
+        root.selectedIndex = copy.length - 2
     }
+
+    function movePoint(index, point) {
+        if (!point || index <= 0 || index >= root.points.length - 1) return
+        var copy = root.editablePoints()
+        copy[index] = { x: Number(point.x), y: Number(point.y),
+                        time: Number(copy[index].time || index * 30),
+                        locked: false, kind: "waypoint" }
+        root.points = copy
+        root.selectedIndex = index
+    }
+
+    function removePoint(index) {
+        if (index <= 0 || index >= root.points.length - 1) return
+        var copy = root.editablePoints()
+        copy.splice(index, 1)
+        root.points = copy
+        root.selectedIndex = Math.min(index, copy.length - 2)
+    }
+
+    function focusPoint(index) {
+        if (index < 0 || index >= root.points.length) return
+        root.selectedIndex = index
+        var point = root.points[index]
+        if (point) routeMap.focusAt(Number(point.x), Number(point.y))
+    }
+
     function finish() {
         if (root.points.length < 2) return
         root.routeAccepted(root.editablePoints())
         close()
     }
+
     signal routeAccepted(var points)
 
     contentItem: ColumnLayout {
-        anchors.margins: 12
-        spacing: 8
+        anchors.fill: parent
+        anchors.margins: 16
+        spacing: 10
+
         RowLayout {
             Layout.fillWidth: true
-            Text { Layout.fillWidth: true; text: "起点 " + String(root.attacker.callsign || root.attacker.id || "攻击机") + "  →  " + String(root.target.targetId || root.target.id || "目标"); color: root.ink; font.pixelSize: 12; font.bold: true }
-            Text { text: "首尾点已锁定"; color: root.accent; font.pixelSize: 9 }
+            spacing: 8
+            Icon { name: "locate"; iconSize: 18; iconColor: root.accent }
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 1
+                Text {
+                    Layout.fillWidth: true
+                    text: String(root.attacker.callsign || root.attacker.id || "攻击机")
+                        + "  →  " + String(root.target.targetId || root.target.id || "目标")
+                    color: root.ink
+                    font.pixelSize: 13
+                    font.bold: true
+                    elide: Text.ElideRight
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "起点和目标终点已锁定 · 可编辑中继航路点"
+                    color: root.muted
+                    font.pixelSize: 9
+                    elide: Text.ElideRight
+                }
+            }
+            GhostButton {
+                text: "全图"
+                iconName: "scan"
+                textColor: root.muted
+                onClicked: root.fitRoute()
+            }
         }
-        RowLayout {
+
+        GridLayout {
+            id: editorBody
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 8
+            columns: root.compact ? 1 : 2
+            columnSpacing: 10
+            rowSpacing: 10
+
             Rectangle {
-                Layout.preferredWidth: 190
-                Layout.fillHeight: true
-                color: "#101a1f"; border.color: root.line; radius: 4
+                Layout.fillWidth: true
+                Layout.fillHeight: root.compact
+                Layout.preferredWidth: root.compact ? -1 : 230
+                Layout.minimumHeight: root.compact ? 132 : 0
+                color: root.page
+                border.color: root.line
+                radius: 6
+
                 ColumnLayout {
-                    anchors.fill: parent; anchors.margins: 8; spacing: 5
-                    Text { text: "航路点"; color: root.ink; font.pixelSize: 11; font.bold: true }
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 6
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text { Layout.fillWidth: true; text: "航路点"; color: root.ink; font.pixelSize: 11; font.bold: true }
+                        Text { text: root.points.length + " 点"; color: root.muted; font.pixelSize: 8 }
+                    }
                     ListView {
                         id: pointsList
-                        Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 4
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        spacing: 4
                         model: root.points
                         delegate: Rectangle {
                             id: pointDelegate
                             required property var modelData
                             required property int index
-                            width: pointsList.width; height: 34
-                            color: index === 0 || index === pointsList.count - 1 ? "#203d3a" : "#1b2b31"
-                            border.color: root.line; radius: 3
+                            width: pointsList.width
+                            height: 38
+                            color: root.selectedIndex === pointDelegate.index ? "#24483f"
+                                : pointDelegate.index === 0 || pointDelegate.index === pointsList.count - 1
+                                    ? "#1d3835" : "#1b2b31"
+                            border.color: root.selectedIndex === pointDelegate.index ? root.accent : root.line
+                            radius: 4
                             RowLayout {
-                                anchors.fill: parent; anchors.margins: 5; spacing: 4
-                                Text { Layout.fillWidth: true; text: (pointDelegate.index === 0 ? "起点" : pointDelegate.index === pointsList.count - 1 ? "终点" : "中继") + "  " + Math.round(pointDelegate.modelData.x) + ", " + Math.round(pointDelegate.modelData.y); color: root.ink; font.pixelSize: 9; elide: Text.ElideRight }
-                                Button { visible: pointDelegate.index > 0 && pointDelegate.index < pointsList.count - 1; text: "×"; onClicked: { var copy = root.editablePoints(); copy.splice(pointDelegate.index, 1); root.points = copy } }
+                                anchors.fill: parent
+                                anchors.margins: 6
+                                spacing: 6
+                                Rectangle {
+                                    Layout.preferredWidth: 22
+                                    Layout.preferredHeight: 22
+                                    radius: 11
+                                    color: pointDelegate.index === pointsList.count - 1 ? "#f06b58" : root.accent
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: pointDelegate.index === 0 ? "起" : pointDelegate.index === pointsList.count - 1 ? "终" : pointDelegate.index
+                                        color: "#071014"
+                                        font.pixelSize: 8
+                                        font.bold: true
+                                    }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: pointDelegate.index === 0 ? "攻击机起点"
+                                            : pointDelegate.index === pointsList.count - 1 ? "目标终点" : "中继点 " + pointDelegate.index
+                                        color: root.ink
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: Math.round(Number(pointDelegate.modelData.x)) + ", "
+                                            + Math.round(Number(pointDelegate.modelData.y)) + " m"
+                                        color: root.muted
+                                        font.pixelSize: 8
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                GhostButton {
+                                    visible: pointDelegate.index > 0 && pointDelegate.index < pointsList.count - 1
+                                    text: ""
+                                    iconName: "delete"
+                                    iconSize: 12
+                                    textColor: root.warning
+                                    onClicked: root.removePoint(pointDelegate.index)
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: "删除中继点"
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                z: -1
+                                onClicked: root.focusPoint(pointDelegate.index)
                             }
                         }
                     }
-                    Button { Layout.fillWidth: true; text: "清除中继点"; enabled: root.points.length > 2; onClicked: { var a = root.points[0]; var b = root.points[root.points.length - 1]; root.points = [a, b] } }
+                    GhostButton {
+                        Layout.fillWidth: true
+                        text: "清除中继点"
+                        iconName: "delete"
+                        textColor: root.muted
+                        enabled: root.points.length > 2
+                        onClicked: {
+                            var a = root.points[0]
+                            var b = root.points[root.points.length - 1]
+                            root.points = [a, b]
+                            root.selectedIndex = -1
+                        }
+                    }
                 }
             }
+
             Rectangle {
-                Layout.fillWidth: true; Layout.fillHeight: true
-                color: "#0c171b"; border.color: root.line; radius: 4
+                id: mapPanel
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumHeight: root.compact ? 230 : 0
+                color: "#0a1418"
+                border.color: root.line
+                radius: 6
+
                 MapCanvas {
                     id: routeMap
-                    anchors.fill: parent; anchors.margins: 2
+                    anchors.fill: parent
+                    anchors.margins: 2
                     controller: root.controller
                     sideFilter: "red"
                     showAllSides: true
-                    zoom: 0.05
+                    visibleUnitIds: null
+                    detectedEnemyIds: []
+                    overlayUnits: root.targetOverlayUnit && root.targetOverlayUnit.id
+                        ? [root.targetOverlayUnit] : []
+                    selectedUnitIds: root.targetOverlayUnit && root.targetOverlayUnit.id
+                        ? [root.targetOverlayUnit.id] : []
+                    actionTargetId: String(root.target.targetId || root.target.id || "")
+                    center: root.mapCenter
+                    zoom: root.mapZoom
                     showRoutes: true
+                    showRecentPaths: false
                     routes: [{ points: root.points, color: root.accent, pendingColor: root.accent }]
                     onClickedMap: function(point) { root.addPoint(point) }
-                    Rectangle {
-                        property var markerPoint: root.points.length > 0
-                            ? routeMap.toPixel(root.points[0].x, root.points[0].y)
-                            : ({ x: -100, y: -100 })
-                        x: markerPoint.x - 7; y: markerPoint.y - 7
-                        width: 14; height: 14; radius: 7
-                        color: root.accent; border.color: "#071014"; border.width: 2
-                        z: 30
-                        Text { anchors.left: parent.right; anchors.leftMargin: 5; anchors.verticalCenter: parent.verticalCenter; text: "攻击机"; color: root.ink; font.pixelSize: 9 }
-                    }
-                    Rectangle {
-                        property var markerPoint: root.points.length > 1
-                            ? routeMap.toPixel(root.points[root.points.length - 1].x,
-                                               root.points[root.points.length - 1].y)
-                            : ({ x: -100, y: -100 })
-                        x: markerPoint.x - 7; y: markerPoint.y - 7
-                        width: 14; height: 14; radius: 2
-                        color: "#f06b58"; border.color: "#071014"; border.width: 2
-                        z: 30
-                        Text { anchors.left: parent.right; anchors.leftMargin: 5; anchors.verticalCenter: parent.verticalCenter; text: "目标"; color: root.ink; font.pixelSize: 9 }
+
+                    Repeater {
+                        model: root.points
+                        delegate: Item {
+                            id: waypointHandle
+                            required property var modelData
+                            required property int index
+                            property var pixel: routeMap.toPixel(Number(modelData.x), Number(modelData.y))
+                            x: pixel.x - width / 2
+                            y: pixel.y - height / 2
+                            width: index === 0 || index === root.points.length - 1 ? 28 : 24
+                            height: width
+                            z: 40
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: width / 2
+                                color: waypointHandle.index === root.points.length - 1 ? "#f06b58" : root.accent
+                                border.color: waypointHandle.index === root.selectedIndex ? "#ffffff" : "#071014"
+                                border.width: waypointHandle.index === root.selectedIndex ? 2 : 1
+                                opacity: waypointHandle.index > 0 && waypointHandle.index < root.points.length - 1 ? 0.96 : 1
+                            }
+                            Text {
+                                anchors.centerIn: parent
+                                text: waypointHandle.index === 0 ? "起" : waypointHandle.index === root.points.length - 1 ? "终" : waypointHandle.index
+                                color: "#071014"
+                                font.pixelSize: 9
+                                font.bold: true
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: waypointHandle.index > 0 && waypointHandle.index < root.points.length - 1
+                                cursorShape: Qt.OpenHandCursor
+                                onPressed: root.selectedIndex = waypointHandle.index
+                                onPositionChanged: function(mouse) {
+                                    if (!pressed) return
+                                    var point = routeMap.logicalFromPixel(waypointHandle.x + mouse.x,
+                                                                           waypointHandle.y + mouse.y)
+                                    root.movePoint(waypointHandle.index, point)
+                                }
+                                onReleased: cursorShape = Qt.OpenHandCursor
+                            }
+                            Text {
+                                visible: waypointHandle.index === 0 || waypointHandle.index === root.points.length - 1
+                                anchors.left: parent.right
+                                anchors.leftMargin: 6
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: waypointHandle.index === 0 ? "攻击机" : "目标 · " + String(root.target.targetId || "")
+                                color: root.ink
+                                font.pixelSize: 9
+                                font.bold: waypointHandle.index === root.points.length - 1
+                            }
+                        }
                     }
                 }
-                Text { anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.margins: 10; text: "单击地图添加中继点"; color: root.muted; font.pixelSize: 9 }
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.margins: 10
+                    implicitWidth: mapHint.implicitWidth + 18
+                    implicitHeight: mapHint.implicitHeight + 10
+                    color: "#07151add"
+                    border.color: root.line
+                    radius: 4
+                    Text {
+                        id: mapHint
+                        anchors.centerIn: parent
+                        text: "单击地图添加中继点 · 拖动点位微调"
+                        color: root.muted
+                        font.pixelSize: 8
+                    }
+                }
             }
         }
+
         RowLayout {
             Layout.fillWidth: true
-            Item { Layout.fillWidth: true }
-            Button { text: "取消"; onClicked: root.close() }
-            Button { text: "完成航路"; enabled: root.points.length >= 2; onClicked: root.finish() }
+            spacing: 8
+            Text {
+                Layout.fillWidth: true
+                text: root.points.length > 2 ? "已规划 " + root.points.length + " 个航路点" : "请添加至少一个中继点或直接完成"
+                color: root.muted
+                font.pixelSize: 9
+                elide: Text.ElideRight
+            }
+            GhostButton {
+                text: "取消"
+                iconName: "close"
+                textColor: root.muted
+                onClicked: root.close()
+            }
+            TonalButton {
+                text: "完成"
+                iconName: "check"
+                base: root.accent
+                textColor: "#071014"
+                enabled: root.points.length >= 2
+                onClicked: root.finish()
+            }
         }
     }
 }

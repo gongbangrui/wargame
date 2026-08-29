@@ -13,7 +13,7 @@ XML 规范化和 bit 编解码器。旧 `vmf-guided-strike-v1` 继续作为兼�
 - 联网仿真、流程 revision、动作顺序、权限和持久化均由 `game-server` 决定。QML 只发送命令并消费投影。
 - 页面展示业务明文、规范 XML 的检查结果和编码元数据，不要求展示密文。
 
-## 2. 六阶段与十动作
+## 2. 六阶段与十七动作
 
 | 阶段 | 顺序 | 动作 | 操作战位 | VMF 领域消息 |
 | --- | ---: | --- | --- | --- |
@@ -21,16 +21,26 @@ XML 规范化和 bit 编解码器。旧 `vmf-guided-strike-v1` 继续作为兼�
 | 航路规划 | 2 | `planRoute` | 指挥 | `FlightPlan` |
 | 航路规划 | 3 | `acceptRoute` | 攻击 | `RouteAcceptance` |
 | 引导命令 | 4 | `issueGuidance` | 指挥 | `GroundGuideOrder` |
-| 引导命令 | 5 | `acknowledgeGuidance` | 攻击 | `RouteAcceptance` |
-| 地面引导 | 6 | `confirmGroundGuidance` | 地面引导 | `GroundAttackConfirm` |
-| 摧毁确认 | 7 | `reportDamage` | 攻击 | `BattleDamageReport` |
-| 摧毁确认 | 8 | `confirmDestroyed` | 侦察 | `TargetDestroyed` |
-| 返航 | 9 | `orderReturn` | 指挥 | `WithdrawOrder` |
-| 返航 | 10 | `confirmReturned` | 攻击 | `Ack` |
+| 引导命令 | 5 | `acknowledgeGuidance` | 地面引导 | `Ack` |
+| 地面引导 | 6 | `identityHello` | 攻击 | `IdentityReport` |
+| 地面引导 | 7 | `identityConfirm` | 地面引导 | `Ack` |
+| 地面引导 | 8 | `sendGuidancePackage` | 地面引导 | `GroundTargetReport` |
+| 地面引导 | 9 | `acceptGuidance` | 攻击 | `RouteAcceptance` |
+| 地面引导 | 10 | `reportAttackReady` | 攻击 | `AttackReadyReport` |
+| 地面引导 | 11 | `authorizeAttack` | 地面引导 | `AttackAuthorization` |
+| 地面引导 | 12 | `simulateAttack` | 攻击 | `EngagementReport` |
+| 地面引导 | 13 | `reportBattleDamage` | 攻击 | `BattleDamageReport` |
+| 地面引导 | 14 | `confirmDamageAssessment` | 地面引导 | `DamageAssessmentConfirm` |
+| 摧毁确认 | 15 | `confirmTargetDestroyed` | 侦察 | `TargetDestroyed` / `TargetReport` |
+| 返航 | 16 | `withdraw` | 指挥 | `WithdrawOrder` |
+| 返航 | 17 | `confirmReturned` | 攻击 | `Ack` |
 
 客户端提交 `expectedRevision`、`actionId`、当前阶段和当前战位。服务端拒绝过期 revision、
 越序动作和错误战位；已经确认的 `actionId` 以幂等结果返回。未被真人接管的当前战位由服务器
 自动执行，相邻自动动作至少间隔一秒，便于演示者观察阶段变化和消息内容。
+
+摧毁确认支持 `destroyed` 和 `notDestroyed` 两种结果。选择 `notDestroyed` 时，服务端保留当前任务、
+目标、航路和报告历史，从地面引导阶段的 `identityHello` 动作重新开始；下一次模拟攻击会递增任务的攻击次数。
 
 ## 3. 消息输入与检查
 
@@ -82,7 +92,7 @@ schema 8 保存 `demoState`、generation/revision、当前动作、固定靶脚�
 1. 在网页房间配置中选择“演示模式”，确认它与 PVE 互斥。
 2. 在桌面房间管理中确认 profile 为 `vmf-demo-v2`，并检查红方四类单位与至少一个蓝方固定靶。
 3. 接管需要人工演示的红方战位，其他战位保持自动控制；红方就绪后启动房间。
-4. 按六阶段完成十个动作，逐步检查明文、bit 长度、字段布局、往返一致性和 ACK。
+4. 按六阶段完成十七个动作，逐步检查明文、bit 长度、字段布局、往返一致性和 ACK；也要验证未摧毁回退路径。
 5. 验证错误战位、过期 revision 和越序动作均被拒绝；断线重连后从当前权威步骤继续。
 6. 使用暂停、恢复、阶段跳转和重置验证导演控制，再重启服务确认 checkpoint 恢复。
 7. 确认蓝方不能被接管、不会攻击反制，且 snapshot 中没有完整 trace 或未投影敌情。

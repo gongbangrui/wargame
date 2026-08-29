@@ -25,9 +25,10 @@ Drawer {
     function roleName(seatId) {
         if (!seatId) return "房间大厅"
         var parts = seatId.split("_")
-        var kind = { commander: "指挥官", attack: "攻击机", recon: "侦察机", ground: "地面单位", jammer: "干扰机" }
+        var kind = { commander: "指挥席", attack: "攻击席", recon: "侦察席", ground: "地面引导席", jammer: "干扰席" }
         var slot = parts.length > 2 && parts[1] !== "commander" ? " #" + parts[2] : ""
-        return (parts[0] === "red" ? "红方" : "蓝方") + " · " + (kind[parts[1]] || parts[1] || seatId) + slot
+        var side = parts[0] === "red" ? "红方" : parts[0] === "blue" ? "蓝方" : ""
+        return (side ? side + " · " : "") + (kind[parts[1]] || "战位") + slot
     }
     function roleColor(seatId) {
         if (seatId && seatId.indexOf("red_") === 0) return "#ef6370"

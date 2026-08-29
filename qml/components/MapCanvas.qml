@@ -13,6 +13,9 @@ Item {
     // deployment exists. Online tactical views leave this null and use the
     // projected runtime units as before.
     property var scenarioUnits: null
+    // A host may supply a deliberately small, authorized overlay roster. This
+    // keeps a VMF demo target visible after its live sensor contact expires.
+    property var overlayUnits: []
     property string sideFilter: "red"
     property bool   showAllSides: false
     property var visibleUnitIds: null
@@ -177,31 +180,59 @@ Item {
     }
     function canvasUnits() {
         var sourceList = root.unitListSource()
-        if (!sourceList || typeof sourceList.length !== "number") return []
-        var output = []
-        for (var i = 0; i < sourceList.length; ++i) {
-            var source = sourceList[i] || ({})
-            var position = root.unitPosition(source)
-            if (!position) continue
-            var sourcePosition = source.position
-            var runtimeReady = sourcePosition && typeof sourcePosition.length === "number"
-                && sourcePosition.length >= 2 && source.alive !== undefined
-                && source.hp !== undefined && source.maxHp !== undefined
-                && source.movable !== undefined
-            if (runtimeReady) {
-                output.push(source)
-                continue
+        var overlayList = root.overlayUnits
+        var overlayById = ({})
+        if (overlayList && typeof overlayList.length === "number") {
+            for (var overlayIndex = 0; overlayIndex < overlayList.length; ++overlayIndex) {
+                var overlay = overlayList[overlayIndex]
+                if (overlay && overlay.id) overlayById[String(overlay.id)] = overlay
             }
-            var unit = ({})
-            for (var key in source) unit[key] = source[key]
-            unit.position = position
-            unit.alive = source.alive !== false
-            unit.hp = source.hp === undefined ? Number(source.maxHp || 100) : source.hp
-            unit.maxHp = source.maxHp === undefined ? 100 : source.maxHp
-            unit.movable = source.movable === undefined
-                ? source.kind !== "commandpost" && source.kind !== "groundtarget"
-                : source.movable
-            output.push(unit)
+        }
+        var output = []
+        if (sourceList && typeof sourceList.length === "number") {
+            for (var i = 0; i < sourceList.length; ++i) {
+                var source = sourceList[i] || ({})
+                // The overlay is the stable, server-authorized snapshot for a
+                // demo target. Do not let a newer partial contact move it.
+                if (source.id && overlayById[String(source.id)]) continue
+                var position = root.unitPosition(source)
+                if (!position) continue
+                var sourcePosition = source.position
+                var runtimeReady = sourcePosition && typeof sourcePosition.length === "number"
+                    && sourcePosition.length >= 2 && source.alive !== undefined
+                    && source.hp !== undefined && source.maxHp !== undefined
+                    && source.movable !== undefined
+                if (runtimeReady) {
+                    output.push(source)
+                    continue
+                }
+                var unit = ({})
+                for (var key in source) unit[key] = source[key]
+                unit.position = position
+                unit.alive = source.alive !== false
+                unit.hp = source.hp === undefined ? Number(source.maxHp || 100) : source.hp
+                unit.maxHp = source.maxHp === undefined ? 100 : source.maxHp
+                unit.movable = source.movable === undefined
+                    ? source.kind !== "commandpost" && source.kind !== "groundtarget"
+                    : source.movable
+                output.push(unit)
+            }
+        }
+        if (overlayList && typeof overlayList.length === "number") {
+            for (var overlayOutputIndex = 0; overlayOutputIndex < overlayList.length; ++overlayOutputIndex) {
+                var overlaySource = overlayList[overlayOutputIndex] || ({})
+                var overlayPosition = root.unitPosition(overlaySource)
+                if (!overlayPosition) continue
+                var overlayUnit = ({})
+                for (var overlayKey in overlaySource) overlayUnit[overlayKey] = overlaySource[overlayKey]
+                overlayUnit.position = overlayPosition
+                overlayUnit.alive = overlaySource.alive !== false
+                overlayUnit.hp = overlaySource.hp === undefined
+                    ? Number(overlaySource.maxHp || 100) : overlaySource.hp
+                overlayUnit.maxHp = overlaySource.maxHp === undefined ? 100 : overlaySource.maxHp
+                overlayUnit.movable = overlaySource.movable === true
+                output.push(overlayUnit)
+            }
         }
         return output
     }
@@ -384,6 +415,7 @@ Item {
     onActionTargetIdChanged: refresh()
     onDiscoveryUnitsChanged: refresh()
     onDetectedEnemyIdsChanged: refresh()
+    onOverlayUnitsChanged: root.refreshUnitSource()
     onSimTimeChanged: refresh()
     onZoomChanged: {
         root.updateMapTileZoom()
@@ -503,6 +535,9 @@ Item {
     function isVisible(u) {
         if (!u) return false
         if (root.visibleUnitIds !== null && root.visibleUnitIds.indexOf(u.id) < 0) return false
+        // Demo targets are server-authorized snapshots, not live enemy
+        // contacts. Their visibility must not depend on sensor freshness.
+        if (u.demoTarget === true) return true
         if (showAllSides) return true
         if (u.side === sideFilter) return true
         if (root.detectedEnemyIds && root.detectedEnemyIds.length > 0) {
@@ -522,8 +557,14 @@ Item {
         root.followSuspended = false
         if (!unitId) return false
         var unit = null
+        for (var canvasIndex = 0; canvasIndex < innerCanvas.units.length; ++canvasIndex) {
+            if (innerCanvas.units[canvasIndex] && innerCanvas.units[canvasIndex].id === unitId) {
+                unit = innerCanvas.units[canvasIndex]
+                break
+            }
+        }
         var source = root.unitListSource()
-        if (source && typeof source.length === "number") {
+        if (!unit && source && typeof source.length === "number") {
             for (var i = 0; i < source.length; ++i) {
                 if (source[i] && source[i].id === unitId) {
                     unit = source[i]
@@ -1374,7 +1415,7 @@ Item {
                         ctx.beginPath(); ctx.arc(p.x, p.y, 14, 0, Math.PI*2); ctx.stroke()
                     }
 
-                    if (!dead && root.actionTargetId === u.id) {
+                    if (root.actionTargetId === u.id) {
                         ctx.save()
                         ctx.fillStyle = "rgba(255,113,128,0.16)"
                         ctx.beginPath(); ctx.arc(p.x, p.y, 24, 0, Math.PI*2); ctx.fill()

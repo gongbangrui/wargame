@@ -59,6 +59,24 @@ bool validTargetPatch(const QJsonObject& patch) {
     return !patch.isEmpty();
 }
 
+QString normalizedOutcome(const QJsonObject& payload, bool* valid) {
+    const QString value = payload.value(QStringLiteral("outcome")).toString();
+    if (value.isEmpty()) {
+        if (valid) *valid = true;
+        return QStringLiteral("destroyed");
+    }
+    const bool accepted = value == QLatin1String("destroyed")
+        || value == QLatin1String("notDestroyed");
+    if (valid) *valid = accepted;
+    return accepted ? value : QString{};
+}
+
+bool validDamageState(const QString& value) {
+    return value.isEmpty() || value == QLatin1String("destroyed")
+        || value == QLatin1String("damaged") || value == QLatin1String("intact")
+        || value == QLatin1String("unknown");
+}
+
 QJsonObject mergeObject(QJsonObject base, const QJsonObject& patch) {
     for (auto it = patch.constBegin(); it != patch.constEnd(); ++it) {
         base.insert(it.key(), it.value());
@@ -203,6 +221,8 @@ void VmfDemoWorkflow::clearTaskState() {
         {QStringLiteral("target"), QJsonObject{}},
         {QStringLiteral("route"), QJsonObject{}},
         {QStringLiteral("guidance"), QJsonObject{}},
+        {QStringLiteral("strikeAttempt"), 0},
+        {QStringLiteral("lastOutcome"), QString{}},
         {QStringLiteral("effect"), QJsonObject{}}};
     m_reports = {};
 }
@@ -372,6 +392,8 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyAction(
         const QJsonObject target = m_task.value(QStringLiteral("target")).toObject();
         const bool positionTarget = target.value(QStringLiteral("targetKind")).toString()
             == QLatin1String("position");
+        m_task.insert(QStringLiteral("strikeAttempt"),
+                      m_task.value(QStringLiteral("strikeAttempt")).toInt() + 1);
         m_task.insert(QStringLiteral("effect"), QJsonObject{
             {QStringLiteral("mode"), QStringLiteral("simulation")},
             {QStringLiteral("outcome"), positionTarget ? QStringLiteral("effect-applied")
@@ -389,9 +411,34 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyAction(
         effect.insert(QStringLiteral("assessed"), true);
         m_task.insert(QStringLiteral("effect"), effect);
     } else if (spec.action == QLatin1String("confirmTargetDestroyed")) {
+        bool outcomeValid = false;
+        const QString outcome = normalizedOutcome(payload, &outcomeValid);
+        if (!outcomeValid) {
+            return failure(QStringLiteral("INVALID_DESTRUCTION_OUTCOME"),
+                           QStringLiteral("目标效果必须选择已摧毁或未摧毁"));
+        }
+        const QString damageState = payload.value(QStringLiteral("damageState")).toString(
+            outcome == QLatin1String("destroyed") ? QStringLiteral("destroyed")
+                                                    : QStringLiteral("unknown"));
+        if (!validDamageState(damageState)) {
+            return failure(QStringLiteral("INVALID_DAMAGE_STATE"),
+                           QStringLiteral("目标毁伤状态无效"));
+        }
         QJsonObject effect = m_task.value(QStringLiteral("effect")).toObject();
         effect.insert(QStringLiteral("confirmed"), true);
+        effect.insert(QStringLiteral("outcome"), outcome);
+        effect.insert(QStringLiteral("destroyed"), outcome == QLatin1String("destroyed"));
+        effect.insert(QStringLiteral("alive"), outcome != QLatin1String("destroyed"));
+        effect.insert(QStringLiteral("damaged"), damageState == QLatin1String("damaged"));
+        effect.insert(QStringLiteral("damageState"), damageState);
+        if (payload.contains(QStringLiteral("confidence")))
+            effect.insert(QStringLiteral("confidence"), payload.value(QStringLiteral("confidence")));
+        if (payload.contains(QStringLiteral("evidence")))
+            effect.insert(QStringLiteral("evidence"), payload.value(QStringLiteral("evidence")));
+        if (payload.contains(QStringLiteral("notes")))
+            effect.insert(QStringLiteral("notes"), payload.value(QStringLiteral("notes")));
         m_task.insert(QStringLiteral("effect"), effect);
+        m_task.insert(QStringLiteral("lastOutcome"), outcome);
     } else if (spec.action == QLatin1String("withdraw")) {
         QJsonObject route = m_task.value(QStringLiteral("route")).toObject();
         route.insert(QStringLiteral("return"), true);
@@ -403,7 +450,12 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyAction(
                        {QStringLiteral("generation"), static_cast<qint64>(m_generation)},
                        {QStringLiteral("taskId"), taskId},
                        {QStringLiteral("action"), spec.action},
+                       {QStringLiteral("phase"), phaseIds().value(spec.phase)},
+                       {QStringLiteral("phaseTitle"), phaseTitles().value(spec.phase)},
+                       {QStringLiteral("substep"), spec.substep},
                        {QStringLiteral("seatType"), actorSeatType},
+                       {QStringLiteral("strikeAttempt"),
+                        m_task.value(QStringLiteral("strikeAttempt")).toInt()},
                        {QStringLiteral("createdAt"), now},
                        {QStringLiteral("details"), payload}};
     if (trace.contains(QStringLiteral("messageId"))) {
@@ -442,7 +494,17 @@ VmfDemoWorkflow::Result VmfDemoWorkflow::applyAction(
         m_actionHistory.removeFirst();
         m_seenActionIds.remove(expiredId);
     }
-    ++m_actionIndex;
+    if (spec.action == QLatin1String("confirmTargetDestroyed")
+        && payload.value(QStringLiteral("outcome")).toString()
+               == QLatin1String("notDestroyed")) {
+        // Reopen the ground-guidance phase while keeping the task identity,
+        // route and report history. The next simulated attack increments the
+        // attempt.
+        m_actionIndex = 5; // identityHello, first action in ground-guidance
+        rebuildTargetStateForCurrentPhase();
+    } else {
+        ++m_actionIndex;
+    }
     ++m_revision;
     m_status = currentAction() ? QStringLiteral("active") : QStringLiteral("completed");
     applyScriptForCurrentPhase();

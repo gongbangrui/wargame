@@ -193,6 +193,13 @@ Item {
             if (unit.kind === "groundtarget" && unit.id && ids.indexOf(unit.id) < 0)
                 ids.push(unit.id)
         }
+        if (root.demoVmf) {
+            var demoTask = root.controller.demoState
+                ? (root.controller.demoState.task || ({})) : ({})
+            var demoTarget = demoTask.target || ({})
+            var demoTargetId = String(demoTarget.targetId || demoTarget.id || "")
+            if (demoTargetId && ids.indexOf(demoTargetId) < 0) ids.push(demoTargetId)
+        }
         return ids
     }
 
@@ -773,9 +780,12 @@ Item {
     }
 
     function seatLabel(seat) {
-        var labels = { commander: "指挥官", attack: "攻击机", recon: "侦察机", ground: "地面单位", jammer: "干扰机" }
-        var slot = seat.slot && seat.seatType !== "commander" ? " #" + seat.slot : ""
-        return (seat.side === "red" ? "红方 · " : "蓝方 · ") + (labels[seat.seatType] || seat.seatId) + slot
+        var value = seat || ({})
+        var labels = { commander: "指挥席", attack: "攻击席", recon: "侦察席", ground: "地面引导席", jammer: "干扰席" }
+        var side = value.side === "red" ? "红方" : value.side === "blue" ? "蓝方" : ""
+        var type = labels[value.seatType] || "战位"
+        var slot = value.slot && value.seatType !== "commander" ? " #" + value.slot : ""
+        return (side ? side + " · " : "") + type + slot
     }
 
     function recipientSeats() {
@@ -1066,7 +1076,7 @@ Item {
             if (!root.notifyIntelShare) return
             var source = root.seatById(share.senderSeatId)
             var target = root.controller.unitAt(share.targetId)
-            var sourceLabel = source ? root.seatLabel(source) : (share.senderSeatId || "友方战位")
+            var sourceLabel = source ? root.seatLabel(source) : "友方战位"
             var targetLabel = target && target.callsign ? target.callsign
                 : (share.targetId || share.intelId || "情报")
             root.deploymentNotice = sourceLabel + "共享情报 · " + targetLabel
@@ -1248,8 +1258,9 @@ Item {
                 }
                 Text {
                     visible: root.controller.isObserver || !root.compactLayout
-                    text: root.controller.isObserver ? "只读观察" : "战位 " + root.controller.currentSeatId
-                    color: root.dim; font.pixelSize: 10; font.family: "Consolas"
+                    text: root.controller.isObserver ? "只读观察" : "战位 " + root.seatLabel(root.seatById(root.controller.currentSeatId))
+                    color: root.dim; font.pixelSize: 10
+                    Layout.fillWidth: true
                     elide: Text.ElideRight
                 }
                 Text {
@@ -1385,19 +1396,25 @@ Item {
             Item {
                     GridLayout { id: battleLayout; anchors.fill: parent; columns: root.compactLayout ? 1 : 2; columnSpacing: 12; rowSpacing: 12
                     Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: root.compactLayout ? 0 : 420; Layout.preferredWidth: root.compactLayout ? -1 : Math.max(420, battleLayout.width - 368); Layout.minimumHeight: root.compactLayout ? 250 : 0; Layout.preferredHeight: root.compactLayout ? battleLayout.height : -1; color: root.panel; border.color: root.line; radius: 6
-                            MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.onlineMapVisibleUnitIds(); detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId; mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); intelRecords: root.controller.isObserver ? [] : root.controller.onlineIntelRecords; showIntelLive: root.showIntelLive; showIntelStale: root.showIntelStale; showIntelManual: root.showIntelManual; showIntelUncertainty: root.showIntelUncertainty; selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId; routes: root.demoRoutes()
+                            MapCanvas { id: onlineCanvas; anchors.fill: parent; zoom: 0.05; controller: root.controller; editor: root.editor; sideFilter: root.controller.isObserver ? "" : root.controller.currentSeatSide || "red"; showAllSides: root.controller.isObserver; showRecentPaths: root.controller.isObserver; visibleUnitIds: root.onlineMapVisibleUnitIds(); overlayUnits: root.demoVmf && demoWorkspace && root.controller.demoState ? demoWorkspace.targetOverlayUnits() : []; detectedEnemyIds: root.controller.isObserver ? [] : root.controller.units.filter(function(unit){ return unit.side !== root.controller.currentSeatSide }).map(function(unit){ return unit.id }); allowRightClickActions: !root.controller.isObserver; showCommRange: !root.controller.isObserver && root.showCommunicationRange; showDetectRange: !root.controller.isObserver && root.showDetectionRange; showAttackRange: !root.controller.isObserver && root.showAttackRange; rangeUnitIds: root.controller.isObserver ? [] : root.rangeDisplayUnitIds(); showCoordinateReadout: true; simTime: root.controller.simTime; focusUnitId: root.selectedUnitId || root.deployUnitId; selectedUnitIds: root.demoVmf && demoWorkspace ? demoWorkspace.highlightedUnitIds : []; actionTargetId: commanderCommandPanel.draftTargetId || root.attackTargetId || (root.demoVmf && demoWorkspace && demoWorkspace.selectedTarget ? String(demoWorkspace.selectedTarget.targetId || demoWorkspace.selectedTarget.id || "") : ""); mapMarkers: root.controller.isObserver ? [] : root.participantMapMarkers(); intelRecords: root.controller.isObserver ? [] : root.controller.onlineIntelRecords; showIntelLive: root.showIntelLive; showIntelStale: root.showIntelStale; showIntelManual: root.showIntelManual; showIntelUncertainty: root.showIntelUncertainty; selectedMapMarkerId: root.controller.isObserver ? "" : root.selectedCommandMarkerId; routes: root.demoRoutes()
                             onClickedMap: function(point) {
                                 if (root.controller.isObserver) return
-                                if (root.demoVmf && root.controller.demoState.expectedAction === "reportTarget") {
+                                if (root.demoVmf && root.controller.demoState.expectedAction === "reportTarget"
+                                        && demoWorkspace.targetPicking) {
                                     demoWorkspace.selectPosition(point)
                                 } else if (root.canDeploy) {
                                     root.controller.deployOnlineUnit(root.deployUnitId, point)
                                     root.deploymentState = "submitting"
                                     root.deploymentNotice = "部署位置已提交，等待服务器确认"
                                     onlineCanvas.pulseActionAt(point, root.cyan)
-                                } else if (root.isCommander && root.controller.matchPhase === "running" && root.selectedUnitId) {
-                                    root.deploymentNotice = "请在右侧指挥面板选择命令并确认下达。"
-                                } else if (!root.isCommander && root.controller.matchPhase === "running" && root.selectedUnitId) {
+                                } else if (root.controller.matchPhase === "running" && root.selectedUnitId) {
+                                    var selected = root.controller.unitAt(root.selectedUnitId)
+                                    if (!selected || !selected.alive || !selected.movable) {
+                                        root.deploymentNotice = "当前选中单位不可机动"
+                                        return
+                                    }
+                                    // Commanders may maneuver a reachable subordinate;
+                                    // the server remains the authority for that check.
                                     root.controller.command("moveTo", {"unitId": root.selectedUnitId, "pos": point})
                                     onlineCanvas.pulseActionAt(point, root.cyan)
                                 }
@@ -1427,8 +1444,11 @@ Item {
                             }
                             onUnitClicked: function(unitId, button) {
                                 var unit = root.controller.unitAt(unitId)
+                                if (!unit && root.demoVmf && demoWorkspace)
+                                    unit = demoWorkspace.targetSelectionForId(unitId)
                                 if (!unit) return
                                 if (root.demoVmf && root.controller.demoState.expectedAction === "reportTarget"
+                                        && demoWorkspace.targetPicking
                                         && unit.side !== root.controller.currentSeatSide) {
                                     var selected = { targetId: unit.id, id: unit.id, targetKind: "entity",
                                         position: unit.position, targetType: unit.kind }
@@ -1472,7 +1492,8 @@ Item {
                                 if (unit) root.selectUnit(unit)
                             }
                             onIntelClicked: function(intel) {
-                                if (!root.demoVmf || root.controller.demoState.expectedAction !== "reportTarget") return
+                                if (!root.demoVmf || root.controller.demoState.expectedAction !== "reportTarget"
+                                        || !demoWorkspace.targetPicking) return
                                 demoWorkspace.selectTarget({ targetId: intel.targetId || "", intelId: intel.intelId || "",
                                     targetKind: "entity", position: intel.lastPosition || ({}),
                                     targetType: (intel.knownAttributes || ({})).kind || "unknown" })
