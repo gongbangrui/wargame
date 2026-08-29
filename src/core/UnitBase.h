@@ -167,7 +167,7 @@ public:
     QString kindStr() const { return kindName(m_kind); }
     UnitKind kind() const { return m_kind; }
     Side side() const { return m_side; }
-    bool movable() const { return commandedSpeedLimitMps(m_kind) > 0.0; }
+    bool movable() const { return m_commandedSpeedLimitMps > 0.0; }
 
     /// @brief Maximum speed accepted by an authoritative movement command.
     /// @details Direct setters remain available for snapshot/replay fixtures;
@@ -183,6 +183,32 @@ public:
         }
         return 0.0;
     }
+    /// Higher command limits used only by the curated VMF demonstration.
+    /// Ordinary rooms continue to use commandedSpeedLimitMps().
+    static constexpr double demoCommandedSpeedLimitMps(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 60.0;
+        case UnitKind::ReconUAV: return 1200.0;
+        case UnitKind::AttackUAV: return 1600.0;
+        case UnitKind::GroundScout: return 480.0;
+        case UnitKind::JammerUAV: return 1100.0;
+        case UnitKind::GroundTarget: return 0.0;
+        }
+        return 0.0;
+    }
+    /// Initial cruise speeds for the curated demonstration. Explicit speed
+    /// commands can still reduce these values after the unit is created.
+    static constexpr double demoCruiseSpeedMps(UnitKind kind) {
+        switch (kind) {
+        case UnitKind::CommandPost: return 12.0;
+        case UnitKind::ReconUAV: return 600.0;
+        case UnitKind::AttackUAV: return 800.0;
+        case UnitKind::GroundScout: return 240.0;
+        case UnitKind::JammerUAV: return 550.0;
+        case UnitKind::GroundTarget: return 0.0;
+        }
+        return 0.0;
+    }
     static constexpr double defaultSpeedMps(UnitKind kind) {
         switch (kind) {
         case UnitKind::CommandPost: return 4.0;
@@ -194,7 +220,8 @@ public:
         }
         return 0.0;
     }
-    double maxCommandedSpeed() const { return commandedSpeedLimitMps(m_kind); }
+    double maxCommandedSpeed() const { return m_commandedSpeedLimitMps; }
+    void setDemoSpeedProfile(bool enabled);
 
     static constexpr double defaultCommRangeM(UnitKind kind) {
         switch (kind) {
@@ -450,6 +477,8 @@ protected:
     double m_baseCommRange = 20000.0;
     double m_baseAttackRange = 1500.0;
     double m_baseSpeed = 50.0;
+    bool m_demoSpeedProfile = false;
+    double m_commandedSpeedLimitMps = commandedSpeedLimitMps(UnitKind::CommandPost);
     double m_baseAttackPower = 100.0;
     double m_armor = 0.0;
     double m_repairRate = 2.0;

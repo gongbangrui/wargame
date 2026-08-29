@@ -115,6 +115,24 @@ Item {
     property double mapTilePixelsPerMeterAtZoom0: 0.00000638801979818
     property int mapTileZoom: 12
     property int mapRevision: 0
+    // A secondary canvas (for example the VMF route editor) must use the
+    // exact map metadata and resolved tile root of the primary canvas.  It
+    // may still keep its own center and zoom.
+    property var mapInfoOverride: null
+    property string tileCacheDirOverride: ""
+    readonly property string resolvedMapTileCacheDir: tileMap ? tileMap.tileCacheDir : ""
+    readonly property bool mapTilesReady: tileMap ? tileMap.ready : false
+    readonly property var mapConfiguration: ({
+        widthMeters: root.mapSize.w,
+        heightMeters: root.mapSize.h,
+        originLon: root.mapOriginLon,
+        originLat: root.mapOriginLat,
+        tileMinZoom: root.mapTileMinZoom,
+        tileMaxZoom: root.mapTileMaxZoom,
+        tileZoom: root.mapTileZoom,
+        tilePixelsPerMeterAtZoom0: root.mapTilePixelsPerMeterAtZoom0,
+        mapRevision: root.mapRevision
+    })
     property var routes: []
     property var mapMarkers: []
     property var intelRecords: []
@@ -143,6 +161,7 @@ Item {
     // Coalesce the many property notifications carried by one authoritative
     // state update into one canvas paint on the next event-loop turn.
     function refresh() {
+        if (tileMap) tileMap.refresh()
         if (root.visible) repaintTimer.restart()
     }
     Timer {
@@ -329,7 +348,8 @@ Item {
     }
 
     function applyMapInfo(recenter) {
-        var info = root.controller.mapInfo
+        var info = root.mapInfoOverride
+        if (!info && root.controller) info = root.controller.mapInfo
         if (!info) return
         var revision = Number(info.mapRevision)
         var w = Number(info.widthMeters)
@@ -423,6 +443,8 @@ Item {
     }
     onCenterChanged: refresh()
     onMapSizeChanged: refresh()
+    onMapInfoOverrideChanged: root.applyMapInfo(false)
+    onTileCacheDirOverrideChanged: root.refresh()
     onScenarioUnitsChanged: root.refreshUnitSource()
     onMapMarkersChanged: refresh()
     onIntelRecordsChanged: refresh()
@@ -616,6 +638,7 @@ Item {
         minTileZoom: root.mapTileMinZoom
         maxTileZoom: root.mapTileMaxZoom
         tileZoom: root.mapTileZoom
+        tileCacheDir: root.tileCacheDirOverride
     }
     // qmllint enable unqualified
     // qmllint enable unresolved-type

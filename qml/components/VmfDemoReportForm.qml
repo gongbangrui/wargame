@@ -26,6 +26,9 @@ Item {
         "reportBattleDamage", "confirmDamageAssessment", "confirmTargetDestroyed"
     ].indexOf(action) >= 0
     readonly property bool needsOutcome: action === "confirmTargetDestroyed"
+    // Ground guidance is an operational command, not a choice of transport
+    // method.  Its report must not invent or require a guidance type.
+    readonly property bool needsContext: action !== "issueGuidance"
     readonly property bool needsFreeText: [
         "reportTarget", "reportBattleDamage", "confirmDamageAssessment",
         "confirmTargetDestroyed"
@@ -188,13 +191,13 @@ Item {
     }
 
     function valid() {
-        return root.visibleForm && contextBox.currentValue !== undefined
+        return root.visibleForm && (!root.needsContext || contextBox.currentValue !== undefined)
             && (!root.needsOutcome || String(contextBox.currentValue || "").length > 0)
     }
 
     function details() {
         var result = {}
-        result[contextKey()] = contextBox.currentValue || "submitted"
+        if (root.needsContext) result[contextKey()] = contextBox.currentValue || "submitted"
         if (root.needsConfidence) result.confidence = Number(confidenceBox.currentValue || 0.7)
         if (root.needsDamageState) {
             result.damageState = damageBox.currentValue || "unknown"
@@ -241,7 +244,8 @@ Item {
             rowSpacing: 6
 
             ColumnLayout {
-                Layout.fillWidth: true
+                visible: root.needsContext
+                Layout.fillWidth: visible
                 spacing: 3
                 Text { text: root.contextLabel(); color: root.muted; font.pixelSize: 8 }
                 ComboBox {

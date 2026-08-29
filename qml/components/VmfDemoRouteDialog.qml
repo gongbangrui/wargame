@@ -7,6 +7,7 @@ Dialog {
     id: root
 
     property var controller: null
+    property var mapCanvas: null
     property var attacker: ({})
     property var target: ({})
     property var targetOverlayUnit: ({})
@@ -22,6 +23,16 @@ Dialog {
     property color accent: "#48d6b0"
     property color warning: "#e5a54a"
     property bool compact: width < 760
+
+    // The dialog is created before the overlay has a final size.  Delay the
+    // first fit until the map can actually render, then keep one retry for
+    // platforms that settle Popup geometry a frame later.
+    Timer {
+        id: routeFitTimer
+        interval: 40
+        repeat: false
+        onTriggered: root.fitWhenReady()
+    }
 
     modal: true
     title: "攻击航路编辑"
@@ -51,6 +62,8 @@ Dialog {
         var a = root.positionOf(root.attacker)
         var t = root.positionOf(root.target)
         var targetId = String(root.target.targetId || root.target.id || "")
+        if (!targetId || !isFinite(a.x) || !isFinite(a.y) || !isFinite(t.x) || !isFinite(t.y))
+            return false
         root.targetOverlayUnit = targetId && isFinite(t.x) && isFinite(t.y) ? {
             id: targetId,
             targetId: targetId,
@@ -71,17 +84,31 @@ Dialog {
             { x: t.x, y: t.y, time: 60, locked: true, kind: "target" }
         ]
         root.selectedIndex = -1
-        root.fitRoute()
         open()
-        Qt.callLater(function() {
-            root.fitRoute()
-            if (routeMap) routeMap.refresh()
-        })
+        root.scheduleFit()
+        return true
     }
 
     function editablePoints() {
         var result = []
         for (var i = 0; i < root.points.length; ++i) result.push(root.points[i])
+        return result
+    }
+
+    function normalizedPoints(source) {
+        var result = []
+        var previousTime = 0
+        for (var i = 0; i < source.length; ++i) {
+            var point = source[i] || ({})
+            var requestedTime = Number(point.time)
+            var time = i === 0 ? 0 : Math.max(i * 30, previousTime + 30,
+                                                isFinite(requestedTime) ? requestedTime : 0)
+            var copy = {}
+            for (var key in point) copy[key] = point[key]
+            copy.time = time
+            result.push(copy)
+            previousTime = time
+        }
         return result
     }
 
@@ -106,6 +133,26 @@ Dialog {
         root.mapCenter = ({x: (minX + maxX) / 2, y: (minY + maxY) / 2})
     }
 
+    function fitWhenReady() {
+        if (!root.visible || !routeMap || routeMap.width < 80 || routeMap.height < 80) {
+            if (root.visible) routeFitTimer.restart()
+            return
+        }
+        root.fitRoute()
+        routeMap.refresh()
+    }
+
+    function scheduleFit() {
+        routeFitTimer.restart()
+    }
+
+    onVisibleChanged: {
+        if (visible) root.scheduleFit()
+        else routeFitTimer.stop()
+    }
+    onWidthChanged: if (visible) root.scheduleFit()
+    onHeightChanged: if (visible) root.scheduleFit()
+
     function addPoint(point) {
         if (!point || root.points.length < 2) return
         var copy = root.editablePoints()
@@ -113,7 +160,7 @@ Dialog {
         copy.push({ x: Number(point.x), y: Number(point.y), time: copy.length * 30,
                     locked: false, kind: "waypoint" })
         copy.push(end)
-        root.points = copy
+        root.points = root.normalizedPoints(copy)
         root.selectedIndex = copy.length - 2
     }
 
@@ -123,7 +170,7 @@ Dialog {
         copy[index] = { x: Number(point.x), y: Number(point.y),
                         time: Number(copy[index].time || index * 30),
                         locked: false, kind: "waypoint" }
-        root.points = copy
+        root.points = root.normalizedPoints(copy)
         root.selectedIndex = index
     }
 
@@ -131,7 +178,7 @@ Dialog {
         if (index <= 0 || index >= root.points.length - 1) return
         var copy = root.editablePoints()
         copy.splice(index, 1)
-        root.points = copy
+        root.points = root.normalizedPoints(copy)
         root.selectedIndex = Math.min(index, copy.length - 2)
     }
 
@@ -296,7 +343,7 @@ Dialog {
                         onClicked: {
                             var a = root.points[0]
                             var b = root.points[root.points.length - 1]
-                            root.points = [a, b]
+                            root.points = root.normalizedPoints([a, b])
                             root.selectedIndex = -1
                         }
                     }
@@ -317,6 +364,9 @@ Dialog {
                     anchors.fill: parent
                     anchors.margins: 2
                     controller: root.controller
+                    mapInfoOverride: root.mapCanvas ? root.mapCanvas.mapConfiguration : null
+                    tileCacheDirOverride: root.mapCanvas
+                        ? root.mapCanvas.resolvedMapTileCacheDir : ""
                     sideFilter: "red"
                     showAllSides: true
                     visibleUnitIds: null

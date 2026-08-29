@@ -106,6 +106,8 @@ public:
     bool replayRecordingEnabled() const { return m_replayRecordingEnabled; }
     void setSpeedMul(double m);
     double speedMul() const { return m_clock->speedMul(); }
+    /// Applies the demonstration-only unit command speed profile.
+    void setDemoSpeedProfile(bool enabled);
     Q_INVOKABLE void stepOnce(double simSeconds = 1.0);
 
     double simTime() const { return m_clock->simTime(); }
@@ -292,6 +294,7 @@ private:
     QString m_vmfProfileError;
     std::map<QString, std::unique_ptr<UnitBase>> m_units;
     Scenario m_scenario;
+    bool m_demoSpeedProfile = false;
     /// Index into m_scenario.units by unit id — avoids O(N) std::find_if on
     /// every schedule update / lookup.
     std::unordered_map<QString, size_t> m_scenarioIndex;

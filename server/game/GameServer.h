@@ -311,6 +311,7 @@ private:
     bool restoreRoomStateBackup(const RoomStateBackup& backup, QString* error = nullptr);
     bool resetAuthoritativeRuntime(const QString& operationId, QString* error = nullptr);
     bool resetRoomIfEmpty(QString* error = nullptr);
+    void resetDemoIfOnlyBlueUnits();
     void processRoomOperation(const QJsonObject& operation);
     void acknowledgeRoomOperation(const QString& operationId, const QString& state,
                                   quint64 revision, const QString& code = QString());

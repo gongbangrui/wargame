@@ -100,6 +100,7 @@ void MapTileRenderer::setTileCacheDir(const QString& d) {
     }
     update();
     emit tileCacheDirChanged();
+    emit readyChanged();
 }
 
 void MapTileRenderer::updateOrigin() {

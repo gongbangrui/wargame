@@ -173,10 +173,11 @@ QPair<double, double> advanceTowardLiveTarget(const gbr::AiSeatState& seat,
 double commandedSpeedLimitFor(const gbr::AiSeatState& seat) {
     const double intrinsic = gbr::UnitBase::commandedSpeedLimitMps(
         gbr::kindFromName(seat.kind));
-    if (!std::isfinite(seat.maxCommandedSpeed) || seat.maxCommandedSpeed <= 0.0) {
-        return intrinsic;
+    if (std::isfinite(seat.maxCommandedSpeed) && seat.maxCommandedSpeed > 0.0) {
+        // The server projection already carries the profile-aware limit.
+        return seat.maxCommandedSpeed;
     }
-    return std::min(intrinsic, seat.maxCommandedSpeed);
+    return intrinsic;
 }
 
 double commandedCruiseSpeedFor(const gbr::AiSeatState& seat, double limit) {

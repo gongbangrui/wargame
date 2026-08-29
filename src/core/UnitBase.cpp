@@ -39,6 +39,7 @@ bool finiteNonNegative(double value) {
 UnitBase::UnitBase(const QString& id, UnitKind kind, Side side, MessageBus* bus,
                      QObject* parent, UnitOwner owner)
     : QObject(parent), m_id(id), m_kind(kind), m_side(side), m_owner(owner), m_bus(bus) {
+    m_commandedSpeedLimitMps = commandedSpeedLimitMps(kind);
     m_params.commRange = defaultCommRangeM(kind);
     m_params.speed = defaultSpeedMps(kind);
     m_params.collisionRadius = defaultCollisionRadiusM(kind);
@@ -52,6 +53,16 @@ UnitBase::UnitBase(const QString& id, UnitKind kind, Side side, MessageBus* bus,
         m_bus->subscribe(m_id, [this](const Message& m){ this->handleMessage(m); });
         m_bus->updateUnitPosition(m_id, m_params.pos.toPointF(), m_params.commRange, sideName(m_side));
     }
+}
+
+void UnitBase::setDemoSpeedProfile(bool enabled) {
+    const double limit = enabled ? demoCommandedSpeedLimitMps(m_kind)
+                                 : commandedSpeedLimitMps(m_kind);
+    if (m_commandedSpeedLimitMps == limit && m_demoSpeedProfile == enabled) return;
+    m_demoSpeedProfile = enabled;
+    m_commandedSpeedLimitMps = limit;
+    if (enabled) m_baseSpeed = std::max(m_baseSpeed, demoCruiseSpeedMps(m_kind));
+    recomputeEffectiveParameters();
 }
 
 UnitBase::~UnitBase() {
@@ -78,6 +89,7 @@ void UnitBase::setParams(const Params& p) {
     m_baseCommRange = p.commRange;
     m_baseAttackRange = p.attackRange;
     m_baseSpeed = p.speed;
+    if (m_demoSpeedProfile) m_baseSpeed = std::max(m_baseSpeed, demoCruiseSpeedMps(m_kind));
     m_baseAttackPower = p.attackPower;
     m_armor = std::clamp(p.armor, 0.0, 0.9);
     m_repairRate = std::max(0.0, p.repairRate);

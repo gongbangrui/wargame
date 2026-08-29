@@ -23,6 +23,7 @@ class MapTileRenderer : public QQuickPaintedItem {
     Q_PROPERTY(int maxTileZoom READ maxTileZoom WRITE setMaxTileZoom NOTIFY tileZoomRangeChanged)
     Q_PROPERTY(int tileZoom READ tileZoom WRITE setTileZoom NOTIFY tileZoomChanged)
     Q_PROPERTY(QString tileCacheDir READ tileCacheDir WRITE setTileCacheDir NOTIFY tileCacheDirChanged)
+    Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
 public:
     explicit MapTileRenderer(QQuickItem* parent = nullptr);
 
@@ -49,9 +50,11 @@ public:
     QString tileCacheDir() const;
     void setTileCacheDir(const QString& d);
     void setCacheDir(const QString& d) { setTileCacheDir(d); }
+    bool ready() const { return !tileCacheDir().isEmpty(); }
 
     Q_INVOKABLE QPointF simToScreen(double sx, double sy) const;
     Q_INVOKABLE QPointF screenToSim(double px, double py) const;
+    Q_INVOKABLE void refresh() { update(); }
 
     void paint(QPainter* painter) override;
 
@@ -63,6 +66,7 @@ signals:
     void tileZoomRangeChanged();
     void tileZoomChanged();
     void tileCacheDirChanged();
+    void readyChanged();
 
 private:
     QImage loadTile(int z, int x, int y, bool& found) const;

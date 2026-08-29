@@ -42,7 +42,8 @@ bool finiteNonNegative(double value) {
     return std::isfinite(value) && value >= 0.0;
 }
 
-QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map) {
+QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map,
+                             bool demoSpeedProfile = false) {
     if (u.id.trimmed().isEmpty()) return QStringLiteral("单元ID不能为空");
     if (u.id.size() > kMaxUnitIdLength || u.callsign.size() > kMaxCallsignLength) {
         return QStringLiteral("单元 ID 或名称过长: %1").arg(u.id.left(kMaxUnitIdLength));
@@ -60,7 +61,9 @@ QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map) {
         && std::isfinite(u.attackRange) && u.attackRange >= 0.0
         && std::isfinite(u.commRange) && u.commRange >= 0.0
         && std::isfinite(u.speed) && u.speed >= 0.0
-        && u.speed <= UnitBase::commandedSpeedLimitMps(kindFromName(u.kind))
+        && u.speed <= (demoSpeedProfile
+                           ? UnitBase::demoCommandedSpeedLimitMps(kindFromName(u.kind))
+                           : UnitBase::commandedSpeedLimitMps(kindFromName(u.kind)))
         && std::isfinite(u.collisionRadius) && u.collisionRadius > 0.0
         && u.collisionRadius <= 1000.0
         && std::isfinite(u.collisionHalfHeight) && u.collisionHalfHeight > 0.0
@@ -72,9 +75,13 @@ QString validateScenarioUnit(const ScenarioUnit& u, const ScenarioMap& map) {
         && std::isfinite(u.subsystemRepairRate) && u.subsystemRepairRate >= 0.0;
     if (!validPosition || !validParams) {
         if (!std::isfinite(u.speed) || u.speed < 0.0
-            || u.speed > UnitBase::commandedSpeedLimitMps(kindFromName(u.kind))) {
+            || u.speed > (demoSpeedProfile
+                              ? UnitBase::demoCommandedSpeedLimitMps(kindFromName(u.kind))
+                              : UnitBase::commandedSpeedLimitMps(kindFromName(u.kind)))) {
             return QStringLiteral("单元速度超过 %1 的类型上限: %2")
-                .arg(UnitBase::commandedSpeedLimitMps(kindFromName(u.kind)), 0, 'f', 0)
+                .arg(demoSpeedProfile
+                         ? UnitBase::demoCommandedSpeedLimitMps(kindFromName(u.kind))
+                         : UnitBase::commandedSpeedLimitMps(kindFromName(u.kind)), 0, 'f', 0)
                 .arg(u.id);
         }
         return QStringLiteral("单元参数无效: %1").arg(u.id);
@@ -569,6 +576,15 @@ bool SimulationEngine::setRemoteScenario(const Scenario& s) {
     return applyScenario(s, true);
 }
 
+void SimulationEngine::setDemoSpeedProfile(bool enabled) {
+    if (m_demoSpeedProfile == enabled) return;
+    m_demoSpeedProfile = enabled;
+    for (auto& [id, unit] : m_units) {
+        Q_UNUSED(id);
+        unit->setDemoSpeedProfile(enabled);
+    }
+}
+
 bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
     if (s.units.empty() && !allowEmpty) {
         m_lastError = QStringLiteral("场景单元为空，未应用");
@@ -615,7 +631,8 @@ bool SimulationEngine::applyScenario(const Scenario& s, bool allowEmpty) {
     QSet<QString> ids;
     QSet<QString> vmfUrns;
     for (const auto& unit : normalized.units) {
-        const QString validationError = validateScenarioUnit(unit, normalized.map);
+        const QString validationError = validateScenarioUnit(unit, normalized.map,
+                                                              m_demoSpeedProfile);
         if (!validationError.isEmpty()) {
             m_lastError = validationError + QStringLiteral("，场景未应用");
             emit errorOccurred(m_lastError);
@@ -809,10 +826,11 @@ void SimulationEngine::createSingleUnit(const ScenarioUnit& u) {
     const bool isCp = (unit->kind() == UnitKind::CommandPost);
     unit->setCallsign(u.callsign);
     unit->setParams(p);
+    unit->setDemoSpeedProfile(m_demoSpeedProfile);
     if (unit->movable()) {
         unit->configureFuel(std::max(1.0, u.fuelCapacitySec),
                             std::clamp(u.initialFuelSec, 0.0, u.fuelCapacitySec),
-                            std::max(1.0, u.speed));
+                            std::max(1.0, unit->speed()));
     }
     if (auto* attacker = qobject_cast<AttackUAV*>(unit.get())) attacker->configureWeapon(u);
     unit->setHp(p.maxHp);
@@ -2750,7 +2768,8 @@ void SimulationEngine::cmdSetRulesOfEngagement(const QVariantMap& args) {
 
 void SimulationEngine::addOrUpdateUnit(const ScenarioUnit& su) {
     const ScenarioUnit normalized = normalizeScenarioUnitDefaults(su);
-    const QString validationError = validateScenarioUnit(normalized, m_scenario.map);
+    const QString validationError = validateScenarioUnit(normalized, m_scenario.map,
+                                                         m_demoSpeedProfile);
     if (!validationError.isEmpty()) {
         m_lastError = validationError;
         emit errorOccurred(m_lastError);

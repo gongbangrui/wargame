@@ -630,7 +630,8 @@ bool migrateLegacyInitialRoster(const Scenario& source, const QJsonObject& legac
     return true;
 }
 
-QString validateNetworkScenario(const Scenario& scenario, bool requireCompleteRoster = true) {
+QString validateNetworkScenario(const Scenario& scenario, bool requireCompleteRoster = true,
+                                bool demoSpeedProfile = false) {
     if (scenario.units.empty()) return QStringLiteral("场景至少需要一个单元");
     if (static_cast<qsizetype>(scenario.units.size()) > kMaxScenarioUnits) {
         return QStringLiteral("场景单元数量不能超过 %1").arg(kMaxScenarioUnits);
@@ -673,7 +674,9 @@ QString validateNetworkScenario(const Scenario& scenario, bool requireCompleteRo
             || unit.subsystemRepairRate < 0.0) {
             return QStringLiteral("单元参数无效: %1").arg(unit.id);
         }
-        const double maximumSpeed = UnitBase::commandedSpeedLimitMps(kindFromName(unit.kind));
+        const double maximumSpeed = demoSpeedProfile
+            ? UnitBase::demoCommandedSpeedLimitMps(kindFromName(unit.kind))
+            : UnitBase::commandedSpeedLimitMps(kindFromName(unit.kind));
         if (unit.speed > maximumSpeed) {
             return QStringLiteral("单元速度超过 %1 的类型上限: %2")
                 .arg(maximumSpeed, 0, 'f', 0).arg(unit.id);
@@ -953,6 +956,21 @@ GameServer::GameServer(QObject* parent)
                     ? QStringLiteral("red")
                     : winner.startsWith(QStringLiteral("蓝")) ? QStringLiteral("blue")
                                                                : QStringLiteral("draw");
+                if (isDemoProfile(m_protocolProfile)) {
+                    m_authoritativeRoom.finish(result);
+                    m_phase = QStringLiteral("finished");
+                    m_engine.setRunning(false);
+                    cancelAiPlanRequest();
+                    broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("simulationEnded")},
+                                               {QStringLiteral("winner"), winner},
+                                               {QStringLiteral("loser"), loser},
+                                               {QStringLiteral("message"), loser.isEmpty()
+                                                    ? winner
+                                                    : QStringLiteral("%1指挥所已被摧毁，%2获胜").arg(loser, winner)}});
+                    broadcastSnapshots(true);
+                    QTimer::singleShot(0, this, [this]() { resetDemoIfOnlyBlueUnits(); });
+                    return;
+                }
                 m_authoritativeRoom.finish(result);
                 m_phase = QStringLiteral("finished");
                 m_engine.setRunning(false);
@@ -1028,6 +1046,12 @@ GameServer::GameServer(QObject* parent)
                     broadcastDemoState();
                     broadcastSnapshots(true);
                     persistRoomState();
+                }
+                if (isDemoProfile(m_protocolProfile)
+                    && (m_phase == QLatin1String("running")
+                        || m_phase == QLatin1String("paused")
+                        || m_phase == QLatin1String("finished"))) {
+                    resetDemoIfOnlyBlueUnits();
                 }
                 if (m_phase != QLatin1String("running") || !m_engine.running()) return;
                 runStrictVmfAutomation();
@@ -2296,7 +2320,7 @@ void GameServer::processKickRequests(const QJsonArray& requests) {
             AuthoritativeRoom::Result departure;
             QString persistenceError;
             const bool vmfAutomationRequired =
-                isSingleSideVmfProfile(m_protocolProfile)
+                m_protocolProfile == QLatin1String("vmf-guided-strike-v1")
                 && (m_phase == QLatin1String("running")
                     || m_phase == QLatin1String("paused"));
             if (!session.observer && (anotherParticipant || vmfAutomationRequired)) {
@@ -2391,6 +2415,7 @@ void GameServer::processKickRequests(const QJsonArray& requests) {
                     if (it->authenticated && it->roomId == m_roomId) sendSeatDirectory(it.key());
                 }
                 broadcastSnapshots(true);
+                resetDemoIfOnlyBlueUnits();
             } else {
                 audit(QStringLiteral("persistence"),
                       QJsonObject{{QStringLiteral("event"), QStringLiteral("kickRollback")},
@@ -2533,7 +2558,7 @@ void GameServer::removeClient(QWebSocket* socket) {
         }
     }
     const bool vmfAutomationRequired =
-        isSingleSideVmfProfile(m_protocolProfile)
+        m_protocolProfile == QLatin1String("vmf-guided-strike-v1")
         && (m_phase == QLatin1String("running") || m_phase == QLatin1String("paused"));
     if (lastParticipant && !vmfAutomationRequired) {
         QString resetError;
@@ -2598,6 +2623,7 @@ void GameServer::removeClient(QWebSocket* socket) {
         for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
             if (it->authenticated && it->roomId == m_roomId) sendSeatDirectory(it.key());
         }
+        if (committed) resetDemoIfOnlyBlueUnits();
     }
     ++m_totalDisconnects;
     audit(QStringLiteral("connection"), QJsonObject{{QStringLiteral("event"), QStringLiteral("closed")},
@@ -6824,13 +6850,15 @@ bool GameServer::applyInitialScenarioState(const Scenario& initialScenario,
         if (error) *error = QStringLiteral("初始场景版本无效");
         return false;
     }
-    const QString initialValidation = validateNetworkScenario(initialScenario);
+    const QString initialValidation = validateNetworkScenario(
+        initialScenario, true, isDemoProfile(m_protocolProfile));
     if (!initialValidation.isEmpty()) {
         if (error) *error = initialValidation;
         return false;
     }
     if (!runtimeScenario.units.empty()) {
-        const QString runtimeValidation = validateNetworkScenario(runtimeScenario, false);
+        const QString runtimeValidation = validateNetworkScenario(
+            runtimeScenario, false, isDemoProfile(m_protocolProfile));
         if (!runtimeValidation.isEmpty()) {
             if (error) *error = runtimeValidation;
             return false;
@@ -6850,6 +6878,7 @@ bool GameServer::applyInitialScenarioState(const Scenario& initialScenario,
         if (error) *error = catalogError;
         return false;
     }
+    m_engine.setDemoSpeedProfile(isDemoProfile(m_protocolProfile));
     const bool applied = runtimeScenario.units.empty()
         ? m_engine.setRemoteScenario(runtimeScenario) : m_engine.setScenario(runtimeScenario);
     if (!applied) {
@@ -6880,7 +6909,8 @@ bool GameServer::replaceInitialScenario(const Scenario& scenario, QString* error
         if (error) *error = QStringLiteral("房间已有战位占用，请先清空战位后再编辑初始阵容");
         return false;
     }
-    const QString validationError = validateNetworkScenario(scenario);
+    const QString validationError = validateNetworkScenario(
+        scenario, true, isDemoProfile(m_protocolProfile));
     if (!validationError.isEmpty()) {
         if (error) *error = validationError;
         return false;
@@ -7144,12 +7174,16 @@ bool GameServer::restoreRoomState(QString* error) {
     const bool emptyPreparingRuntime = checkpoint.phase == QLatin1String("preparing")
         && checkpoint.scenario.units.empty() && checkpoint.runtimeUnits.isEmpty();
     const QString scenarioError = emptyPreparingRuntime
-        ? QString() : validateNetworkScenario(checkpoint.scenario, false);
+        ? QString() : validateNetworkScenario(checkpoint.scenario, false,
+                                               checkpoint.protocolProfile
+                                                   == QLatin1String("vmf-demo-v2"));
     if (!scenarioError.isEmpty()) {
         if (error) *error = QStringLiteral("检查点场景无效: %1").arg(scenarioError);
         return false;
     }
     cancelAiPlanRequest();
+    m_engine.setDemoSpeedProfile(
+        checkpoint.protocolProfile == QLatin1String("vmf-demo-v2"));
     const bool scenarioRestored = emptyPreparingRuntime
         ? m_engine.setRemoteScenario(checkpoint.scenario)
         : m_engine.setScenario(checkpoint.scenario);
@@ -7195,7 +7229,8 @@ bool GameServer::restoreRoomState(QString* error) {
         m_runInitialScenario = migratedInitialScenario;
         qWarning() << "已将旧版战位容量迁移为 GIS 初始单位";
     }
-    const QString initialScenarioError = validateNetworkScenario(m_runInitialScenario);
+    const QString initialScenarioError = validateNetworkScenario(
+        m_runInitialScenario, true, isDemoProfile(checkpoint.protocolProfile));
     if (!initialScenarioError.isEmpty()) {
         if (error) *error = QStringLiteral("检查点初始场景无效: %1").arg(initialScenarioError);
         return false;
@@ -7751,6 +7786,7 @@ void GameServer::syncAuthoritativeSeats() {
 
 bool GameServer::applyDeployedScenario(QString* error) {
     if (error) error->clear();
+    m_engine.setDemoSpeedProfile(isDemoProfile(m_protocolProfile));
     QJsonArray units = m_authoritativeRoom.runtimeUnits();
     if (isSingleSideVmfProfile(m_protocolProfile)) {
         QSet<QString> runtimeIds;
@@ -7810,7 +7846,8 @@ bool GameServer::applyDeployedScenario(QString* error) {
             unit.commRange = kVmfUnlimitedCommunicationRangeM;
         }
     }
-    const QString validationError = validateNetworkScenario(scenario, false);
+    const QString validationError = validateNetworkScenario(
+        scenario, false, isDemoProfile(m_protocolProfile));
     if (!validationError.isEmpty()) {
         if (error) *error = validationError;
         return false;
@@ -7842,6 +7879,7 @@ void GameServer::appendStrictProfileTargets(Scenario* scenario) const {
 bool GameServer::applyProtocolProfilePolicy(QString* error) {
     if (error) error->clear();
     const bool singleSide = isSingleSideVmfProfile(m_protocolProfile);
+    m_engine.setDemoSpeedProfile(isDemoProfile(m_protocolProfile));
     const AuthoritativeRoom::Result policy = m_authoritativeRoom.setVmfSingleSide(singleSide);
     if (!policy.ok) {
         if (error) *error = QStringLiteral("联网协议 profile 房间策略同步失败: %1")
@@ -7987,6 +8025,7 @@ bool GameServer::restoreRoomStateBackup(const RoomStateBackup& backup, QString* 
         return false;
     }
     m_roomMode = m_authoritativeRoom.mode();
+    m_engine.setDemoSpeedProfile(isDemoProfile(backup.protocolProfile));
     if (!m_engine.setRemoteScenario(backup.scenario)) {
         if (error) *error = m_engine.lastError();
         return false;
@@ -8138,7 +8177,7 @@ bool GameServer::resetRoomIfEmpty(QString* error) {
     for (auto it = m_clients.cbegin(); it != m_clients.cend(); ++it) {
         if (it->authenticated && !it->observer && it->roomId == m_roomId) return true;
     }
-    if (isSingleSideVmfProfile(m_protocolProfile)
+    if (m_protocolProfile == QLatin1String("vmf-guided-strike-v1")
         && (m_phase == QLatin1String("running") || m_phase == QLatin1String("paused"))) {
         return true;
     }
@@ -8150,6 +8189,43 @@ bool GameServer::resetRoomIfEmpty(QString* error) {
     reportRoomStatus(QStringLiteral("preparing"), QStringLiteral("房间已无在线成员，已重置"));
     broadcastSnapshots(true);
     return true;
+}
+
+void GameServer::resetDemoIfOnlyBlueUnits() {
+    if (!isDemoProfile(m_protocolProfile)
+        || (m_phase != QLatin1String("running")
+            && m_phase != QLatin1String("paused")
+            && m_phase != QLatin1String("finished"))) {
+        return;
+    }
+
+    bool hasLiveRed = false;
+    bool hasLiveBlue = false;
+    for (const QString& id : m_engine.unitIds()) {
+        const UnitBase* unit = m_engine.unit(id);
+        if (!unit || !unit->alive()) continue;
+        if (unit->side() == Side::Red) hasLiveRed = true;
+        else hasLiveBlue = true;
+    }
+    if (hasLiveRed || !hasLiveBlue) return;
+
+    const QString operationId = QStringLiteral("internal-demo-blue-only-%1")
+        .arg(m_authoritativeRoom.revision());
+    QString error;
+    if (!resetAuthoritativeRuntime(operationId, &error)) {
+        audit(QStringLiteral("persistence"),
+              QJsonObject{{QStringLiteral("event"), QStringLiteral("demoBlueOnlyResetFailed")},
+                          {QStringLiteral("message"), error}});
+        return;
+    }
+    m_phase = QStringLiteral("preparing");
+    m_roomStatus = QStringLiteral("preparing");
+    reportRoomStatus(QStringLiteral("preparing"), QStringLiteral("红方单位已全部退出，演示房间已重置"),
+                     QStringLiteral("blue"));
+    broadcastEvent(QJsonObject{{QStringLiteral("kind"), QStringLiteral("demoReset")},
+                               {QStringLiteral("reason"), QStringLiteral("blueOnly")},
+                               {QStringLiteral("message"), QStringLiteral("蓝方固定目标仍在，已结束本轮并重置房间")} });
+    broadcastSnapshots(true);
 }
 
 void GameServer::clearRoomOperationTracking() {
@@ -8618,7 +8694,8 @@ QList<AiSeatState> GameServer::aiSeatStates() const {
         state.collisionHalfHeight = unit->collisionHalfHeight();
         state.speed = unit->speed();
         state.commandedSpeed = unit->baseSpeed();
-        state.cruiseSpeed = cruiseSpeeds.value(seat.unitId, state.commandedSpeed);
+        state.cruiseSpeed = isDemoProfile(m_protocolProfile)
+            ? state.commandedSpeed : cruiseSpeeds.value(seat.unitId, state.commandedSpeed);
         state.maxCommandedSpeed = unit->maxCommandedSpeed();
         state.hpRatio = unit->maxHp() > 0.0
             ? std::clamp(unit->hp() / unit->maxHp(), 0.0, 1.0) : 0.0;

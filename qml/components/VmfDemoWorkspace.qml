@@ -139,6 +139,33 @@ Item {
         }
         return ({})
     }
+    function routeEndpointsReady() {
+        var attack = root.demoSeatUnit("red_attack_1")
+        var target = root.taskTarget()
+        var attackPoint = root.pointOf(attack)
+        var targetPoint = root.pointOf(target)
+        return Boolean(attackPoint && targetPoint
+                       && isFinite(attackPoint.x) && isFinite(attackPoint.y)
+                       && isFinite(targetPoint.x) && isFinite(targetPoint.y)
+                       && String(target.targetId || target.id || "").length > 0)
+    }
+    function reportUnitId() {
+        var seats = controller ? (controller.onlineSeats || []) : []
+        for (var i = 0; i < seats.length; ++i) {
+            var seat = seats[i] || ({})
+            if (seat.side === "red" && seat.seatType === "recon" && seat.unitId)
+                return String(seat.unitId)
+        }
+        return "red_recon_1"
+    }
+    function mapHighlightedUnitIds() {
+        var result = (root.highlightedUnitIds || []).slice()
+        if (String(root.demoState.expectedAction || "") === "reportTarget") {
+            var reconId = root.reportUnitId()
+            if (reconId && result.indexOf(reconId) < 0) result.unshift(reconId)
+        }
+        return result
+    }
     function reportList() {
         var source = demoState.reports || []
         var result = []
@@ -605,15 +632,21 @@ Item {
                     enabled: !root.requestPending
                     onClicked: root.beginTargetPick()
                 }
-                Button {
+                TonalButton {
                     id: routeButton
                     visible: root.demoState.expectedAction === "planRoute"
                     Layout.fillWidth: true
                     enabled: !root.requestPending && root.controller.currentSeatType === "commander"
+                        && root.routeEndpointsReady()
                     text: "打开航路编辑器"
+                    iconName: "edit"
+                    base: root.accent
+                    textColor: root.page
+                    Accessible.name: "打开攻击航路编辑器"
                     onClicked: {
                         var attack = root.demoSeatUnit("red_attack_1")
-                        routeDialog.begin(attack, root.taskTarget())
+                        if (!routeDialog.begin(attack, root.taskTarget()))
+                            root.notice = "攻击机或目标位置尚未同步"
                     }
                 }
             }
@@ -803,6 +836,7 @@ Item {
     VmfDemoRouteDialog {
         id: routeDialog
         controller: root.controller
+        mapCanvas: root.mapCanvas
         ink: root.ink; muted: root.dim; panel: root.raised; line: root.line; accent: root.accent
         onRouteAccepted: function(points) { root.submitRoute(points) }
     }
