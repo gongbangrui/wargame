@@ -246,7 +246,10 @@ Dialog {
                 Layout.fillWidth: true
                 Layout.fillHeight: root.compact
                 Layout.preferredWidth: root.compact ? -1 : 230
+                Layout.minimumWidth: root.compact ? 0 : 210
+                Layout.maximumWidth: root.compact ? -1 : 260
                 Layout.minimumHeight: root.compact ? 132 : 0
+                Layout.alignment: root.compact ? Qt.AlignLeft : Qt.AlignTop
                 color: root.page
                 border.color: root.line
                 radius: 6
@@ -354,10 +357,18 @@ Dialog {
                 id: mapPanel
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                // GridLayout does not infer a useful width for a Rectangle
+                // whose content is an anchored item. Without an explicit
+                // column size the map column collapses to zero and its
+                // overlays are projected at the far-right edge of the dialog.
+                Layout.preferredWidth: root.compact ? -1 : 640
+                Layout.minimumWidth: root.compact ? 0 : 420
                 Layout.minimumHeight: root.compact ? 230 : 0
                 color: "#0a1418"
                 border.color: root.line
                 radius: 6
+                onWidthChanged: if (root.visible) root.scheduleFit()
+                onHeightChanged: if (root.visible) root.scheduleFit()
 
                 MapCanvas {
                     id: routeMap
